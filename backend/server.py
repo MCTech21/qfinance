@@ -72,7 +72,25 @@ class MovementStatus(str, Enum):
     AUTHORIZED = "authorized"
     REJECTED = "rejected"
 
+class PartidaGrupo(str, Enum):
+    OBRA = "obra"
+    GYA = "gya"
+    FINANCIEROS = "financieros"
+    INGRESOS = "ingresos"
+
 # ========================= MODELS =========================
+
+# Empresa (Multiempresa)
+class EmpresaBase(BaseModel):
+    nombre: str
+    is_active: bool = True
+
+class Empresa(EmpresaBase):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
 class UserBase(BaseModel):
     email: EmailStr
     name: str
@@ -99,6 +117,7 @@ class TokenResponse(BaseModel):
 class ProjectBase(BaseModel):
     code: str
     name: str
+    empresa_id: str  # OBLIGATORIO - vincula a empresa
     description: Optional[str] = None
     is_active: bool = True
 
@@ -107,6 +126,20 @@ class Project(ProjectBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+# Catálogo de Partidas Presupuestales (source of truth)
+class CatalogoPartidaBase(BaseModel):
+    codigo: str  # 100, 101, 200, etc.
+    nombre: str
+    grupo: PartidaGrupo
+    is_active: bool = True
+
+class CatalogoPartida(CatalogoPartidaBase):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+# Legacy Partida - mantener para compatibilidad, pero usar catalogo_partidas
 class PartidaBase(BaseModel):
     code: str
     name: str
