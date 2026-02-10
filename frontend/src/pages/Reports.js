@@ -13,13 +13,14 @@ const Reports = () => {
   const { api } = useAuth();
   const [dashboardData, setDashboardData] = useState(null);
   const [partidaDetail, setPartidaDetail] = useState(null);
+  const [empresas, setEmpresas] = useState([]);
   const [projects, setProjects] = useState([]);
-  const [partidas, setPartidas] = useState([]);
+  const [filteredProjects, setFilteredProjects] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedPartida, setSelectedPartida] = useState(null);
   
-  // Default to 2025 for demo data
   const [filters, setFilters] = useState({
+    empresa_id: "all",
     project_id: "all",
     year: 2025,
     month: 1
@@ -35,20 +36,21 @@ const Reports = () => {
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [dashboardRes, projectsRes, partidasRes] = await Promise.all([
+      const [dashboardRes, empresasRes, projectsRes] = await Promise.all([
         api().get("/reports/dashboard", {
           params: {
+            empresa_id: filters.empresa_id !== "all" ? filters.empresa_id : undefined,
             project_id: filters.project_id !== "all" ? filters.project_id : undefined,
             year: filters.year,
             month: filters.month
           }
         }),
-        api().get("/projects"),
-        api().get("/partidas")
+        api().get("/empresas"),
+        api().get("/projects")
       ]);
       setDashboardData(dashboardRes.data);
+      setEmpresas(empresasRes.data);
       setProjects(projectsRes.data);
-      setPartidas(partidasRes.data);
     } catch (error) {
       toast.error("Error al cargar datos");
     } finally {
@@ -60,17 +62,27 @@ const Reports = () => {
     fetchData();
   }, [fetchData]);
 
-  const fetchPartidaDetail = async (partidaId) => {
+  // Filter projects by empresa
+  useEffect(() => {
+    if (filters.empresa_id === "all") {
+      setFilteredProjects(projects);
+    } else {
+      setFilteredProjects(projects.filter(p => p.empresa_id === filters.empresa_id));
+    }
+  }, [filters.empresa_id, projects]);
+
+  const fetchPartidaDetail = async (partidaCodigo) => {
     try {
-      const response = await api().get(`/reports/partida-detail/${partidaId}`, {
+      const response = await api().get(`/reports/partida-detail/${partidaCodigo}`, {
         params: {
+          empresa_id: filters.empresa_id !== "all" ? filters.empresa_id : undefined,
           project_id: filters.project_id !== "all" ? filters.project_id : undefined,
           year: filters.year,
           month: filters.month
         }
       });
       setPartidaDetail(response.data);
-      setSelectedPartida(partidaId);
+      setSelectedPartida(partidaCodigo);
     } catch (error) {
       toast.error("Error al cargar detalle");
     }
@@ -97,7 +109,6 @@ const Reports = () => {
     
     const monthName = months.find(m => m.value === filters.month)?.label || filters.month;
     
-    // Summary sheet
     const summaryData = [
       ["REPORTE FINANCIERO", "", "", ""],
       ["Período:", `${monthName} ${filters.year}`, "", ""],
@@ -108,11 +119,12 @@ const Reports = () => {
       ["Variación", formatCurrency(dashboardData.totals.variation), "", ""],
       ["% Avance", `${dashboardData.totals.percentage.toFixed(1)}%`, "", ""],
       ["", "", "", ""],
-      ["DETALLE POR PARTIDA", "", "", "", "", "", ""],
-      ["Código", "Partida", "Presupuesto", "Ejecutado", "Variación", "% Avance", "Estado"],
+      ["DETALLE POR PARTIDA", "", "", "", "", "", "", ""],
+      ["Código", "Partida", "Grupo", "Presupuesto", "Ejecutado", "Variación", "% Avance", "Estado"],
       ...dashboardData.by_partida.map(p => [
-        p.partida_code,
-        p.partida_name,
+        p.partida_codigo,
+        p.partida_nombre,
+        p.partida_grupo,
         p.budget,
         p.real,
         p.variation,
@@ -123,12 +135,7 @@ const Reports = () => {
     
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet(summaryData);
-    
-    // Column widths
-    ws['!cols'] = [
-      { wch: 15 }, { wch: 30 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 12 }, { wch: 10 }
-    ];
-    
+    ws['!cols'] = [{ wch: 12 }, { wch: 35 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 12 }, { wch: 10 }];
     XLSX.utils.book_append_sheet(wb, ws, "Reporte");
     
     const excelBuffer = XLSX.write(wb, { bookType: "xlsx", type: "array" });
@@ -145,7 +152,9 @@ const Reports = () => {
     
     const detailData = [
       ["DETALLE DE PARTIDA", "", "", "", "", ""],
-      ["Partida:", partidaDetail.partida.name, "", "", "", ""],
+      ["Código:", partidaDetail.partida.codigo, "", "", "", ""],
+      ["Partida:", partidaDetail.partida.nombre, "", "", "", ""],
+      ["Grupo:", partidaDetail.partida.grupo, "", "", "", ""],
       ["Período:", `${monthName} ${filters.year}`, "", "", "", ""],
       ["Presupuesto:", formatCurrency(partidaDetail.budget), "", "", "", ""],
       ["Ejecutado:", formatCurrency(partidaDetail.real), "", "", "", ""],
@@ -166,16 +175,12 @@ const Reports = () => {
     
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet(detailData);
-    
-    ws['!cols'] = [
-      { wch: 15 }, { wch: 25 }, { wch: 25 }, { wch: 15 }, { wch: 15 }, { wch: 30 }
-    ];
-    
+    ws['!cols'] = [{ wch: 15 }, { wch: 25 }, { wch: 25 }, { wch: 15 }, { wch: 15 }, { wch: 30 }];
     XLSX.utils.book_append_sheet(wb, ws, "Detalle");
     
     const excelBuffer = XLSX.write(wb, { bookType: "xlsx", type: "array" });
     const data = new Blob([excelBuffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-    saveAs(data, `Detalle_${partidaDetail.partida.code}_${monthName}_${filters.year}.xlsx`);
+    saveAs(data, `Detalle_${partidaDetail.partida.codigo}_${monthName}_${filters.year}.xlsx`);
     
     toast.success("Detalle exportado");
   };
@@ -198,16 +203,33 @@ const Reports = () => {
       <Card>
         <CardContent className="pt-6">
           <div className="flex flex-wrap gap-4">
+            {/* Empresa filter */}
+            <Select
+              value={filters.empresa_id}
+              onValueChange={(v) => setFilters(prev => ({ ...prev, empresa_id: v, project_id: "all" }))}
+            >
+              <SelectTrigger className="w-[200px]" data-testid="filter-empresa">
+                <SelectValue placeholder="Empresa" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Todas las empresas</SelectItem>
+                {empresas.map(e => (
+                  <SelectItem key={e.id} value={e.id}>{e.nombre}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            
+            {/* Project filter */}
             <Select
               value={filters.project_id}
               onValueChange={(v) => setFilters(prev => ({ ...prev, project_id: v }))}
             >
-              <SelectTrigger className="w-[200px]" data-testid="filter-project">
+              <SelectTrigger className="w-[180px]" data-testid="filter-project">
                 <SelectValue placeholder="Proyecto" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">Todos los proyectos</SelectItem>
-                {projects.map(p => (
+                <SelectItem value="all">Todos</SelectItem>
+                {filteredProjects.map(p => (
                   <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
                 ))}
               </SelectContent>
@@ -291,6 +313,7 @@ const Reports = () => {
                     <tr>
                       <th>Código</th>
                       <th>Partida</th>
+                      <th>Grupo</th>
                       <th className="text-right">Presupuesto</th>
                       <th className="text-right">Ejecutado</th>
                       <th className="text-right">Variación</th>
@@ -302,11 +325,12 @@ const Reports = () => {
                   <tbody>
                     {dashboardData.by_partida.map(partida => (
                       <tr 
-                        key={partida.partida_id}
-                        className={selectedPartida === partida.partida_id ? "bg-primary/5" : ""}
+                        key={partida.partida_codigo}
+                        className={selectedPartida === partida.partida_codigo ? "bg-primary/5" : ""}
                       >
-                        <td className="font-mono text-sm">{partida.partida_code}</td>
-                        <td>{partida.partida_name}</td>
+                        <td className="font-mono text-sm">{partida.partida_codigo}</td>
+                        <td>{partida.partida_nombre}</td>
+                        <td className="text-xs text-muted-foreground uppercase">{partida.partida_grupo}</td>
                         <td className="mono-number">{formatCurrency(partida.budget)}</td>
                         <td className="mono-number">{formatCurrency(partida.real)}</td>
                         <td className={`mono-number ${partida.variation >= 0 ? "text-emerald-400" : "text-red-400"}`}>
@@ -320,8 +344,8 @@ const Reports = () => {
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => fetchPartidaDetail(partida.partida_id)}
-                            data-testid={`view-detail-${partida.partida_code}`}
+                            onClick={() => fetchPartidaDetail(partida.partida_codigo)}
+                            data-testid={`view-detail-${partida.partida_codigo}`}
                           >
                             Ver detalle
                           </Button>
@@ -340,7 +364,7 @@ const Reports = () => {
               <CardHeader className="flex flex-row items-center justify-between">
                 <CardTitle className="font-heading text-lg flex items-center gap-2">
                   <FileSpreadsheet className="h-5 w-5" />
-                  Movimientos: {partidaDetail.partida.name}
+                  Movimientos: {partidaDetail.partida.codigo} - {partidaDetail.partida.nombre}
                 </CardTitle>
                 <Button variant="outline" size="sm" onClick={exportDetailToExcel} data-testid="export-detail-btn">
                   <Download className="h-4 w-4 mr-2" />
@@ -348,7 +372,11 @@ const Reports = () => {
                 </Button>
               </CardHeader>
               <CardContent>
-                <div className="mb-4 p-4 bg-muted rounded-lg grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="mb-4 p-4 bg-muted rounded-lg grid grid-cols-2 md:grid-cols-5 gap-4">
+                  <div>
+                    <span className="text-xs text-muted-foreground">Grupo</span>
+                    <p className="font-medium text-sm uppercase">{partidaDetail.partida.grupo}</p>
+                  </div>
                   <div>
                     <span className="text-xs text-muted-foreground">Presupuesto</span>
                     <p className="font-mono font-bold">{formatCurrency(partidaDetail.budget)}</p>
