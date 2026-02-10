@@ -652,14 +652,13 @@ async def get_movements(
 
 @api_router.post("/movements")
 async def create_movement(movement_data: MovementCreate, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+    # VALIDACIÓN BLOQUEANTE: partida debe existir en catálogo
+    await validate_partida(movement_data.partida_codigo)
+    
     # Validate references
     project = await db.projects.find_one({"id": movement_data.project_id}, {"_id": 0})
     if not project:
         raise HTTPException(status_code=400, detail="Proyecto no válido")
-    
-    partida = await db.partidas.find_one({"id": movement_data.partida_id}, {"_id": 0})
-    if not partida:
-        raise HTTPException(status_code=400, detail="Partida no válida")
     
     provider = await db.providers.find_one({"id": movement_data.provider_id}, {"_id": 0})
     if not provider:
@@ -689,7 +688,7 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     
     budget = await db.budgets.find_one({
         "project_id": movement_data.project_id,
-        "partida_id": movement_data.partida_id,
+        "partida_codigo": movement_data.partida_codigo,
         "year": year,
         "month": month
     }, {"_id": 0})
@@ -697,7 +696,7 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     # Calculate current spent
     current_movements = await db.movements.find({
         "project_id": movement_data.project_id,
-        "partida_id": movement_data.partida_id,
+        "partida_codigo": movement_data.partida_codigo,
         "status": {"$in": ["normal", "authorized"]}
     }, {"_id": 0}).to_list(5000)
     
@@ -722,7 +721,7 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     
     movement = Movement(
         project_id=movement_data.project_id,
-        partida_id=movement_data.partida_id,
+        partida_codigo=movement_data.partida_codigo,
         provider_id=movement_data.provider_id,
         date=parsed_date,
         currency=movement_data.currency,
