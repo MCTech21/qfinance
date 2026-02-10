@@ -377,26 +377,85 @@ async def update_user(user_id: str, updates: dict, current_user: dict = Depends(
     await log_audit(current_user, "UPDATE", "users", user_id, {"before": old_doc, "after": update_data})
     return {"message": "Usuario actualizado"}
 
-# ========================= PROJECT ROUTES =========================
-@api_router.get("/projects", response_model=List[Project])
-async def get_projects(current_user: dict = Depends(get_current_user)):
-    projects = await db.projects.find({}, {"_id": 0}).to_list(1000)
-    return [Project(**p) for p in projects]
+# ========================= EMPRESA ROUTES =========================
+@api_router.get("/empresas")
+async def get_empresas(current_user: dict = Depends(get_current_user)):
+    empresas = await db.empresas.find({}, {"_id": 0}).to_list(1000)
+    return empresas
 
-@api_router.post("/projects", response_model=Project)
+@api_router.post("/empresas")
+async def create_empresa(empresa_data: EmpresaBase, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+    existing = await db.empresas.find_one({"nombre": empresa_data.nombre}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail="Empresa ya existe")
+    
+    empresa = Empresa(**empresa_data.model_dump())
+    doc = empresa.model_dump()
+    doc['created_at'] = doc['created_at'].isoformat()
+    doc['updated_at'] = doc['updated_at'].isoformat()
+    await db.empresas.insert_one(doc)
+    await log_audit(current_user, "CREATE", "empresas", empresa.id, {"data": doc})
+    return doc
+
+# ========================= CATALOGO PARTIDAS ROUTES =========================
+@api_router.get("/catalogo-partidas")
+async def get_catalogo_partidas(current_user: dict = Depends(get_current_user)):
+    partidas = await db.catalogo_partidas.find({}, {"_id": 0}).sort("codigo", 1).to_list(1000)
+    return partidas
+
+@api_router.get("/catalogo-partidas/{codigo}")
+async def get_catalogo_partida(codigo: str, current_user: dict = Depends(get_current_user)):
+    partida = await db.catalogo_partidas.find_one({"codigo": codigo}, {"_id": 0})
+    if not partida:
+        raise HTTPException(status_code=404, detail=f"Partida {codigo} no encontrada en catálogo")
+    return partida
+
+# Helper: validar partida existe y está activa
+async def validate_partida(codigo: str) -> dict:
+    partida = await db.catalogo_partidas.find_one({"codigo": codigo}, {"_id": 0})
+    if not partida:
+        raise HTTPException(status_code=400, detail=f"Partida '{codigo}' no existe en el catálogo")
+    if not partida.get('is_active', True):
+        raise HTTPException(status_code=400, detail=f"Partida '{codigo}' está inactiva")
+    return partida
+
+# ========================= PROJECT ROUTES =========================
+@api_router.get("/projects")
+async def get_projects(
+    empresa_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    query = {}
+    if empresa_id:
+        query["empresa_id"] = empresa_id
+    projects = await db.projects.find(query, {"_id": 0}).to_list(1000)
+    return projects
+
+@api_router.post("/projects")
 async def create_project(project_data: ProjectBase, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+    # Validar que empresa existe
+    empresa = await db.empresas.find_one({"id": project_data.empresa_id}, {"_id": 0})
+    if not empresa:
+        raise HTTPException(status_code=400, detail="Empresa no encontrada")
+    
     project = Project(**project_data.model_dump())
     doc = project.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
     await db.projects.insert_one(doc)
     await log_audit(current_user, "CREATE", "projects", project.id, {"data": doc})
-    return project
+    return doc
 
-@api_router.put("/projects/{project_id}", response_model=Project)
+@api_router.put("/projects/{project_id}")
 async def update_project(project_id: str, updates: ProjectBase, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
     old_doc = await db.projects.find_one({"id": project_id}, {"_id": 0})
     if not old_doc:
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+    
+    # Validar empresa si se cambia
+    if updates.empresa_id:
+        empresa = await db.empresas.find_one({"id": updates.empresa_id}, {"_id": 0})
+        if not empresa:
+            raise HTTPException(status_code=400, detail="Empresa no encontrada")
     
     update_data = updates.model_dump()
     await db.projects.update_one({"id": project_id}, {"$set": update_data})
