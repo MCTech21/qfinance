@@ -31,9 +31,20 @@ TIMEZONE = pytz.timezone('America/Tijuana')
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
-app = FastAPI(title="FinRealty API", version="1.0.0")
+app = FastAPI(
+    title="FinRealty API",
+    version="1.0.0",
+    description="Sistema de Control Financiero para Desarrollos Inmobiliarios",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
+
+# Root health check
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "FinRealty API", "version": "1.0.0"}
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
