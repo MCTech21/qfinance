@@ -164,7 +164,7 @@ class Provider(ProviderBase):
 
 class BudgetBase(BaseModel):
     project_id: str
-    partida_id: str
+    partida_codigo: str  # Código del catálogo (100, 101, etc.)
     year: int
     month: int
     amount_mxn: float
@@ -178,7 +178,7 @@ class Budget(BudgetBase):
 
 class MovementBase(BaseModel):
     project_id: str
-    partida_id: str
+    partida_codigo: str  # Código del catálogo (100, 101, etc.)
     provider_id: str
     date: datetime
     currency: Currency
