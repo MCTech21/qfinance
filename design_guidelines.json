@@ -1,0 +1,144 @@
+{
+  "identity": {
+    "name": "E1",
+    "role": "Creative Designer (Anti-AI)",
+    "mission": "Create a high-performance, dark-mode financial operating system that feels like a Bloomberg Terminal met a Swiss design studio.",
+    "principles": [
+      "Fusion: Finance Precision + Swiss Grid",
+      "Emotion: Trust, Control, Clarity",
+      "Content: Data is the hero. Numbers must be monospaced and aligned.",
+      "Contrast: High contrast for readability in dark mode. Neon accents for status."
+    ]
+  },
+  "theme_strategy": {
+    "mode": "dark",
+    "rationale": "Financial professionals prefer dark mode for long sessions and data contrast. It conveys sophistication and reduces eye strain.",
+    "palette_archetype": "ARCHETYPE 2: THE PERFORMANCE PRO (Financial Obsidian)",
+    "colors": {
+      "background": {
+        "default": "#09090B",
+        "paper": "#18181B",
+        "subtle": "#27272A"
+      },
+      "foreground": {
+        "default": "#FAFAFA",
+        "muted": "#A1A1AA",
+        "inverse": "#09090B"
+      },
+      "primary": {
+        "default": "#3B82F6",
+        "foreground": "#FFFFFF",
+        "hover": "#2563EB"
+      },
+      "status": {
+        "success": "#10B981",
+        "warning": "#F59E0B",
+        "danger": "#EF4444",
+        "info": "#3B82F6"
+      },
+      "border": {
+        "default": "#27272A",
+        "active": "#3F3F46"
+      }
+    }
+  },
+  "typography": {
+    "font_family": {
+      "headings": "Barlow Condensed, sans-serif",
+      "body": "Manrope, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "weights": {
+      "headings": "700",
+      "body": "400",
+      "bold": "600"
+    },
+    "usage_rules": [
+      "Headings: Uppercase or Sentence Case, tight tracking (-0.02em).",
+      "Numbers: ALWAYS use 'font-mono' for tabular data, prices, and percentages.",
+      "Labels: Uppercase, small text-xs, tracking-widest, text-muted-foreground."
+    ]
+  },
+  "layout_system": {
+    "grid_mode": "MODE B: High Density Grid",
+    "spacing": {
+      "container_padding": "p-6 md:p-8",
+      "gap": "gap-4 md:gap-6",
+      "internal_padding": "p-4"
+    },
+    "containers": {
+      "card_style": "Flat background (bg-card), 1px border (border-border), no shadow. Sharp or minimal rounded corners (rounded-md).",
+      "dashboard_grid": "grid grid-cols-1 md:grid-cols-4 gap-4",
+      "table_container": "border rounded-md overflow-hidden bg-card"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4 py-2 rounded-md font-medium transition-colors",
+      "secondary": "bg-secondary text-secondary-foreground hover:bg-secondary/80 h-9 px-4 py-2 rounded-md font-medium",
+      "ghost": "hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 rounded-md"
+    },
+    "inputs": {
+      "default": "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+    },
+    "cards": {
+      "metric": "p-6 flex flex-col gap-2 bg-card border border-border rounded-lg",
+      "chart": "p-6 bg-card border border-border rounded-lg h-[300px] or h-[400px]"
+    },
+    "traffic_light": {
+      "description": "Visual indicator for budget status. MUST be prominent.",
+      "logic": {
+        "green": "Value <= 90%",
+        "yellow": "90% < Value <= 100%",
+        "red": "Value > 100%"
+      },
+      "styles": {
+        "green": "bg-emerald-500/15 text-emerald-500 border-emerald-500/20",
+        "yellow": "bg-amber-500/15 text-amber-500 border-amber-500/20",
+        "red": "bg-red-500/15 text-red-500 border-red-500/20"
+      },
+      "implementation": "Badge component with solid dot indicator + text label."
+    }
+  },
+  "visual_enhancers": {
+    "gradients": "NO full-screen gradients. Use subtle 'spotlight' gradients on hover or active states.",
+    "borders": "Use 'Grid Borders' style: 1px solid border-border. Add 'border-r' and 'border-b' to grid items to create a technical look.",
+    "glassmorphism": "Use sparingly. Only for sticky headers or modal overlays. backdrop-blur-md bg-background/80.",
+    "motion": "Micro-interactions only. Hover states on table rows. Smooth transitions on charts."
+  },
+  "assets": {
+    "icons": "Lucide React (default). Use thin strokes (1.5px) for elegance.",
+    "images": {
+      "projects": [
+        "https://images.unsplash.com/photo-1651666176094-2bef8442db12?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzF8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBvZmZpY2UlMjBidWlsZGluZyUyMGFyY2hpdGVjdHVyZXxlbnwwfHx8fDE3NzA3NjQ0Mzl8MA&ixlib=rb-4.1.0&q=85",
+        "https://images.unsplash.com/photo-1651331189447-704ac3643c07?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzF8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBvZmZpY2UlMjBidWlsZGluZyUyMGFyY2hpdGVjdHVyZXxlbnwwfHx8fDE3NzA3NjQ0Mzl8MA&ixlib=rb-4.1.0&q=85",
+        "https://images.unsplash.com/photo-1674981208693-de5a9c4c4f44?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzF8MHwxfHNlYXJjaHwzfHxtb2Rlcm4lMjBvZmZpY2UlMjBidWlsZGluZyUyMGFyY2hpdGVjdHVyZXxlbnwwfHx8fDE3NzA3NjQ0Mzl8MA&ixlib=rb-4.1.0&q=85"
+      ],
+      "avatars": [
+        "https://images.unsplash.com/photo-1742119897876-67e9935ac375?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjh8MHwxfHNlYXJjaHwxfHxjb3Jwb3JhdGUlMjB0ZWFtJTIwcG9ydHJhaXQlMjBwcm9mZXNzaW9uYWx8ZW58MHx8fHwxNzcwNzY0NDQ0fDA&ixlib=rb-4.1.0&q=85",
+        "https://images.unsplash.com/photo-1758518731468-98e90ffd7430?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjh8MHwxfHNlYXJjaHwyfHxjb3Jwb3JhdGUlMjB0ZWFtJTIwcG9ydHJhaXQlMjBwcm9mZXNzaW9uYWx8ZW58MHx8fHwxNzcwNzY0NDQ0fDA&ixlib=rb-4.1.0&q=85"
+      ]
+    }
+  },
+  "instructions_to_main_agent": [
+    "1. INSTALL FONTS: Add '@fontsource/barlow-condensed', '@fontsource/manrope', and '@fontsource/jetbrains-mono' to package.json.",
+    "2. CONFIGURE TAILWIND: Update tailwind.config.js to use these fonts and the 'Financial Obsidian' color palette.",
+    "3. CREATE LAYOUT: Build a 'DashboardLayout' component with a sidebar navigation and a top bar. Use the 'Grid Borders' style for the sidebar.",
+    "4. BUILD COMPONENTS: Create 'BudgetStatus' (traffic light), 'KPICard' (with trend indicator), and 'ProjectCard'.",
+    "5. DATA VISUALIZATION: Use Recharts for the 'Budget vs Real' charts. Style them with the neon palette (Emerald/Amber/Red).",
+    "6. TABLES: Use Shadcn Table component but customize it: dense padding (p-2), mono font for numbers, right-align numeric columns.",
+    "7. AUTH: Create a clean, professional Login page with a split layout (Image on left, Form on right). Use one of the building images.",
+    "8. MOCK DATA: Create a robust 'mockData.js' file with realistic financial data (Projects, Budget Items, Movements) to populate the dashboard."
+  ],
+  "universal_guidelines": [
+    "Dark colors look good when used independently without gradients. DO NOT use dark colors as gradients.",
+    "Don't make generic centered layouts. Use grids.",
+    "Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects sparingly (only for overlays).",
+    "Every interaction needs micro-animations.",
+    "Use 2-3x more spacing than feels comfortable.",
+    "Subtle grain textures or noise overlays can add a premium feel.",
+    "NEVER use AI assistant Emoji characters.",
+    "All interactive elements MUST include data-testid."
+  ]
+}
