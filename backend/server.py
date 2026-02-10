@@ -567,10 +567,13 @@ async def create_budget(budget_data: BudgetBase, current_user: dict = Depends(re
     doc['created_at'] = doc['created_at'].isoformat()
     await db.budgets.insert_one(doc)
     await log_audit(current_user, "CREATE", "budgets", budget.id, {"data": doc})
-    return budget
+    return doc
 
-@api_router.put("/budgets/{budget_id}", response_model=Budget)
+@api_router.put("/budgets/{budget_id}")
 async def update_budget(budget_id: str, updates: BudgetBase, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+    # VALIDACIÓN BLOQUEANTE: partida debe existir
+    await validate_partida(updates.partida_codigo)
+    
     old_doc = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
     if not old_doc:
         raise HTTPException(status_code=404, detail="Presupuesto no encontrado")
@@ -580,7 +583,7 @@ async def update_budget(budget_id: str, updates: BudgetBase, current_user: dict 
     await log_audit(current_user, "UPDATE", "budgets", budget_id, {"before": old_doc, "after": update_data})
     
     updated = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
-    return Budget(**updated)
+    return updated
 
 @api_router.delete("/budgets/{budget_id}")
 async def delete_budget(budget_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
@@ -615,7 +618,7 @@ async def create_exchange_rate(date_str: str, rate: float, current_user: dict = 
 @api_router.get("/movements")
 async def get_movements(
     project_id: Optional[str] = None,
-    partida_id: Optional[str] = None,
+    partida_codigo: Optional[str] = None,
     provider_id: Optional[str] = None,
     year: Optional[int] = None,
     month: Optional[int] = None,
@@ -625,8 +628,8 @@ async def get_movements(
     query = {}
     if project_id:
         query["project_id"] = project_id
-    if partida_id:
-        query["partida_id"] = partida_id
+    if partida_codigo:
+        query["partida_codigo"] = partida_codigo
     if provider_id:
         query["provider_id"] = provider_id
     if status:
