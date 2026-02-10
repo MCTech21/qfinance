@@ -1258,44 +1258,75 @@ async def seed_demo_data():
     finanzas_user = await db.users.find_one({"role": "finanzas"}, {"_id": 0})
     finanzas_id = finanzas_user['id']
     
-    movement_templates = [
-        {"partida": "CONST", "provider": "CEMEX", "desc": "Concreto premezclado"},
-        {"partida": "CONST", "provider": "ACERO", "desc": "Varilla corrugada"},
-        {"partida": "ELEC", "provider": "ELECT", "desc": "Material eléctrico"},
-        {"partida": "HIDRA", "provider": "HIDRO", "desc": "Tubería y conexiones"},
-        {"partida": "ACAB", "provider": "PINTA", "desc": "Pintura vinílica"},
-        {"partida": "EQUIP", "provider": "ELEVA", "desc": "Anticipo elevadores"},
-    ]
+    # Partida-Provider mapping for realistic data
+    partida_providers = {
+        "CONST": ["CEMEX", "ACERO", "CIMEN", "TRANS"],
+        "ELEC": ["ELECT", "FERRET"],
+        "HIDRA": ["HIDRO", "PLOME"],
+        "ACAB": ["PINTA", "VIDRI", "CARPI", "IMPER"],
+        "ADMIN": ["SEGUV", "TRANS"],
+        "EQUIP": ["ELEVA", "AIRAC"],
+    }
     
-    for proj_code, proj_id in project_ids.items():
-        for month in range(1, 4):  # First 3 months with movements
-            for _ in range(random.randint(5, 10)):
-                template = random.choice(movement_templates)
-                day = random.randint(1, 28)
-                
-                currency = random.choice(["MXN", "MXN", "MXN", "USD"])
-                amount = random.randint(50000, 500000) if currency == "MXN" else random.randint(3000, 30000)
-                
-                date_str = f"2025-{month:02d}-{day:02d}"
-                exchange_rate = 1.0 if currency == "MXN" else 17.0 + (month * 0.1)
-                
-                movement = Movement(
-                    project_id=proj_id,
-                    partida_id=partida_ids[template["partida"]],
-                    provider_id=provider_ids[template["provider"]],
-                    date=parse_date_tijuana(date_str),
-                    currency=Currency(currency),
-                    amount_original=amount,
-                    exchange_rate=exchange_rate,
-                    amount_mxn=amount * exchange_rate,
-                    reference=f"FAC-{random.randint(1000, 9999)}",
-                    description=template["desc"],
-                    created_by=finanzas_id
-                )
-                doc = movement.model_dump()
-                doc['date'] = doc['date'].isoformat()
-                doc['created_at'] = doc['created_at'].isoformat()
-                await db.movements.insert_one(doc)
+    partida_descriptions = {
+        "CONST": ["Concreto premezclado", "Varilla corrugada", "Cimbra", "Block", "Grava y arena"],
+        "ELEC": ["Material eléctrico", "Cable THW", "Centro de carga", "Luminarias"],
+        "HIDRA": ["Tubería PVC", "Conexiones", "Tinaco", "Bomba de agua"],
+        "ACAB": ["Pintura vinílica", "Piso cerámico", "Puertas", "Ventanas", "Impermeabilizante"],
+        "ADMIN": ["Permisos municipales", "Honorarios", "Vigilancia", "Licencias"],
+        "EQUIP": ["Anticipo elevadores", "Aire acondicionado", "Sistema contra incendio"],
+    }
+    
+    # Generate exactly 200 movements across 2 projects, 3 months
+    movements_count = 0
+    target_movements = 200
+    project_list = list(project_ids.items())
+    partida_list = list(partida_ids.items())
+    
+    while movements_count < target_movements:
+        proj_code, proj_id = random.choice(project_list)
+        part_code, part_id = random.choice(partida_list)
+        month = random.choice([1, 2, 3])
+        day = random.randint(1, 28)
+        
+        # Select provider from partida mapping
+        available_providers = partida_providers.get(part_code, provider_codes[:3])
+        prov_code = random.choice(available_providers)
+        prov_id = provider_ids.get(prov_code, provider_ids[provider_codes[0]])
+        
+        # Currency: 80% MXN, 20% USD
+        currency = "USD" if random.random() < 0.2 else "MXN"
+        
+        if currency == "MXN":
+            amount = random.randint(30000, 400000)
+            exchange_rate = 1.0
+        else:
+            amount = random.randint(2000, 25000)
+            date_str = f"2025-{month:02d}-{day:02d}"
+            rate_doc = await db.exchange_rates.find_one({"date": date_str}, {"_id": 0})
+            exchange_rate = rate_doc['rate'] if rate_doc else 17.5
+        
+        date_str = f"2025-{month:02d}-{day:02d}"
+        description = random.choice(partida_descriptions.get(part_code, ["Material"]))
+        
+        movement = Movement(
+            project_id=proj_id,
+            partida_id=part_id,
+            provider_id=prov_id,
+            date=parse_date_tijuana(date_str),
+            currency=Currency(currency),
+            amount_original=amount,
+            exchange_rate=exchange_rate,
+            amount_mxn=amount * exchange_rate,
+            reference=f"FAC-{random.randint(1000, 9999)}-{movements_count}",
+            description=description,
+            created_by=finanzas_id
+        )
+        doc = movement.model_dump()
+        doc['date'] = doc['date'].isoformat()
+        doc['created_at'] = doc['created_at'].isoformat()
+        await db.movements.insert_one(doc)
+        movements_count += 1
     
     # Create some pending authorizations
     for i in range(3):
@@ -1307,6 +1338,19 @@ async def seed_demo_data():
         doc = auth.model_dump()
         doc['created_at'] = doc['created_at'].isoformat()
         await db.authorizations.insert_one(doc)
+    
+    # Log seed action
+    await db.audit_logs.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": "system",
+        "user_email": "system@finrealty.com",
+        "user_role": "system",
+        "action": "SEED",
+        "entity": "database",
+        "entity_id": "all",
+        "changes": {"projects": 2, "partidas": 6, "providers": 15, "movements": 200, "months": 3},
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
     
     # Set default config
     configs = [
@@ -1322,7 +1366,17 @@ async def seed_demo_data():
         doc['updated_at'] = doc['updated_at'].isoformat()
         await db.config.insert_one(doc)
     
-    return {"message": "Demo data seeded successfully", "users": len(users_data), "projects": len(projects_data)}
+    return {
+        "message": "Demo data seeded successfully",
+        "data": {
+            "users": 4,
+            "projects": 2,
+            "partidas": 6,
+            "providers": 15,
+            "movements": 200,
+            "months": "Enero, Febrero, Marzo 2025"
+        }
+    }
 
 # Include router
 app.include_router(api_router)
