@@ -8,14 +8,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "../components/ui/dialog";
 import { Badge } from "../components/ui/badge";
-import TrafficLight from "../components/TrafficLight";
 import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle } from "lucide-react";
 
 const Movements = () => {
   const { api } = useAuth();
   const [movements, setMovements] = useState([]);
+  const [empresas, setEmpresas] = useState([]);
   const [projects, setProjects] = useState([]);
-  const [partidas, setPartidas] = useState([]);
+  const [filteredProjects, setFilteredProjects] = useState([]);
+  const [catalogoPartidas, setCatalogoPartidas] = useState([]);
   const [providers, setProviders] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -25,15 +26,16 @@ const Movements = () => {
   const fileInputRef = useRef(null);
   
   const [filters, setFilters] = useState({
+    empresa_id: "all",
     project_id: "all",
-    partida_id: "all",
-    year: new Date().getFullYear(),
-    month: new Date().getMonth() + 1
+    partida_codigo: "all",
+    year: 2025,
+    month: 1
   });
   
   const [formData, setFormData] = useState({
     project_id: "",
-    partida_id: "",
+    partida_codigo: "",
     provider_id: "",
     date: new Date().toISOString().split("T")[0],
     currency: "MXN",
@@ -60,22 +62,24 @@ const Movements = () => {
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [movementsRes, projectsRes, partidasRes, providersRes] = await Promise.all([
+      const [movementsRes, empresasRes, projectsRes, partidasRes, providersRes] = await Promise.all([
         api().get("/movements", {
           params: {
             project_id: filters.project_id !== "all" ? filters.project_id : undefined,
-            partida_id: filters.partida_id !== "all" ? filters.partida_id : undefined,
+            partida_codigo: filters.partida_codigo !== "all" ? filters.partida_codigo : undefined,
             year: filters.year,
             month: filters.month
           }
         }),
+        api().get("/empresas"),
         api().get("/projects"),
-        api().get("/partidas"),
+        api().get("/catalogo-partidas"),
         api().get("/providers")
       ]);
       setMovements(movementsRes.data);
+      setEmpresas(empresasRes.data);
       setProjects(projectsRes.data);
-      setPartidas(partidasRes.data);
+      setCatalogoPartidas(partidasRes.data);
       setProviders(providersRes.data);
     } catch (error) {
       toast.error("Error al cargar movimientos");
@@ -87,6 +91,15 @@ const Movements = () => {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // Filter projects by empresa
+  useEffect(() => {
+    if (filters.empresa_id === "all") {
+      setFilteredProjects(projects);
+    } else {
+      setFilteredProjects(projects.filter(p => p.empresa_id === filters.empresa_id));
+    }
+  }, [filters.empresa_id, projects]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -153,7 +166,7 @@ const Movements = () => {
   const resetForm = () => {
     setFormData({
       project_id: "",
-      partida_id: "",
+      partida_codigo: "",
       provider_id: "",
       date: new Date().toISOString().split("T")[0],
       currency: "MXN",
@@ -181,7 +194,10 @@ const Movements = () => {
   };
 
   const getProjectName = (id) => projects.find(p => p.id === id)?.code || "N/A";
-  const getPartidaCode = (id) => partidas.find(p => p.id === id)?.code || "N/A";
+  const getPartidaNombre = (codigo) => {
+    const p = catalogoPartidas.find(p => p.codigo === codigo);
+    return p ? `${p.codigo} - ${p.nombre}` : codigo;
+  };
   const getProviderName = (id) => providers.find(p => p.id === id)?.name || "N/A";
 
   return (
@@ -212,7 +228,9 @@ const Movements = () => {
                   </code>
                   <ul className="text-xs text-muted-foreground mt-2 space-y-1">
                     <li>• fecha: YYYY-MM-DD</li>
-                    <li>• proyecto/partida/proveedor: usar códigos del catálogo</li>
+                    <li>• proyecto: código del proyecto (ej: TORRE-A)</li>
+                    <li>• partida: código del catálogo (100-404)</li>
+                    <li>• proveedor: código del proveedor</li>
                     <li>• moneda: MXN o USD</li>
                     <li>• monto: número positivo</li>
                   </ul>
@@ -271,7 +289,7 @@ const Movements = () => {
                 Nuevo Movimiento
               </Button>
             </DialogTrigger>
-            <DialogContent>
+            <DialogContent className="max-w-xl">
               <DialogHeader>
                 <DialogTitle>Nuevo Movimiento</DialogTitle>
               </DialogHeader>
@@ -294,17 +312,19 @@ const Movements = () => {
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label>Partida</Label>
+                    <Label>Partida (Catálogo)</Label>
                     <Select
-                      value={formData.partida_id}
-                      onValueChange={(v) => setFormData(prev => ({ ...prev, partida_id: v }))}
+                      value={formData.partida_codigo}
+                      onValueChange={(v) => setFormData(prev => ({ ...prev, partida_codigo: v }))}
                     >
                       <SelectTrigger data-testid="movement-partida-select">
-                        <SelectValue placeholder="Seleccionar..." />
+                        <SelectValue placeholder="Seleccionar partida..." />
                       </SelectTrigger>
-                      <SelectContent>
-                        {partidas.map(p => (
-                          <SelectItem key={p.id} value={p.id}>{p.code} - {p.name}</SelectItem>
+                      <SelectContent className="max-h-[300px]">
+                        {catalogoPartidas.map(p => (
+                          <SelectItem key={p.codigo} value={p.codigo}>
+                            {p.codigo} - {p.nombre}
+                          </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
@@ -427,6 +447,21 @@ const Movements = () => {
         <CardContent className="pt-6">
           <div className="flex flex-wrap gap-4">
             <Select
+              value={filters.empresa_id}
+              onValueChange={(v) => setFilters(prev => ({ ...prev, empresa_id: v, project_id: "all" }))}
+            >
+              <SelectTrigger className="w-[180px]" data-testid="filter-empresa">
+                <SelectValue placeholder="Empresa" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Todas</SelectItem>
+                {empresas.map(e => (
+                  <SelectItem key={e.id} value={e.id}>{e.nombre}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            
+            <Select
               value={filters.project_id}
               onValueChange={(v) => setFilters(prev => ({ ...prev, project_id: v }))}
             >
@@ -435,23 +470,23 @@ const Movements = () => {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">Todos</SelectItem>
-                {projects.map(p => (
+                {filteredProjects.map(p => (
                   <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
             
             <Select
-              value={filters.partida_id}
-              onValueChange={(v) => setFilters(prev => ({ ...prev, partida_id: v }))}
+              value={filters.partida_codigo}
+              onValueChange={(v) => setFilters(prev => ({ ...prev, partida_codigo: v }))}
             >
-              <SelectTrigger className="w-[180px]">
+              <SelectTrigger className="w-[220px]">
                 <SelectValue placeholder="Partida" />
               </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Todas</SelectItem>
-                {partidas.map(p => (
-                  <SelectItem key={p.id} value={p.id}>{p.code} - {p.name}</SelectItem>
+              <SelectContent className="max-h-[300px]">
+                <SelectItem value="all">Todas las partidas</SelectItem>
+                {catalogoPartidas.map(p => (
+                  <SelectItem key={p.codigo} value={p.codigo}>{p.codigo} - {p.nombre}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -524,7 +559,7 @@ const Movements = () => {
                     <tr key={mov.id}>
                       <td className="font-mono text-sm">{formatDate(mov.date)}</td>
                       <td>{getProjectName(mov.project_id)}</td>
-                      <td>{getPartidaCode(mov.partida_id)}</td>
+                      <td className="text-sm">{mov.partida_codigo}</td>
                       <td className="max-w-[150px] truncate">{getProviderName(mov.provider_id)}</td>
                       <td className="font-mono text-sm">{mov.reference}</td>
                       <td className="mono-number">
