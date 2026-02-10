@@ -1373,29 +1373,69 @@ async def seed_demo_data():
         doc = project.model_dump()
         doc['created_at'] = doc['created_at'].isoformat()
         await db.projects.insert_one(doc)
+    
+    # Create 15 providers
+    providers_data = [
+        {"code": "CEMEX", "name": "CEMEX SA de CV", "rfc": "CEM123456ABC"},
+        {"code": "ELECT", "name": "Electrificaciones del Norte", "rfc": "EDN789012DEF"},
+        {"code": "HIDRO", "name": "Hidro Instalaciones Plus", "rfc": "HIP345678GHI"},
+        {"code": "ACERO", "name": "Aceros y Derivados SA", "rfc": "AYD901234JKL"},
+        {"code": "PINTA", "name": "Pinturas Premium MX", "rfc": "PPM567890MNO"},
+        {"code": "ELEVA", "name": "Elevadores Schindler", "rfc": "ESM234567PQR"},
+        {"code": "VIDRI", "name": "Vidriería Industrial", "rfc": "VID456789STU"},
+        {"code": "CARPI", "name": "Carpintería Fina", "rfc": "CAR789012VWX"},
+        {"code": "PLOME", "name": "Plomería Total", "rfc": "PLO012345YZA"},
+        {"code": "AIRAC", "name": "Aires Acondicionados Pro", "rfc": "AAP345678BCD"},
+        {"code": "SEGUV", "name": "Seguridad Vigilancia", "rfc": "SEG678901EFG"},
+        {"code": "TRANS", "name": "Transportes Pesados MX", "rfc": "TRA901234HIJ"},
+        {"code": "FERRET", "name": "Ferretería Industrial", "rfc": "FER234567KLM"},
+        {"code": "IMPER", "name": "Impermeabilizantes PRO", "rfc": "IMP567890NOP"},
+        {"code": "CIMEN", "name": "Cimentaciones Especiales", "rfc": "CIM890123QRS"},
+    ]
+    
+    provider_ids = {}
+    provider_codes = []
+    for p in providers_data:
+        provider = Provider(**p)
+        provider_ids[p['code']] = provider.id
+        provider_codes.append(p['code'])
+        doc = provider.model_dump()
+        doc['created_at'] = doc['created_at'].isoformat()
+        await db.providers.insert_one(doc)
+    
+    # Create exchange rates for 3 months (Jan, Feb, Mar 2025)
+    for month in [1, 2, 3]:
+        for day in range(1, 29):
+            date_str = f"2025-{month:02d}-{day:02d}"
+            rate = 17.0 + (month * 0.15) + (day * 0.01) + random.uniform(-0.2, 0.2)
+            exchange = ExchangeRate(date=date_str, rate=round(rate, 4))
+            doc = exchange.model_dump()
+            doc['created_at'] = doc['created_at'].isoformat()
             await db.exchange_rates.insert_one(doc)
     
-    # Create budgets for 2 projects x 6 partidas x 3 months
+    # Create budgets using partida_codigo from catalogo
     admin_user = await db.users.find_one({"role": "admin"}, {"_id": 0})
     admin_id = admin_user['id']
     
+    # Budget amounts by partida codigo (using some key partidas)
+    budget_partidas = ["104", "105", "106", "201", "205", "302"]  # EDIFICACION, URBANIZACION, etc.
     budget_amounts = {
-        "CONST": 2500000,
-        "ELEC": 600000,
-        "HIDRA": 400000,
-        "ACAB": 750000,
-        "ADMIN": 250000,
-        "EQUIP": 1000000,
+        "104": 3000000,  # EDIFICACION
+        "105": 800000,   # URBANIZACION
+        "106": 500000,   # INDIRECTOS
+        "201": 400000,   # PUBLICIDAD
+        "205": 300000,   # GASTOS ADMIN
+        "302": 200000,   # INTERESES
     }
     
     for proj_code, proj_id in project_ids.items():
         multiplier = 1.2 if proj_code == "TORRE-A" else 0.9
-        for part_code, part_id in partida_ids.items():
+        for partida_codigo in budget_partidas:
             for month in [1, 2, 3]:
-                amount = budget_amounts[part_code] * multiplier
+                amount = budget_amounts.get(partida_codigo, 500000) * multiplier
                 budget = Budget(
                     project_id=proj_id,
-                    partida_id=part_id,
+                    partida_codigo=partida_codigo,
                     year=2025,
                     month=month,
                     amount_mxn=amount,
@@ -1409,38 +1449,37 @@ async def seed_demo_data():
     finanzas_id = finanzas_user['id']
     
     # Partida-Provider mapping for realistic data
-    partida_providers = {
-        "CONST": ["CEMEX", "ACERO", "CIMEN", "TRANS"],
-        "ELEC": ["ELECT", "FERRET"],
-        "HIDRA": ["HIDRO", "PLOME"],
-        "ACAB": ["PINTA", "VIDRI", "CARPI", "IMPER"],
-        "ADMIN": ["SEGUV", "TRANS"],
-        "EQUIP": ["ELEVA", "AIRAC"],
+    partida_provider_map = {
+        "104": ["CEMEX", "ACERO", "CIMEN"],  # EDIFICACION
+        "105": ["CEMEX", "TRANS", "FERRET"],  # URBANIZACION
+        "106": ["SEGUV", "TRANS"],  # INDIRECTOS
+        "201": ["PINTA", "VIDRI"],  # PUBLICIDAD
+        "205": ["SEGUV", "TRANS"],  # GASTOS ADMIN
+        "302": ["ELECT", "HIDRO"],  # INTERESES (placeholder)
     }
     
-    partida_descriptions = {
-        "CONST": ["Concreto premezclado", "Varilla corrugada", "Cimbra", "Block", "Grava y arena"],
-        "ELEC": ["Material eléctrico", "Cable THW", "Centro de carga", "Luminarias"],
-        "HIDRA": ["Tubería PVC", "Conexiones", "Tinaco", "Bomba de agua"],
-        "ACAB": ["Pintura vinílica", "Piso cerámico", "Puertas", "Ventanas", "Impermeabilizante"],
-        "ADMIN": ["Permisos municipales", "Honorarios", "Vigilancia", "Licencias"],
-        "EQUIP": ["Anticipo elevadores", "Aire acondicionado", "Sistema contra incendio"],
+    partida_descriptions_map = {
+        "104": ["Concreto premezclado", "Varilla corrugada", "Cimbra", "Block"],
+        "105": ["Urbanización", "Pavimento", "Banquetas"],
+        "106": ["Indirectos de obra", "Supervisión"],
+        "201": ["Publicidad", "Promoción", "Materiales"],
+        "205": ["Honorarios", "Licencias", "Permisos"],
+        "302": ["Intereses bancarios", "Comisiones"],
     }
     
-    # Generate exactly 200 movements across 2 projects, 3 months
+    # Generate exactly 200 movements
     movements_count = 0
     target_movements = 200
     project_list = list(project_ids.items())
-    partida_list = list(partida_ids.items())
     
     while movements_count < target_movements:
         proj_code, proj_id = random.choice(project_list)
-        part_code, part_id = random.choice(partida_list)
+        partida_codigo = random.choice(budget_partidas)
         month = random.choice([1, 2, 3])
         day = random.randint(1, 28)
         
-        # Select provider from partida mapping
-        available_providers = partida_providers.get(part_code, provider_codes[:3])
+        # Select provider
+        available_providers = partida_provider_map.get(partida_codigo, provider_codes[:3])
         prov_code = random.choice(available_providers)
         prov_id = provider_ids.get(prov_code, provider_ids[provider_codes[0]])
         
