@@ -11,9 +11,11 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 const Dashboard = () => {
   const { api } = useAuth();
   const [dashboardData, setDashboardData] = useState(null);
+  const [empresas, setEmpresas] = useState([]);
   const [projects, setProjects] = useState([]);
+  const [filteredProjects, setFilteredProjects] = useState([]);
+  const [selectedEmpresa, setSelectedEmpresa] = useState("all");
   const [selectedProject, setSelectedProject] = useState("all");
-  // Default to 2025 for demo data
   const [selectedYear, setSelectedYear] = useState(2025);
   const [selectedMonth, setSelectedMonth] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
@@ -28,28 +30,41 @@ const Dashboard = () => {
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [dashboardRes, projectsRes] = await Promise.all([
+      const [dashboardRes, empresasRes, projectsRes] = await Promise.all([
         api().get("/reports/dashboard", {
           params: {
+            empresa_id: selectedEmpresa !== "all" ? selectedEmpresa : undefined,
             project_id: selectedProject !== "all" ? selectedProject : undefined,
             year: selectedYear,
             month: selectedMonth
           }
         }),
+        api().get("/empresas"),
         api().get("/projects")
       ]);
       setDashboardData(dashboardRes.data);
+      setEmpresas(empresasRes.data);
       setProjects(projectsRes.data);
     } catch (error) {
       toast.error("Error al cargar datos del dashboard");
     } finally {
       setIsLoading(false);
     }
-  }, [api, selectedProject, selectedYear, selectedMonth]);
+  }, [api, selectedEmpresa, selectedProject, selectedYear, selectedMonth]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // Filter projects when empresa changes
+  useEffect(() => {
+    if (selectedEmpresa === "all") {
+      setFilteredProjects(projects);
+    } else {
+      setFilteredProjects(projects.filter(p => p.empresa_id === selectedEmpresa));
+    }
+    setSelectedProject("all");
+  }, [selectedEmpresa, projects]);
 
   const formatCurrency = (num) => {
     return new Intl.NumberFormat("es-MX", {
@@ -89,13 +104,27 @@ const Dashboard = () => {
         </div>
         
         <div className="flex flex-wrap gap-3">
+          {/* Empresa filter */}
+          <Select value={selectedEmpresa} onValueChange={setSelectedEmpresa}>
+            <SelectTrigger className="w-[200px]" data-testid="filter-empresa">
+              <SelectValue placeholder="Empresa" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todas las empresas</SelectItem>
+              {empresas.map((e) => (
+                <SelectItem key={e.id} value={e.id}>{e.nombre}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          
+          {/* Project filter (filtered by empresa) */}
           <Select value={selectedProject} onValueChange={setSelectedProject}>
             <SelectTrigger className="w-[180px]" data-testid="filter-project">
               <SelectValue placeholder="Proyecto" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Todos los proyectos</SelectItem>
-              {projects.map((p) => (
+              {filteredProjects.map((p) => (
                 <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
               ))}
             </SelectContent>
@@ -183,9 +212,9 @@ const Dashboard = () => {
                   <CartesianGrid strokeDasharray="3 3" stroke="hsl(240 5% 17%)" />
                   <XAxis type="number" domain={[0, 120]} stroke="hsl(240 5% 65%)" fontSize={12} />
                   <YAxis 
-                    dataKey="partida_code" 
+                    dataKey="partida_codigo" 
                     type="category" 
-                    width={60} 
+                    width={50} 
                     stroke="hsl(240 5% 65%)" 
                     fontSize={11}
                   />
@@ -196,7 +225,10 @@ const Dashboard = () => {
                       borderRadius: "8px"
                     }}
                     formatter={(value) => [`${value.toFixed(1)}%`, "Avance"]}
-                    labelFormatter={(label) => `Partida: ${label}`}
+                    labelFormatter={(label) => {
+                      const p = dashboardData?.by_partida?.find(x => x.partida_codigo === label);
+                      return `${label} - ${p?.partida_nombre || ''}`;
+                    }}
                   />
                   <Bar dataKey="percentage" radius={[0, 4, 4, 0]}>
                     {(dashboardData?.by_partida || []).map((entry, index) => (
@@ -263,6 +295,7 @@ const Dashboard = () => {
                 <tr>
                   <th>Código</th>
                   <th>Partida</th>
+                  <th>Grupo</th>
                   <th className="text-right">Presupuesto</th>
                   <th className="text-right">Ejecutado</th>
                   <th className="text-right">Variación</th>
@@ -272,9 +305,10 @@ const Dashboard = () => {
               </thead>
               <tbody>
                 {(dashboardData?.by_partida || []).map((partida) => (
-                  <tr key={partida.partida_id}>
-                    <td className="font-mono text-sm">{partida.partida_code}</td>
-                    <td>{partida.partida_name}</td>
+                  <tr key={partida.partida_codigo}>
+                    <td className="font-mono text-sm">{partida.partida_codigo}</td>
+                    <td>{partida.partida_nombre}</td>
+                    <td className="text-xs text-muted-foreground uppercase">{partida.partida_grupo}</td>
                     <td className="mono-number">{formatCurrency(partida.budget)}</td>
                     <td className="mono-number">{formatCurrency(partida.real)}</td>
                     <td className={`mono-number ${partida.variation >= 0 ? "text-emerald-400" : "text-red-400"}`}>
