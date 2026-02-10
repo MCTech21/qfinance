@@ -521,10 +521,10 @@ async def update_provider(provider_id: str, updates: ProviderBase, current_user:
     return Provider(**updated)
 
 # ========================= BUDGET ROUTES =========================
-@api_router.get("/budgets", response_model=List[Budget])
+@api_router.get("/budgets")
 async def get_budgets(
     project_id: Optional[str] = None,
-    partida_id: Optional[str] = None,
+    partida_codigo: Optional[str] = None,
     year: Optional[int] = None,
     month: Optional[int] = None,
     current_user: dict = Depends(get_current_user)
@@ -532,21 +532,29 @@ async def get_budgets(
     query = {}
     if project_id:
         query["project_id"] = project_id
-    if partida_id:
-        query["partida_id"] = partida_id
+    if partida_codigo:
+        query["partida_codigo"] = partida_codigo
     if year:
         query["year"] = year
     if month:
         query["month"] = month
     
     budgets = await db.budgets.find(query, {"_id": 0}).to_list(1000)
-    return [Budget(**b) for b in budgets]
+    return budgets
 
-@api_router.post("/budgets", response_model=Budget)
+@api_router.post("/budgets")
 async def create_budget(budget_data: BudgetBase, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+    # VALIDACIÓN BLOQUEANTE: partida debe existir en catálogo
+    await validate_partida(budget_data.partida_codigo)
+    
+    # Validar proyecto existe
+    project = await db.projects.find_one({"id": budget_data.project_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=400, detail="Proyecto no encontrado")
+    
     existing = await db.budgets.find_one({
         "project_id": budget_data.project_id,
-        "partida_id": budget_data.partida_id,
+        "partida_codigo": budget_data.partida_codigo,
         "year": budget_data.year,
         "month": budget_data.month
     }, {"_id": 0})
