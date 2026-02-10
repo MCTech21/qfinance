@@ -1123,9 +1123,10 @@ async def get_dashboard(
         "movements_count": len(movements)
     }
 
-@api_router.get("/reports/partida-detail/{partida_id}")
+@api_router.get("/reports/partida-detail/{partida_codigo}")
 async def get_partida_detail(
-    partida_id: str,
+    partida_codigo: str,
+    empresa_id: Optional[str] = None,
     project_id: Optional[str] = None,
     year: Optional[int] = None,
     month: Optional[int] = None,
@@ -1135,15 +1136,23 @@ async def get_partida_detail(
     year = year or now.year
     month = month or now.month
     
-    # Get partida
-    partida = await db.partidas.find_one({"id": partida_id}, {"_id": 0})
+    # Get partida from catalogo
+    partida = await db.catalogo_partidas.find_one({"codigo": partida_codigo}, {"_id": 0})
     if not partida:
-        raise HTTPException(status_code=404, detail="Partida no encontrada")
+        raise HTTPException(status_code=404, detail=f"Partida {partida_codigo} no encontrada en catálogo")
+    
+    # Get projects filtered by empresa
+    project_ids = None
+    if empresa_id:
+        projects = await db.projects.find({"empresa_id": empresa_id}, {"_id": 0}).to_list(1000)
+        project_ids = [p['id'] for p in projects]
     
     # Get budgets
-    budget_query = {"partida_id": partida_id, "year": year, "month": month}
+    budget_query = {"partida_codigo": partida_codigo, "year": year, "month": month}
     if project_id:
         budget_query["project_id"] = project_id
+    elif project_ids:
+        budget_query["project_id"] = {"$in": project_ids}
     
     budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(1000)
     total_budget = sum(b['amount_mxn'] for b in budgets)
