@@ -992,6 +992,7 @@ async def resolve_authorization(
 # ========================= REPORTS ROUTES =========================
 @api_router.get("/reports/dashboard")
 async def get_dashboard(
+    empresa_id: Optional[str] = None,
     project_id: Optional[str] = None,
     year: Optional[int] = None,
     month: Optional[int] = None,
@@ -1001,10 +1002,19 @@ async def get_dashboard(
     year = year or now.year
     month = month or now.month
     
+    # Get projects filtered by empresa
+    project_query = {}
+    if empresa_id:
+        project_query["empresa_id"] = empresa_id
+    all_projects = await db.projects.find(project_query, {"_id": 0}).to_list(1000)
+    project_ids = [p['id'] for p in all_projects]
+    
     # Get budgets
     budget_query = {"year": year, "month": month}
     if project_id:
         budget_query["project_id"] = project_id
+    elif empresa_id:
+        budget_query["project_id"] = {"$in": project_ids}
     
     budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(1000)
     
@@ -1012,6 +1022,8 @@ async def get_dashboard(
     movement_query = {"status": {"$in": ["normal", "authorized"]}}
     if project_id:
         movement_query["project_id"] = project_id
+    elif empresa_id:
+        movement_query["project_id"] = {"$in": project_ids}
     
     all_movements = await db.movements.find(movement_query, {"_id": 0}).to_list(5000)
     
@@ -1027,32 +1039,32 @@ async def get_dashboard(
     variation = total_budget - total_real
     percentage = (total_real / total_budget * 100) if total_budget > 0 else 0
     
-    # By partida
+    # By partida (using partida_codigo from catalogo)
     partidas_data = {}
     for b in budgets:
-        key = b['partida_id']
+        key = b.get('partida_codigo', b.get('partida_id', 'N/A'))
         if key not in partidas_data:
             partidas_data[key] = {"budget": 0, "real": 0}
         partidas_data[key]["budget"] += b['amount_mxn']
     
     for m in movements:
-        key = m['partida_id']
+        key = m.get('partida_codigo', m.get('partida_id', 'N/A'))
         if key not in partidas_data:
             partidas_data[key] = {"budget": 0, "real": 0}
         partidas_data[key]["real"] += m['amount_mxn']
     
-    # Get partida names
-    partida_docs = await db.partidas.find({}, {"_id": 0}).to_list(1000)
-    partida_map = {p['id']: p for p in partida_docs}
+    # Get partida names from catalogo
+    partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(1000)
+    partida_map = {p['codigo']: p for p in partida_docs}
     
     partidas_summary = []
-    for partida_id, data in partidas_data.items():
+    for partida_codigo, data in partidas_data.items():
         pct = (data['real'] / data['budget'] * 100) if data['budget'] > 0 else (100 if data['real'] > 0 else 0)
-        partida_info = partida_map.get(partida_id, {})
+        partida_info = partida_map.get(partida_codigo, {})
         partidas_summary.append({
-            "partida_id": partida_id,
-            "partida_code": partida_info.get('code', 'N/A'),
-            "partida_name": partida_info.get('name', 'N/A'),
+            "partida_codigo": partida_codigo,
+            "partida_nombre": partida_info.get('nombre', partida_codigo),
+            "partida_grupo": partida_info.get('grupo', 'N/A'),
             "budget": data['budget'],
             "real": data['real'],
             "variation": data['budget'] - data['real'],
