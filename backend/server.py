@@ -1496,11 +1496,11 @@ async def seed_demo_data():
             exchange_rate = rate_doc['rate'] if rate_doc else 17.5
         
         date_str = f"2025-{month:02d}-{day:02d}"
-        description = random.choice(partida_descriptions.get(part_code, ["Material"]))
+        description = random.choice(partida_descriptions_map.get(partida_codigo, ["Material"]))
         
         movement = Movement(
             project_id=proj_id,
-            partida_id=part_id,
+            partida_codigo=partida_codigo,
             provider_id=prov_id,
             date=parse_date_tijuana(date_str),
             currency=Currency(currency),
@@ -1521,7 +1521,7 @@ async def seed_demo_data():
     for i in range(3):
         auth = Authorization(
             movement_id=None,
-            reason=f"Exceso de presupuesto en partida CONST - {100 + i * 5}%",
+            reason=f"Exceso de presupuesto en partida 104 EDIFICACION - {100 + i * 5}%",
             requested_by=finanzas_id
         )
         doc = auth.model_dump()
@@ -1537,7 +1537,7 @@ async def seed_demo_data():
         "action": "SEED",
         "entity": "database",
         "entity_id": "all",
-        "changes": {"projects": 2, "partidas": 6, "providers": 15, "movements": 200, "months": 3},
+        "changes": {"empresas": 3, "projects": 2, "catalogo_partidas": 29, "providers": 15, "movements": 200, "months": 3},
         "timestamp": datetime.now(timezone.utc).isoformat()
     })
     
