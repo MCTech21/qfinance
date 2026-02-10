@@ -1158,9 +1158,11 @@ async def get_partida_detail(
     total_budget = sum(b['amount_mxn'] for b in budgets)
     
     # Get movements
-    movement_query = {"partida_id": partida_id, "status": {"$in": ["normal", "authorized"]}}
+    movement_query = {"partida_codigo": partida_codigo, "status": {"$in": ["normal", "authorized"]}}
     if project_id:
         movement_query["project_id"] = project_id
+    elif project_ids:
+        movement_query["project_id"] = {"$in": project_ids}
     
     all_movements = await db.movements.find(movement_query, {"_id": 0}).to_list(5000)
     movements = [
@@ -1187,7 +1189,7 @@ async def get_partida_detail(
         m['project_name'] = proj.get('name', 'N/A')
     
     return {
-        "partida": partida,
+        "partida": {"codigo": partida['codigo'], "nombre": partida['nombre'], "grupo": partida['grupo']},
         "year": year,
         "month": month,
         "budget": total_budget,
