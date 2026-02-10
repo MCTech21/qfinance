@@ -1249,12 +1249,14 @@ async def update_config(key: str, value: Any, current_user: dict = Depends(requi
 # ========================= DEMO DATA =========================
 @api_router.post("/seed-demo-data")
 async def seed_demo_data():
-    """Seed demo data: 2 proyectos, 6 partidas, 15 proveedores, 200 movimientos, 3 meses"""
+    """Seed demo data: 3 empresas, 2 proyectos por empresa, catálogo real de partidas"""
     import random
     
     # Clear existing data
     await db.users.delete_many({})
+    await db.empresas.delete_many({})
     await db.projects.delete_many({})
+    await db.catalogo_partidas.delete_many({})
     await db.partidas.delete_many({})
     await db.providers.delete_many({})
     await db.budgets.delete_many({})
@@ -1279,75 +1281,98 @@ async def seed_demo_data():
         doc['created_at'] = doc['created_at'].isoformat()
         await db.users.insert_one(doc)
     
-    # Create 2 projects
+    # Create 3 empresas
+    empresas_data = [
+        {"nombre": "Altitud 3"},
+        {"nombre": "Terraviva Desarrollos"},
+        {"nombre": "Grupo Q"},
+    ]
+    
+    empresa_ids = {}
+    for e in empresas_data:
+        empresa = Empresa(**e)
+        empresa_ids[e['nombre']] = empresa.id
+        doc = empresa.model_dump()
+        doc['created_at'] = doc['created_at'].isoformat()
+        doc['updated_at'] = doc['updated_at'].isoformat()
+        await db.empresas.insert_one(doc)
+    
+    # Create CATÁLOGO REAL DE PARTIDAS (source of truth)
+    def get_grupo(codigo):
+        cod = int(codigo)
+        if 100 <= cod <= 199:
+            return "obra"
+        elif 200 <= cod <= 299:
+            return "gya"
+        elif 300 <= cod <= 399:
+            return "financieros"
+        elif 400 <= cod <= 499:
+            return "ingresos"
+        return "obra"
+    
+    catalogo_partidas_data = [
+        {"codigo": "100", "nombre": "COSTO DIRECTO"},
+        {"codigo": "101", "nombre": "TERRENO"},
+        {"codigo": "102", "nombre": "PROYECTOS"},
+        {"codigo": "103", "nombre": "LICENCIAS Y PERMISOS"},
+        {"codigo": "104", "nombre": "EDIFICACION"},
+        {"codigo": "105", "nombre": "URBANIZACION"},
+        {"codigo": "106", "nombre": "INDIRECTOS DE OBRA"},
+        {"codigo": "107", "nombre": "ACCESO"},
+        {"codigo": "108", "nombre": "AMENIDADES"},
+        {"codigo": "109", "nombre": "OFICINAS DE VENTAS"},
+        {"codigo": "110", "nombre": "IMPREVISTOS"},
+        {"codigo": "111", "nombre": "OBRAS CABECERAS"},
+        {"codigo": "200", "nombre": "GASTOS DE VENTA Y ADMINISTRACION"},
+        {"codigo": "201", "nombre": "GASTOS DE PUBLICIDAD Y PROMOCION"},
+        {"codigo": "202", "nombre": "ACONDICIONAMIENTO DE MUESTRAS"},
+        {"codigo": "203", "nombre": "COMISIONES SOBRE VENTA"},
+        {"codigo": "204", "nombre": "DIRECCION DE PROYECTO"},
+        {"codigo": "205", "nombre": "GASTOS ADMINISTRATIVOS"},
+        {"codigo": "206", "nombre": "DOCUM TECNICA"},
+        {"codigo": "207", "nombre": "GARANTIAS Y POSTVENTA"},
+        {"codigo": "300", "nombre": "GASTOS FINANCIEROS"},
+        {"codigo": "301", "nombre": "COMISIONES BANCARIAS"},
+        {"codigo": "302", "nombre": "INTERESES"},
+        {"codigo": "303", "nombre": "AMORTIZACION"},
+        {"codigo": "400", "nombre": "INGRESOS"},
+        {"codigo": "401", "nombre": "PRESTAMOS SOCIOS"},
+        {"codigo": "402", "nombre": "ENGANCHES"},
+        {"codigo": "403", "nombre": "INDIVIDUALIZACION"},
+        {"codigo": "404", "nombre": "CREDITOS"},
+    ]
+    
+    partida_codigos = []
+    for p in catalogo_partidas_data:
+        partida = CatalogoPartida(
+            codigo=p['codigo'],
+            nombre=p['nombre'],
+            grupo=PartidaGrupo(get_grupo(p['codigo']))
+        )
+        partida_codigos.append(p['codigo'])
+        doc = partida.model_dump()
+        doc['created_at'] = doc['created_at'].isoformat()
+        doc['updated_at'] = doc['updated_at'].isoformat()
+        await db.catalogo_partidas.insert_one(doc)
+    
+    # Create projects (2 per empresa = 6 total, but we'll use 2 for demo)
     projects_data = [
-        {"code": "TORRE-A", "name": "Torre Altavista", "description": "Desarrollo residencial premium 25 pisos"},
-        {"code": "PLAZA-M", "name": "Plaza Comercial Marina", "description": "Centro comercial frente al mar"},
+        {"code": "TORRE-A", "name": "Torre Altavista", "empresa": "Altitud 3", "description": "Desarrollo residencial premium 25 pisos"},
+        {"code": "PLAZA-M", "name": "Plaza Comercial Marina", "empresa": "Terraviva Desarrollos", "description": "Centro comercial frente al mar"},
     ]
     
     project_ids = {}
     for p in projects_data:
-        project = Project(**p)
+        project = Project(
+            code=p['code'],
+            name=p['name'],
+            empresa_id=empresa_ids[p['empresa']],
+            description=p['description']
+        )
         project_ids[p['code']] = project.id
         doc = project.model_dump()
         doc['created_at'] = doc['created_at'].isoformat()
         await db.projects.insert_one(doc)
-    
-    # Create 6 partidas
-    partidas_data = [
-        {"code": "CONST", "name": "Construcción", "description": "Obra civil y estructura"},
-        {"code": "ELEC", "name": "Instalaciones Eléctricas", "description": "Sistema eléctrico completo"},
-        {"code": "HIDRA", "name": "Instalaciones Hidráulicas", "description": "Sistema hidráulico y sanitario"},
-        {"code": "ACAB", "name": "Acabados", "description": "Pisos, pintura, carpintería"},
-        {"code": "ADMIN", "name": "Gastos Administrativos", "description": "Permisos, licencias, honorarios"},
-        {"code": "EQUIP", "name": "Equipamiento", "description": "Elevadores, aire acondicionado"},
-    ]
-    
-    partida_ids = {}
-    for p in partidas_data:
-        partida = Partida(**p)
-        partida_ids[p['code']] = partida.id
-        doc = partida.model_dump()
-        doc['created_at'] = doc['created_at'].isoformat()
-        await db.partidas.insert_one(doc)
-    
-    # Create 15 providers
-    providers_data = [
-        {"code": "CEMEX", "name": "CEMEX SA de CV", "rfc": "CEM123456ABC"},
-        {"code": "ELECT", "name": "Electrificaciones del Norte", "rfc": "EDN789012DEF"},
-        {"code": "HIDRO", "name": "Hidro Instalaciones Plus", "rfc": "HIP345678GHI"},
-        {"code": "ACERO", "name": "Aceros y Derivados SA", "rfc": "AYD901234JKL"},
-        {"code": "PINTA", "name": "Pinturas Premium MX", "rfc": "PPM567890MNO"},
-        {"code": "ELEVA", "name": "Elevadores Schindler", "rfc": "ESM234567PQR"},
-        {"code": "VIDRI", "name": "Vidriería Industrial", "rfc": "VID456789STU"},
-        {"code": "CARPI", "name": "Carpintería Fina", "rfc": "CAR789012VWX"},
-        {"code": "PLOME", "name": "Plomería Total", "rfc": "PLO012345YZA"},
-        {"code": "AIRAC", "name": "Aires Acondicionados Pro", "rfc": "AAP345678BCD"},
-        {"code": "SEGUV", "name": "Seguridad Vigilancia", "rfc": "SEG678901EFG"},
-        {"code": "TRANS", "name": "Transportes Pesados MX", "rfc": "TRA901234HIJ"},
-        {"code": "FERRET", "name": "Ferretería Industrial", "rfc": "FER234567KLM"},
-        {"code": "IMPER", "name": "Impermeabilizantes PRO", "rfc": "IMP567890NOP"},
-        {"code": "CIMEN", "name": "Cimentaciones Especiales", "rfc": "CIM890123QRS"},
-    ]
-    
-    provider_ids = {}
-    provider_codes = []
-    for p in providers_data:
-        provider = Provider(**p)
-        provider_ids[p['code']] = provider.id
-        provider_codes.append(p['code'])
-        doc = provider.model_dump()
-        doc['created_at'] = doc['created_at'].isoformat()
-        await db.providers.insert_one(doc)
-    
-    # Create exchange rates for 3 months (Jan, Feb, Mar 2025)
-    for month in [1, 2, 3]:
-        for day in range(1, 29):
-            date_str = f"2025-{month:02d}-{day:02d}"
-            rate = 17.0 + (month * 0.15) + (day * 0.01) + random.uniform(-0.2, 0.2)
-            exchange = ExchangeRate(date=date_str, rate=round(rate, 4))
-            doc = exchange.model_dump()
-            doc['created_at'] = doc['created_at'].isoformat()
             await db.exchange_rates.insert_one(doc)
     
     # Create budgets for 2 projects x 6 partidas x 3 months
