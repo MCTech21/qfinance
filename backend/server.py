@@ -198,7 +198,7 @@ class Movement(MovementBase):
 
 class MovementCreate(BaseModel):
     project_id: str
-    partida_id: str
+    partida_codigo: str  # Código del catálogo
     provider_id: str
     date: str
     currency: Currency
