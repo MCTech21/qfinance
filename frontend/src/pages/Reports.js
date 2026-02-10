@@ -18,10 +18,11 @@ const Reports = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [selectedPartida, setSelectedPartida] = useState(null);
   
+  // Default to 2025 for demo data
   const [filters, setFilters] = useState({
     project_id: "all",
-    year: new Date().getFullYear(),
-    month: new Date().getMonth() + 1
+    year: 2025,
+    month: 1
   });
 
   const months = [
