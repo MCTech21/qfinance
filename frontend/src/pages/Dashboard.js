@@ -13,8 +13,9 @@ const Dashboard = () => {
   const [dashboardData, setDashboardData] = useState(null);
   const [projects, setProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState("all");
-  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
-  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
+  // Default to 2025 for demo data
+  const [selectedYear, setSelectedYear] = useState(2025);
+  const [selectedMonth, setSelectedMonth] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
 
   const months = [
