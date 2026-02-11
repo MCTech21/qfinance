@@ -106,10 +106,13 @@ Sistema de control financiero y presupuestal para desarrollos inmobiliarios. Per
 
 ## Archivos Clave
 - `/app/frontend/src/pages/Login.js` - Login con branding QFinance
+- `/app/frontend/src/pages/Reports.js` - Reportes con Import/Export
 - `/app/frontend/src/components/DashboardLayout.js` - Layout con logo
 - `/app/frontend/public/brand/quantum_logo.jpg` - Logo corporativo
 - `/app/frontend/public/index.html` - Título y favicon
-- `/app/backend/server.py` - API principal
+- `/app/backend/server.py` - API principal (import-csv, export-data, import-export-logs)
+- `/app/test_files/csv_valido.csv` - Plantilla CSV válida
+- `/app/test_files/csv_con_errores.csv` - CSV con errores para pruebas
 
 ## Catálogo de Partidas (NO MODIFICAR)
 ```
