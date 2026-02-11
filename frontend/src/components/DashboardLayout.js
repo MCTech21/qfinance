@@ -14,7 +14,6 @@ import {
   LogOut,
   Menu,
   X,
-  Building2,
   Bell
 } from "lucide-react";
 import { Button } from "./ui/button";
@@ -73,8 +72,13 @@ const DashboardLayout = ({ children }) => {
         <div className="flex flex-col h-full">
           {/* Logo */}
           <div className="h-16 flex items-center px-6 border-b border-border">
-            <Building2 className="h-7 w-7 text-primary mr-3" />
-            <span className="font-heading text-xl font-bold tracking-tight">FinRealty</span>
+            <img 
+              src="/brand/quantum_logo.jpg" 
+              alt="QFinance" 
+              className="h-8 w-auto mr-3"
+              data-testid="sidebar-logo"
+            />
+            <span className="font-heading text-xl font-bold tracking-tight">QFinance</span>
           </div>
           
           {/* Navigation */}

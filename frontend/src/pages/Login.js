@@ -5,7 +5,7 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { toast } from "sonner";
-import { Building2, Lock, Mail, Loader2 } from "lucide-react";
+import { Lock, Mail, Loader2 } from "lucide-react";
 import axios from "axios";
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
@@ -69,8 +69,17 @@ const Login = () => {
           alt="Building"
           className="object-cover w-full h-full"
         />
+        {/* Logo overlay on image */}
+        <div className="absolute top-6 left-6 z-20">
+          <img 
+            src="/brand/quantum_logo.jpg" 
+            alt="QFinance" 
+            className="h-12 w-auto"
+            data-testid="login-logo-overlay"
+          />
+        </div>
         <div className="absolute bottom-0 left-0 right-0 p-8 bg-gradient-to-t from-black/80 to-transparent z-20">
-          <h1 className="font-heading text-4xl font-bold text-white mb-2">FinRealty</h1>
+          <h1 className="font-heading text-4xl font-bold text-white mb-2">QFinance</h1>
           <p className="text-white/80 text-lg">Sistema de Control Financiero para Desarrollos Inmobiliarios</p>
         </div>
       </div>
@@ -81,8 +90,13 @@ const Login = () => {
           {/* Logo for mobile */}
           <div className="lg:hidden text-center mb-8">
             <div className="inline-flex items-center gap-3 mb-4">
-              <Building2 className="h-10 w-10 text-primary" />
-              <span className="font-heading text-3xl font-bold">FinRealty</span>
+              <img 
+                src="/brand/quantum_logo.jpg" 
+                alt="QFinance" 
+                className="h-10 w-auto"
+                data-testid="login-logo-mobile"
+              />
+              <span className="font-heading text-3xl font-bold">QFinance</span>
             </div>
           </div>
           
