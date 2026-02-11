@@ -26,6 +26,7 @@ MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ['DB_NAME']
 JWT_SECRET = os.environ.get('JWT_SECRET', 'finrealty-secret-key-2024')
 TIMEZONE = pytz.timezone('America/Tijuana')
+SEED_DEMO_USERS = os.environ.get('SEED_DEMO_USERS', 'false').lower() in {'1', 'true', 'yes'}
 
 # MongoDB connection
 client = AsyncIOMotorClient(MONGO_URL)
@@ -2087,7 +2088,10 @@ async def seed_demo_data():
     import random
     
     # Clear existing data
-    await db.users.delete_many({})
+    if SEED_DEMO_USERS:
+        await db.users.delete_many({})
+    else:
+        await db.users.delete_many({"is_demo": True})
     await db.empresas.delete_many({})
     await db.projects.delete_many({})
     await db.catalogo_partidas.delete_many({})
@@ -2101,20 +2105,23 @@ async def seed_demo_data():
     await db.config.delete_many({})
     await db.import_export_logs.delete_many({})
     
-    # Create users
-    users_data = [
-        {"email": "admin@finrealty.com", "name": "Carlos Admin", "role": "admin", "password": "admin123"},
-        {"email": "finanzas@finrealty.com", "name": "María Finanzas", "role": "finanzas", "password": "finanzas123"},
-        {"email": "autorizador@finrealty.com", "name": "Roberto Autorizador", "role": "autorizador", "password": "auth123"},
-        {"email": "lectura@finrealty.com", "name": "Ana Lectura", "role": "solo_lectura", "password": "lectura123"},
-    ]
-    
-    for u in users_data:
-        user = User(email=u['email'], name=u['name'], role=UserRole(u['role']))
-        doc = user.model_dump()
-        doc['password_hash'] = hash_password(u['password'])
-        doc['created_at'] = doc['created_at'].isoformat()
-        await db.users.insert_one(doc)
+    seeded_users_count = 0
+    if SEED_DEMO_USERS:
+        # Create demo users only when explicitly enabled.
+        users_data = [
+            {"email": "admin@finrealty.com", "name": "Carlos Admin", "role": "admin", "password": "admin123"},
+            {"email": "finanzas@finrealty.com", "name": "María Finanzas", "role": "finanzas", "password": "finanzas123"},
+            {"email": "autorizador@finrealty.com", "name": "Roberto Autorizador", "role": "autorizador", "password": "auth123"},
+            {"email": "lectura@finrealty.com", "name": "Ana Lectura", "role": "solo_lectura", "password": "lectura123"},
+        ]
+
+        for u in users_data:
+            user = User(email=u['email'], name=u['name'], role=UserRole(u['role']))
+            doc = user.model_dump()
+            doc['password_hash'] = hash_password(u['password'])
+            doc['created_at'] = doc['created_at'].isoformat()
+            await db.users.insert_one(doc)
+        seeded_users_count = len(users_data)
     
     # Create 3 empresas
     empresas_data = [
@@ -2249,7 +2256,9 @@ async def seed_demo_data():
             await db.exchange_rates.insert_one(doc)
     
     # Create budgets using partida_codigo from catalogo
-    admin_user = await db.users.find_one({"role": "admin"}, {"_id": 0})
+    admin_user = await db.users.find_one({"role": "admin", "is_active": True}, {"_id": 0})
+    if not admin_user:
+        raise HTTPException(status_code=400, detail="No active admin user found. Set one via bootstrap_admin before seeding demo data.")
     admin_id = admin_user['id']
     
     # Budget amounts by partida codigo (using some key partidas)
@@ -2280,8 +2289,8 @@ async def seed_demo_data():
                 doc['created_at'] = doc['created_at'].isoformat()
                 await db.budgets.insert_one(doc)
     
-    finanzas_user = await db.users.find_one({"role": "finanzas"}, {"_id": 0})
-    finanzas_id = finanzas_user['id']
+    finanzas_user = await db.users.find_one({"role": "finanzas", "is_active": True}, {"_id": 0})
+    finanzas_id = finanzas_user['id'] if finanzas_user else admin_id
     
     # Partida-Provider mapping for realistic data
     partida_provider_map = {
@@ -2391,22 +2400,25 @@ async def seed_demo_data():
         await db.config.insert_one(doc)
 
     demo_collections = [
-        "users", "empresas", "projects", "catalogo_partidas", "partidas", "providers",
+        "empresas", "projects", "catalogo_partidas", "partidas", "providers",
         "budgets", "movements", "authorizations", "exchange_rates", "config", "import_export_logs"
     ]
     for name in demo_collections:
         await db[name].update_many({}, {"$set": {"is_demo": True}})
+    if SEED_DEMO_USERS:
+        await db.users.update_many({}, {"$set": {"is_demo": True}})
     
     return {
         "message": "Demo data seeded successfully",
         "data": {
-            "users": 4,
+            "users": seeded_users_count,
             "projects": 2,
             "partidas": 6,
             "providers": 15,
             "movements": 200,
             "months": "Enero, Febrero, Marzo 2025"
-        }
+        },
+        "seed_demo_users": SEED_DEMO_USERS
     }
 
 

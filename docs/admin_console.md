@@ -55,3 +55,60 @@ ADMIN_EMAIL=encargado.finanzas@quantumgrupo.mx ADMIN_USERNAME=MoisesFinanzas bas
 
 
 > Recomendación CloudShell: usa `--mode api` para evitar timeouts a `localhost:27017` cuando Mongo no es accesible desde la shell.
+
+## Troubleshooting (CloudShell)
+
+Si recibes:
+
+```bash
+bootstrap_admin.py: error: unrecognized arguments: --mode api
+```
+
+tu copia local está desfasada y aún tiene una versión antigua de `scripts/bootstrap_admin.py`.
+
+Verifica que tu script sí incluya `--mode`:
+
+```bash
+python scripts/bootstrap_admin.py --help | grep -- "--mode"
+```
+
+Si el comando no imprime `--mode`, sincroniza `main` y reintenta:
+
+```bash
+git fetch --all --prune
+git checkout main
+git pull --ff-only origin main
+python scripts/bootstrap_admin.py --help | grep -- "--mode"
+```
+
+
+## Limpieza de usuarios DEMO (`@finrealty.com`)
+
+Script idempotente: `scripts/cleanup_demo_users.py`
+
+- **Dry-run (default):**
+
+```bash
+python scripts/cleanup_demo_users.py
+```
+
+- **Aplicar cambios:**
+
+```bash
+python scripts/cleanup_demo_users.py --apply
+```
+
+- Asegura que `encargado.finanzas@quantumgrupo.mx` quede activo + admin.
+- Elimina usuarios `@finrealty.com`; si un delete falla, hace fallback a desactivación (`is_active=false`).
+
+## Control de seed de usuarios demo
+
+`POST /api/seed-demo-data` **ya no crea usuarios demo por default**.
+
+Solo se crean si se define explícitamente:
+
+```bash
+SEED_DEMO_USERS=true
+```
+
+Por defecto, el seed solo limpia usuarios `is_demo=true` y preserva usuarios reales existentes.

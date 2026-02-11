@@ -95,3 +95,13 @@ bash scripts/bootstrap_admin.sh --mode api --email encargado.finanzas@quantumgru
 QFINANCE_API_BASE_URL=http://127.0.0.1:8088/api BOOTSTRAP_ADMIN_EMAIL=admin@finrealty.com BOOTSTRAP_ADMIN_PASSWORD=admin123 \
   bash scripts/bootstrap_admin.sh --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
 ```
+
+
+### Limpieza de usuarios demo heredados
+
+```bash
+python scripts/cleanup_demo_users.py --dry-run
+python scripts/cleanup_demo_users.py --apply
+```
+
+> El script elimina usuarios `@finrealty.com` y garantiza que `encargado.finanzas@quantumgrupo.mx` quede activo/admin.
