@@ -450,7 +450,23 @@ async def login(credentials: UserLogin):
     
     token = create_token(user_doc['id'], user_doc['email'], user_doc['role'])
     user = User(**{k: v for k, v in user_doc.items() if k != 'password_hash'})
+    
+    # Log successful login
+    await log_audit(
+        {"user_id": user_doc['id'], "email": user_doc['email'], "role": user_doc['role']},
+        "LOGIN",
+        "auth",
+        user_doc['id'],
+        {"status": "success"}
+    )
+    
     return TokenResponse(access_token=token, user=user)
+
+@api_router.post("/auth/logout")
+async def logout(current_user: dict = Depends(get_current_user)):
+    """Log user logout"""
+    await log_audit(current_user, "LOGOUT", "auth", current_user["user_id"], {"status": "success"})
+    return {"message": "Sesión cerrada"}
 
 @api_router.get("/auth/me", response_model=User)
 async def get_me(current_user: dict = Depends(get_current_user)):
@@ -459,14 +475,24 @@ async def get_me(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return User(**user_doc)
 
+@api_router.get("/auth/permissions")
+async def get_my_permissions(current_user: dict = Depends(get_current_user)):
+    """Return current user's permissions for frontend RBAC"""
+    role = current_user.get("role")
+    permissions = ROLE_PERMISSIONS.get(role, [])
+    return {
+        "role": role,
+        "permissions": permissions
+    }
+
 # ========================= USER ROUTES =========================
 @api_router.get("/users", response_model=List[User])
-async def get_users(current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+async def get_users(current_user: dict = Depends(require_permission(Permission.VIEW_USERS, Permission.MANAGE_USERS))):
     users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
     return [User(**u) for u in users]
 
 @api_router.put("/users/{user_id}")
-async def update_user(user_id: str, updates: dict, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+async def update_user(user_id: str, updates: dict, current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
     old_doc = await db.users.find_one({"id": user_id}, {"_id": 0})
     if not old_doc:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
@@ -475,7 +501,10 @@ async def update_user(user_id: str, updates: dict, current_user: dict = Depends(
     update_data = {k: v for k, v in updates.items() if k in allowed_fields}
     
     await db.users.update_one({"id": user_id}, {"$set": update_data})
-    await log_audit(current_user, "UPDATE", "users", user_id, {"before": old_doc, "after": update_data})
+    await log_audit(current_user, "UPDATE", "users", user_id, {
+        "before": {k: old_doc.get(k) for k in allowed_fields},
+        "after": update_data
+    })
     return {"message": "Usuario actualizado"}
 
 # ========================= EMPRESA ROUTES =========================
