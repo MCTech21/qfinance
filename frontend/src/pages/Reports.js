@@ -26,6 +26,14 @@ const Reports = () => {
   const [filteredProjects, setFilteredProjects] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedPartida, setSelectedPartida] = useState(null);
+  const [isExporting, setIsExporting] = useState(false);
+  
+  // Import CSV state
+  const [showImportDialog, setShowImportDialog] = useState(false);
+  const [importFile, setImportFile] = useState(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+  const fileInputRef = useRef(null);
   
   const [filters, setFilters] = useState({
     empresa_id: "all",
