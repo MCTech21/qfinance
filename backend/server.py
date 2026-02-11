@@ -774,6 +774,10 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         doc['authorization_id'] = auth.id
     
     await db.movements.insert_one(doc)
+    
+    # Remove MongoDB _id before returning
+    doc.pop('_id', None)
+    
     await log_audit(current_user, "CREATE", "movements", movement.id, {"data": doc, "requires_auth": requires_auth})
     
     return {"movement": doc, "requires_authorization": requires_auth, "reason": auth_reason if requires_auth else None}
