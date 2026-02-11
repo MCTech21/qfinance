@@ -706,11 +706,11 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         "month": month
     }, {"_id": 0})
     
-    # Calculate current spent
+    # Calculate current spent - SOLO movimientos posted
     current_movements = await db.movements.find({
         "project_id": movement_data.project_id,
         "partida_codigo": movement_data.partida_codigo,
-        "status": {"$in": ["normal", "authorized"]}
+        "status": MovementStatus.POSTED.value
     }, {"_id": 0}).to_list(5000)
     
     current_spent = sum(
@@ -721,16 +721,17 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     budget_amount = budget['amount_mxn'] if budget else 0
     new_total = current_spent + amount_mxn
     
-    # Determine if authorization required
+    # Determine if authorization required: >100% OR presupuesto $0
     requires_auth = False
     auth_reason = ""
+    percentage_if_posted = (new_total / budget_amount * 100) if budget_amount > 0 else 0
     
     if budget_amount == 0:
         requires_auth = True
-        auth_reason = "Presupuesto no definido ($0)"
-    elif (new_total / budget_amount) > 1.0:
+        auth_reason = "Presupuesto no definido ($0) - requiere autorización"
+    elif percentage_if_posted > 100:
         requires_auth = True
-        auth_reason = f"Exceso de presupuesto: {(new_total / budget_amount * 100):.1f}%"
+        auth_reason = f"Exceso de presupuesto: {percentage_if_posted:.1f}% (>100%)"
     
     movement = Movement(
         project_id=movement_data.project_id,
@@ -744,14 +745,14 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         reference=movement_data.reference,
         description=movement_data.description,
         created_by=current_user["user_id"],
-        status=MovementStatus.PENDING_AUTHORIZATION if requires_auth else MovementStatus.NORMAL
+        status=MovementStatus.PENDING_APPROVAL if requires_auth else MovementStatus.POSTED
     )
     
     doc = movement.model_dump()
     doc['date'] = doc['date'].isoformat()
     doc['created_at'] = doc['created_at'].isoformat()
     
-    # Create authorization if needed
+    # Create authorization record if needed
     if requires_auth:
         auth = Authorization(
             movement_id=movement.id,
@@ -760,6 +761,15 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         )
         auth_doc = auth.model_dump()
         auth_doc['created_at'] = auth_doc['created_at'].isoformat()
+        # Add budget context for UI display
+        auth_doc['budget_context'] = {
+            'partida_codigo': movement_data.partida_codigo,
+            'presupuesto': budget_amount,
+            'ejecutado_actual': current_spent,
+            'monto_movimiento': amount_mxn,
+            'porcentaje_actual': (current_spent / budget_amount * 100) if budget_amount > 0 else 0,
+            'porcentaje_si_aprueba': percentage_if_posted
+        }
         await db.authorizations.insert_one(auth_doc)
         doc['authorization_id'] = auth.id
     
