@@ -684,7 +684,7 @@ async def get_budgets(
     return budgets
 
 @api_router.post("/budgets")
-async def create_budget(budget_data: BudgetBase, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+async def create_budget(budget_data: BudgetBase, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
     # VALIDACIÓN BLOQUEANTE: partida debe existir en catálogo
     await validate_partida(budget_data.partida_codigo)
     
@@ -707,11 +707,20 @@ async def create_budget(budget_data: BudgetBase, current_user: dict = Depends(re
     doc = budget.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
     await db.budgets.insert_one(doc)
-    await log_audit(current_user, "CREATE", "budgets", budget.id, {"data": doc})
+    await log_audit(current_user, "CREATE", "budgets", budget.id, {
+        "data": {
+            "project_id": doc['project_id'],
+            "partida_codigo": doc['partida_codigo'],
+            "year": doc['year'],
+            "month": doc['month'],
+            "amount_mxn": doc['amount_mxn']
+        }
+    })
+    doc.pop('_id', None)
     return doc
 
 @api_router.put("/budgets/{budget_id}")
-async def update_budget(budget_id: str, updates: BudgetBase, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+async def update_budget(budget_id: str, updates: BudgetBase, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
     # VALIDACIÓN BLOQUEANTE: partida debe existir
     await validate_partida(updates.partida_codigo)
     
@@ -721,38 +730,49 @@ async def update_budget(budget_id: str, updates: BudgetBase, current_user: dict 
     
     update_data = updates.model_dump()
     await db.budgets.update_one({"id": budget_id}, {"$set": update_data})
-    await log_audit(current_user, "UPDATE", "budgets", budget_id, {"before": old_doc, "after": update_data})
+    await log_audit(current_user, "UPDATE", "budgets", budget_id, {
+        "before": {"amount_mxn": old_doc.get('amount_mxn')},
+        "after": {"amount_mxn": update_data.get('amount_mxn')}
+    })
     
     updated = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
     return updated
 
 @api_router.delete("/budgets/{budget_id}")
-async def delete_budget(budget_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+async def delete_budget(budget_id: str, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
     old_doc = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
     if not old_doc:
         raise HTTPException(status_code=404, detail="Presupuesto no encontrado")
     
     await db.budgets.delete_one({"id": budget_id})
-    await log_audit(current_user, "DELETE", "budgets", budget_id, {"deleted": old_doc})
+    await log_audit(current_user, "DELETE", "budgets", budget_id, {
+        "deleted": {
+            "project_id": old_doc.get('project_id'),
+            "partida_codigo": old_doc.get('partida_codigo'),
+            "amount_mxn": old_doc.get('amount_mxn')
+        }
+    })
     return {"message": "Presupuesto eliminado"}
 
 # ========================= EXCHANGE RATE ROUTES =========================
 @api_router.get("/exchange-rates")
-async def get_exchange_rates(current_user: dict = Depends(get_current_user)):
+async def get_exchange_rates(current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
     rates = await db.exchange_rates.find({}, {"_id": 0}).to_list(1000)
     return rates
 
 @api_router.post("/exchange-rates")
-async def create_exchange_rate(date_str: str, rate: float, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+async def create_exchange_rate(date_str: str, rate: float, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
     existing = await db.exchange_rates.find_one({"date": date_str}, {"_id": 0})
     if existing:
         await db.exchange_rates.update_one({"date": date_str}, {"$set": {"rate": rate}})
+        await log_audit(current_user, "UPDATE", "exchange_rates", date_str, {"rate": rate})
         return {"message": "Tipo de cambio actualizado"}
     
     exchange = ExchangeRate(date=date_str, rate=rate)
     doc = exchange.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
     await db.exchange_rates.insert_one(doc)
+    await log_audit(current_user, "CREATE", "exchange_rates", date_str, {"rate": rate})
     return {"message": "Tipo de cambio creado"}
 
 # ========================= MOVEMENT ROUTES =========================
