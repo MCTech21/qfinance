@@ -92,21 +92,6 @@ Sistema de control financiero y presupuestal para desarrollos inmobiliarios. Per
 
 ## Próximas Tareas
 
-### 🔴 P1 - Entrega B: Import/Export
-**Import CSV (estricto)**
-- Columnas: fecha, empresa, proyecto, partida, proveedor, moneda, monto, tipo_cambio, referencia, descripcion
-- Validaciones bloqueantes por fila
-- Detección de duplicados por llave única
-- Respuesta con conteos y errores por fila
-- Audit log de import
-
-**Export Excel**
-- Export del reporte filtrado
-- Hoja 1: Resumen KPIs
-- Hoja 2: Detalle por partida + semáforo
-- Fechas en America/Tijuana
-- Audit log de export
-
 ### 🟡 P2 - Flujo de Autorizaciones
 - Workflow para excesos >100%
 - Aprobación/rechazo por Autorizador
