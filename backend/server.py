@@ -1229,7 +1229,7 @@ async def import_movements_csv(file: UploadFile = File(...), current_user: dict 
 
 # Keep legacy endpoint for backwards compatibility
 @api_router.post("/movements/import")
-async def import_movements_legacy(file: UploadFile = File(...), current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+async def import_movements_legacy(file: UploadFile = File(...), current_user: dict = Depends(require_permission(Permission.IMPORT_MOVEMENTS))):
     """Legacy import - redirects to new import-csv endpoint"""
     return await import_movements_csv(file, current_user)
 
@@ -1241,7 +1241,7 @@ async def get_authorizations(
     project_id: Optional[str] = None,
     year: Optional[int] = None,
     month: Optional[int] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_permission(Permission.VIEW_AUTHORIZATIONS))
 ):
     """Get authorizations with filters and enriched movement data"""
     query = {}
