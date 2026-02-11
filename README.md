@@ -44,6 +44,8 @@ WDS_SOCKET_PORT=3000
 ```
 
 > Si no existen estos archivos, los scripts de arranque los crean automáticamente con esos valores por defecto.
+> En producción, si `REACT_APP_BACKEND_URL` está vacío o no existe, el frontend usa rutas relativas (`/api/...`).
+> Usa `frontend/.env.example` como referencia (se versiona porque es plantilla sin secretos) y evita versionar `.env` reales por ambiente.
 
 ## Arranque local (Windows)
 
@@ -118,3 +120,39 @@ yarn start
 - 🟢 **Verde**: Ejercido ≤ 90% del presupuesto
 - 🟡 **Amarillo**: Ejercido entre 90% y 100%
 - 🔴 **Rojo**: Ejercido > 100% (requiere autorización)
+
+## Deploy frontend en EC2 (nginx)
+
+Arquitectura esperada en producción:
+- nginx en `:8088` sirve archivos estáticos desde `/var/www/qfinance`.
+- FastAPI en `127.0.0.1:8000`.
+- nginx proxea `/api/*` hacia `127.0.0.1:8000` (same-origin, sin CORS entre frontend/backend).
+
+Comandos recomendados:
+
+```bash
+# 1) Build robusto (OOM guard + validación anti-hardcode)
+scripts/build_frontend.sh
+
+# 2) Deploy robusto (build + rsync + nginx reload + validación final de main.*.js servido)
+scripts/deploy_frontend_ec2.sh
+```
+
+Validaciones rápidas:
+
+```bash
+# Debe regresar vacío
+grep -RInE 'emergentagent|expense-tracker|preview\.emergentagent\.com' frontend/build/
+
+# Verifica que se sirva login y el JS principal desde nginx
+curl -fsSL http://127.0.0.1:8088/login | head
+```
+
+Más detalle en `docs/ec2_deploy.md`.
+
+Checklist rápido “no env versionados” (excluye `.env.example`):
+
+```bash
+git ls-files frontend/.env frontend/.env.local frontend/.env.production
+# esperado: vacío
+```

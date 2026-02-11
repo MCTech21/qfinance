@@ -62,7 +62,7 @@
   },
   "scripts": {
     "start": "craco start",
-    "build": "craco build",
+    "build": "craco build && node ./scripts/verify-build-artifacts.js",
     "test": "craco test"
   },
   "browserslist": {
