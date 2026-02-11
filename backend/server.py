@@ -1363,7 +1363,7 @@ async def get_pending_summary(
 async def resolve_authorization(
     auth_id: str,
     resolution: AuthorizationResolve,
-    current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.AUTORIZADOR))
+    current_user: dict = Depends(require_permission(Permission.APPROVE_REJECT))
 ):
     auth = await db.authorizations.find_one({"id": auth_id}, {"_id": 0})
     if not auth:
@@ -1387,18 +1387,22 @@ async def resolve_authorization(
     await db.authorizations.update_one({"id": auth_id}, {"$set": update_data})
     
     # Update movement status: approved -> posted, rejected -> rejected
+    movement = None
     if auth.get('movement_id'):
         new_status = MovementStatus.POSTED if resolution.status == AuthorizationStatus.APPROVED else MovementStatus.REJECTED
         await db.movements.update_one(
             {"id": auth['movement_id']},
             {"$set": {"status": new_status.value}}
         )
+        movement = await db.movements.find_one({"id": auth['movement_id']}, {"_id": 0})
     
     # Detailed audit log for approve/reject
     await log_audit(current_user, f"AUTH_{resolution.status.value.upper()}", "authorizations", auth_id, {
         "movement_id": auth.get('movement_id'),
         "resolution": resolution.status.value,
         "notes": resolution.notes,
+        "amount_mxn": movement.get('amount_mxn') if movement else None,
+        "partida_codigo": movement.get('partida_codigo') if movement else None,
         "budget_context": auth.get('budget_context')
     })
     
@@ -1412,7 +1416,7 @@ async def get_dashboard(
     year: Optional[int] = None,
     month: Optional[int] = None,
     include_pending: bool = False,  # Toggle para ver posted vs total incluyendo pendientes
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_permission(Permission.VIEW_DASHBOARD))
 ):
     now = to_tijuana(datetime.now(timezone.utc))
     year = year or now.year
