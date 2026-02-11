@@ -1323,6 +1323,192 @@ async def get_partida_detail(
         "movements": sorted(movements, key=lambda x: x['date'], reverse=True)
     }
 
+@api_router.get("/reports/export-data")
+async def get_export_data(
+    empresa_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Returns data for Excel export with 2 sheets:
+    - Hoja 1 "Resumen" (KPIs)
+    - Hoja 2 "Detalle" (por partida + semáforo)
+    All dates in America/Tijuana timezone.
+    Logs export action to audit.
+    """
+    now = to_tijuana(datetime.now(timezone.utc))
+    year = year or now.year
+    month = month or now.month
+    
+    # Get empresas for filter names
+    empresas = await db.empresas.find({}, {"_id": 0}).to_list(1000)
+    empresa_map = {e['id']: e for e in empresas}
+    
+    # Get projects filtered by empresa
+    project_query = {}
+    if empresa_id:
+        project_query["empresa_id"] = empresa_id
+    all_projects = await db.projects.find(project_query, {"_id": 0}).to_list(1000)
+    project_ids = [p['id'] for p in all_projects]
+    project_map = {p['id']: p for p in all_projects}
+    
+    # Get budgets
+    budget_query = {"year": year, "month": month}
+    if project_id:
+        budget_query["project_id"] = project_id
+    elif empresa_id:
+        budget_query["project_id"] = {"$in": project_ids}
+    
+    budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(1000)
+    
+    # Get movements
+    movement_query = {"status": {"$in": ["normal", "authorized"]}}
+    if project_id:
+        movement_query["project_id"] = project_id
+    elif empresa_id:
+        movement_query["project_id"] = {"$in": project_ids}
+    
+    all_movements = await db.movements.find(movement_query, {"_id": 0}).to_list(5000)
+    
+    # Filter by date
+    movements = [
+        m for m in all_movements
+        if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
+    ]
+    
+    # Calculate totals
+    total_budget = sum(b['amount_mxn'] for b in budgets)
+    total_real = sum(m['amount_mxn'] for m in movements)
+    variation = total_budget - total_real
+    percentage = (total_real / total_budget * 100) if total_budget > 0 else 0
+    
+    # By partida
+    partidas_data = {}
+    for b in budgets:
+        key = b.get('partida_codigo', 'N/A')
+        if key not in partidas_data:
+            partidas_data[key] = {"budget": 0, "real": 0}
+        partidas_data[key]["budget"] += b['amount_mxn']
+    
+    for m in movements:
+        key = m.get('partida_codigo', 'N/A')
+        if key not in partidas_data:
+            partidas_data[key] = {"budget": 0, "real": 0}
+        partidas_data[key]["real"] += m['amount_mxn']
+    
+    # Get partida info from catalogo
+    partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(1000)
+    partida_map = {p['codigo']: p for p in partida_docs}
+    
+    # Get providers
+    provider_docs = await db.providers.find({}, {"_id": 0}).to_list(1000)
+    provider_map = {p['id']: p for p in provider_docs}
+    
+    partidas_detail = []
+    for partida_codigo, data in partidas_data.items():
+        pct = (data['real'] / data['budget'] * 100) if data['budget'] > 0 else (100 if data['real'] > 0 else 0)
+        partida_info = partida_map.get(partida_codigo, {})
+        
+        # Get movements for this partida
+        partida_movements = [m for m in movements if m.get('partida_codigo') == partida_codigo]
+        
+        # Enrich movements with provider and project names, convert dates to Tijuana
+        enriched_movements = []
+        for mov in partida_movements:
+            proj = project_map.get(mov['project_id'], {})
+            prov = provider_map.get(mov['provider_id'], {})
+            mov_date = date_parser.parse(mov['date'])
+            mov_date_tj = to_tijuana(mov_date)
+            
+            enriched_movements.append({
+                "fecha": mov_date_tj.strftime('%Y-%m-%d %H:%M'),
+                "proyecto": proj.get('name', 'N/A'),
+                "proveedor": prov.get('name', 'N/A'),
+                "referencia": mov.get('reference', ''),
+                "moneda": mov.get('currency', 'MXN'),
+                "monto_original": mov.get('amount_original', 0),
+                "tipo_cambio": mov.get('exchange_rate', 1),
+                "monto_mxn": mov.get('amount_mxn', 0),
+                "descripcion": mov.get('description', '')
+            })
+        
+        partidas_detail.append({
+            "codigo": partida_codigo,
+            "nombre": partida_info.get('nombre', partida_codigo),
+            "grupo": partida_info.get('grupo', 'N/A'),
+            "presupuesto": data['budget'],
+            "ejecutado": data['real'],
+            "variacion": data['budget'] - data['real'],
+            "porcentaje": pct,
+            "semaforo": "Normal" if pct <= 90 else ("Alerta" if pct <= 100 else "Exceso"),
+            "movimientos": sorted(enriched_movements, key=lambda x: x['fecha'], reverse=True)
+        })
+    
+    # Build filter description
+    filter_desc = {
+        "empresa": empresa_map.get(empresa_id, {}).get('nombre', 'Todas') if empresa_id else "Todas",
+        "proyecto": project_map.get(project_id, {}).get('name', 'Todos') if project_id else "Todos",
+        "año": year,
+        "mes": month
+    }
+    
+    # LOG EXPORT to audit
+    export_audit = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["user_id"],
+        "user_email": current_user["email"],
+        "action": "EXPORT_EXCEL",
+        "timestamp_inicio": datetime.now(timezone.utc).isoformat(),
+        "timestamp_fin": datetime.now(timezone.utc).isoformat(),
+        "filtros": filter_desc,
+        "conteos": {
+            "partidas": len(partidas_detail),
+            "movimientos": len(movements),
+            "total_presupuesto": total_budget,
+            "total_ejecutado": total_real
+        }
+    }
+    await db.import_export_logs.insert_one(export_audit)
+    
+    await log_audit(current_user, "EXPORT_EXCEL", "reports", "export", {"filtros": filter_desc})
+    
+    months_es = {
+        1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
+        5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
+        9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
+    }
+    
+    return {
+        "filtros": filter_desc,
+        "periodo": f"{months_es.get(month, month)} {year}",
+        "resumen": {
+            "presupuesto": total_budget,
+            "ejecutado": total_real,
+            "variacion": variation,
+            "porcentaje": percentage,
+            "semaforo": "Normal" if percentage <= 90 else ("Alerta" if percentage <= 100 else "Exceso")
+        },
+        "detalle_partidas": sorted(partidas_detail, key=lambda x: x['porcentaje'], reverse=True),
+        "generated_at": to_tijuana(datetime.now(timezone.utc)).strftime('%Y-%m-%d %H:%M:%S'),
+        "timezone": "America/Tijuana"
+    }
+
+@api_router.get("/import-export-logs")
+async def get_import_export_logs(
+    action: Optional[str] = None,
+    limit: int = Query(50, le=500),
+    current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.AUTORIZADOR))
+):
+    """Get import/export audit logs"""
+    query = {}
+    if action:
+        query["action"] = action
+    
+    logs = await db.import_export_logs.find(query, {"_id": 0}).sort("timestamp_inicio", -1).to_list(limit)
+    return logs
+
 # ========================= AUDIT LOG ROUTES =========================
 @api_router.get("/audit-logs")
 async def get_audit_logs(
