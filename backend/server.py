@@ -253,11 +253,25 @@ class ConfigSetting(BaseModel):
     updated_by: str
 
 class CSVImportResult(BaseModel):
-    success_count: int
-    error_count: int
-    errors: List[Dict[str, Any]]
+    total_filas: int
+    insertadas: int
+    rechazadas: int
+    duplicadas_omitidas: int
+    errores: List[Dict[str, Any]]
     movements_created: List[str]
     authorizations_required: List[str]
+
+class ExportAuditEntry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    user_email: str
+    action: str  # "IMPORT" or "EXPORT"
+    timestamp_inicio: datetime
+    timestamp_fin: Optional[datetime] = None
+    filtros: Optional[Dict[str, Any]] = None
+    conteos: Optional[Dict[str, Any]] = None
+    errores_resumen: Optional[List[str]] = None
 
 # ========================= HELPERS =========================
 def hash_password(password: str) -> str:
