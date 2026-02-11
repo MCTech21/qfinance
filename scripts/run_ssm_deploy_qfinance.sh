@@ -17,6 +17,7 @@ require_cmd() {
 
 require_cmd aws
 require_cmd jq
+require_cmd base64
 
 echo "== Identity =="
 aws sts get-caller-identity --region "${REGION}" --output json
@@ -95,18 +96,29 @@ echo "SEED_HTTP_CODE=${SEED_CODE}"
 }
 EOS
 
-RUN_PAYLOAD="sudo -iu ubuntu bash -lc $(printf '%q' "${REMOTE_SCRIPT}")"
+REMOTE_B64="$(printf '%s' "${REMOTE_SCRIPT}" | base64 | tr -d '\n')"
+
+read -r -d '' COMMAND_STAGE <<EOS || true
+cat >/tmp/qfinance-remote.b64 <<'B64'
+${REMOTE_B64}
+B64
+EOS
+
+COMMAND_DECODE="base64 -d /tmp/qfinance-remote.b64 >/tmp/qfinance-remote.sh"
+COMMAND_EXEC="sudo -iu ubuntu bash /tmp/qfinance-remote.sh"
 
 jq -n \
   --arg iid "${INSTANCE_ID}" \
   --arg lg "${LOG_GROUP}" \
-  --arg cmd "${RUN_PAYLOAD}" \
+  --arg c1 "${COMMAND_STAGE}" \
+  --arg c2 "${COMMAND_DECODE}" \
+  --arg c3 "${COMMAND_EXEC}" \
   '{
     DocumentName:"AWS-RunShellScript",
     Comment:"qfinance deploy+verify via ssm run command (bash -lc)",
     InstanceIds:[$iid],
     CloudWatchOutputConfig:{CloudWatchOutputEnabled:true,CloudWatchLogGroupName:$lg},
-    Parameters:{commands:[$cmd]}
+    Parameters:{commands:[$c1,$c2,$c3]}
   }' > /tmp/ssm-qfinance-send.json
 
 echo "== send-command =="
@@ -168,7 +180,7 @@ VERIFY_EXIT_CODE="$(echo "${INVOC_JSON}" | jq -r '.StandardOutputContent' | sed 
 echo "DEPLOYING_COMMIT=${DEPLOYING_COMMIT:-N/A}"
 echo "VERIFY_EXIT_CODE=${VERIFY_EXIT_CODE:-N/A}"
 echo "CLOUDWATCH_LOG_GROUP=${LOG_GROUP}"
-echo "TIP: log stream prefix usually includes ${COMMAND_ID}/${INSTANCE_ID}" 
+echo "TIP: log stream prefix usually includes ${COMMAND_ID}/${INSTANCE_ID}"
 
 [[ "${FINAL_STATUS}" == "Success" ]] || exit 40
 [[ "${VERIFY_EXIT_CODE:-1}" == "0" ]] || exit 41

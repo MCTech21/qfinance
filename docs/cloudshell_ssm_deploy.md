@@ -59,6 +59,19 @@ ls -la
 
 Usa el runner del repo (`run_ssm_deploy_qfinance.sh`), que construye el payload con `jq` para evitar JSON roto.
 
+### Error: `Syntax error: ")" unexpected` en `_script.sh`
+
+Ese error venía de payloads shell mal escapados en versiones antiguas del runner.
+Actualiza el repo y vuelve a ejecutar:
+
+```bash
+git fetch --all --prune
+git checkout main || git checkout master
+git pull --ff-only
+bash run_ssm_deploy_qfinance.sh
+```
+
+
 ### Error: `Invalid endpoint: https://ssm..amazonaws.com`
 
 Asegura región válida y no vacía:
