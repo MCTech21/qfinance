@@ -2,6 +2,7 @@
 set -euo pipefail
 
 WEB_URL="${WEB_URL:-http://127.0.0.1:8088}"
+VERIFY_SEED_ENDPOINT="${VERIFY_SEED_ENDPOINT:-1}"
 
 check_no_versioned_env() {
   echo "[INFO] Verificando env no versionados (excepto .env.example)..."
@@ -22,12 +23,30 @@ check_build_strings() {
   echo "[OK] frontend/build limpio de emergentagent/expense-tracker."
 }
 
+resolve_main_js_path() {
+  local manifest_path="/asset-manifest.json"
+  local manifest_json
+  manifest_json=$(curl -fsSL "${WEB_URL}${manifest_path}" || true)
+
+  if [[ -n "${manifest_json}" ]]; then
+    local from_manifest
+    from_manifest=$(printf '%s' "${manifest_json}" | sed -n 's|.*"main.js":"\([^"]*\)".*|\1|p' | head -n 1)
+    if [[ -n "${from_manifest}" ]]; then
+      printf '%s' "${from_manifest}"
+      return 0
+    fi
+  fi
+
+  curl -fsSL "${WEB_URL}/login" | grep -oE '/static/js/main\.[^"]+\.js' | head -n 1
+}
+
 check_served_main_js() {
-  echo "[INFO] Validando JS servido por nginx en ${WEB_URL}/login ..."
+  echo "[INFO] Validando JS servido por nginx en ${WEB_URL} ..."
   local main_js
-  main_js=$(curl -fsSL "${WEB_URL}/login" | grep -oE '/static/js/main\.[^"]+\.js' | head -n 1)
+  main_js="$(resolve_main_js_path)"
+
   if [[ -z "${main_js}" ]]; then
-    echo "[ERROR] No se pudo extraer /static/js/main.*.js del HTML servido." >&2
+    echo "[ERROR] No se pudo extraer /static/js/main.*.js de asset-manifest ni HTML /login." >&2
     exit 1
   fi
 
@@ -40,6 +59,11 @@ check_served_main_js() {
 }
 
 check_seed_demo() {
+  if [[ "${VERIFY_SEED_ENDPOINT}" != "1" ]]; then
+    echo "[INFO] Saltando verificación de /api/seed-demo-data (VERIFY_SEED_ENDPOINT=${VERIFY_SEED_ENDPOINT})."
+    return
+  fi
+
   echo "[INFO] Probando POST ${WEB_URL}/api/seed-demo-data ..."
   local code
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${WEB_URL}/api/seed-demo-data")
