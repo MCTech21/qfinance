@@ -1961,6 +1961,15 @@ async def get_audit_summary(
         "by_entity": dict(sorted(by_entity.items(), key=lambda x: x[1], reverse=True)[:10])
     }
 
+@api_router.get("/rbac/permissions-matrix")
+async def get_permissions_matrix(current_user: dict = Depends(require_permission(Permission.VIEW_AUDIT))):
+    """Return the RBAC permissions matrix for documentation"""
+    return {
+        "roles": [r.value for r in UserRole],
+        "permissions": [p.value for p in Permission],
+        "matrix": {role: perms for role, perms in ROLE_PERMISSIONS.items()}
+    }
+
 # ========================= CONFIG ROUTES =========================
 @api_router.get("/config")
 async def get_config(current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
