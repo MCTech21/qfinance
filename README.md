@@ -152,37 +152,18 @@ Más detalle en `docs/ec2_deploy.md`.
 
 ### Deploy por AWS SSM desde CloudShell (sin SSH)
 
-Si ya hiciste merge y quieres desplegar en EC2 vía SSM, usa:
+Para reducir conflictos de merge en este README, el runbook completo vive en:
 
-Atajo recomendado (evita errores por estar fuera del repo en CloudShell):
+- `docs/cloudshell_ssm_deploy.md`
 
-```bash
-# Si ya existe ~/qfinance_git o ~/qfinance lo reutiliza.
-# Si no existe, exporta REPO_URL (URL del botón Code en GitHub) y clona.
-REPO_URL=<REPO_URL> bash scripts/cloudshell_bootstrap_ssm_deploy.sh
-```
-
-Flujo manual equivalente:
+Resumen rápido:
 
 ```bash
-# 1) En CloudShell, entra a un checkout existente o clona uno nuevo
-cd ~
-if [ -d qfinance_git/.git ]; then
-  cd qfinance_git
-elif [ -d qfinance/.git ]; then
-  cd qfinance
-else
-  # Usa la URL del botón "Code" de GitHub (HTTPS o SSH)
-  git clone <REPO_URL> qfinance_git
-  cd qfinance_git
-fi
-
-git fetch --all --prune
-git checkout main || git checkout master
-git pull --ff-only
-
-# 2) Ejecuta runner SSM
+# Dentro del repo
 bash run_ssm_deploy_qfinance.sh
+
+# Si estás fuera del repo en CloudShell
+REPO_URL=<REPO_URL> bash scripts/cloudshell_bootstrap_ssm_deploy.sh
 ```
 
 Salida esperada al final:
@@ -190,19 +171,6 @@ Salida esperada al final:
 - `FINAL_STATUS=Success`
 - `DEPLOYING_COMMIT=...`
 - `VERIFY_EXIT_CODE=0`
-
-> Si ves `bash: scripts/run_ssm_deploy_qfinance.sh: No such file or directory`,
-> estás fuera del checkout del repo. Entra al directorio del repo (`cd ~/qfinance_git`)
-> y vuelve a ejecutar el comando.
-
-Diagnóstico rápido en CloudShell cuando todo marca "No such file or directory":
-
-```bash
-pwd
-ls -la
-# si NO ves README.md y carpeta scripts/, aún no estás dentro del repo
-```
-
 
 Checklist rápido “no env versionados” (excluye `.env.example`):
 
