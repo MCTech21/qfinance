@@ -11,6 +11,7 @@ import {
   Users,
   ScrollText,
   Settings,
+  Shield,
   LogOut,
   Menu,
   X,
@@ -54,6 +55,7 @@ const DashboardLayout = ({ children }) => {
     { path: "/catalogs", icon: FolderOpen, label: "Catálogos", roles: ["admin"] },
     { path: "/users", icon: Users, label: "Usuarios", roles: ["admin"] },
     { path: "/audit", icon: ScrollText, label: "Bitácora", roles: ["admin", "autorizador"] },
+    { path: "/admin", icon: Shield, label: "Admin Console", roles: ["admin"] },
     { path: "/settings", icon: Settings, label: "Configuración", roles: ["admin"] },
   ];
 
