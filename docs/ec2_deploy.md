@@ -82,7 +82,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8088/api/seed-
 - Para bootstrap admin:
 
 ```bash
-python scripts/bootstrap_admin.py --email tu@correo.com --deactivate-demo-users
+python scripts/bootstrap_admin.py --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
 ```
 
 - El seed (`POST /api/seed-demo-data`) marca registros como `is_demo=true` para permitir reset selectivo.

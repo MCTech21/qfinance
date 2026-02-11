@@ -21,14 +21,18 @@ Se agregó consola de administración en `/admin` (solo rol `admin`) con CRUD pa
 ## Bootstrap admin
 Script: `scripts/bootstrap_admin.py`
 
-Ejemplo:
+Defaults operativos configurados:
+- email: `encargado.finanzas@quantumgrupo.mx`
+- username/name: `MoisesFinanzas`
+
+Comando recomendado (exacto para tu caso):
 ```bash
-ADMIN_EMAIL=tu@correo.com python scripts/bootstrap_admin.py --deactivate-demo-users
+python scripts/bootstrap_admin.py --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
 ```
 
-o:
+También puedes usar variables:
 ```bash
-python scripts/bootstrap_admin.py --email tu@correo.com --deactivate-demo-users
+ADMIN_EMAIL=encargado.finanzas@quantumgrupo.mx ADMIN_USERNAME=MoisesFinanzas python scripts/bootstrap_admin.py --deactivate-demo-users
 ```
 
 ## Endpoints principales
