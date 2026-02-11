@@ -1445,8 +1445,8 @@ async def get_partida_detail(
     budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(1000)
     total_budget = sum(b['amount_mxn'] for b in budgets)
     
-    # Get movements
-    movement_query = {"partida_codigo": partida_codigo, "status": {"$in": ["normal", "authorized"]}}
+    # Get movements - SOLO posted
+    movement_query = {"partida_codigo": partida_codigo, "status": MovementStatus.POSTED.value}
     if project_id:
         movement_query["project_id"] = project_id
     elif project_ids:
