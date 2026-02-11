@@ -67,10 +67,9 @@ class AuthorizationStatus(str, Enum):
     REJECTED = "rejected"
 
 class MovementStatus(str, Enum):
-    NORMAL = "normal"
-    PENDING_AUTHORIZATION = "pending_authorization"
-    AUTHORIZED = "authorized"
-    REJECTED = "rejected"
+    POSTED = "posted"                    # Contabilizado (aprobado o no requirió autorización)
+    PENDING_APPROVAL = "pending_approval" # Pendiente de autorización (no contabiliza)
+    REJECTED = "rejected"                 # Rechazado (no contabiliza)
 
 class PartidaGrupo(str, Enum):
     OBRA = "obra"
