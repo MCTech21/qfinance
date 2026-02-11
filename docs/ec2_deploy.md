@@ -5,6 +5,22 @@
 - Backend FastAPI escuchando en `127.0.0.1:8000`.
 - nginx proxea `/api/*` hacia `127.0.0.1:8000`.
 
+
+## CloudShell: sync + deploy sin desface
+
+Usa este comando único después de cada merge/PR para evitar código viejo local:
+
+```bash
+WEB_URL=http://52.53.215.40:8088 bash scripts/cloudshell_sync_and_deploy.sh
+```
+
+Este flujo hace:
+- `fetch + checkout + reset --hard + clean` contra `origin/main`.
+- build + publish (`rsync --delete`) + reload de nginx.
+- verificación post-deploy contra el host servido.
+
+> Si tu entorno no permite activar swap (por ejemplo, `swapon ... Invalid argument`), el deploy ya no se detiene por eso cuando `SWAP_REQUIRED=0` (default).
+
 ## P0 - Build seguro
 ```bash
 scripts/build_frontend.sh
@@ -31,7 +47,7 @@ Qué hace:
 ## Validaciones rápidas
 ```bash
 # Debe quedar vacío
-grep -RInE 'emergentagent|expense-tracker|preview\.emergentagent\.com' frontend/build/
+grep -RInEi 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo' frontend/build/
 
 # Debe responder HTML y referenciar static/js/main.*.js
 curl -fsSL http://127.0.0.1:8088/login | head
@@ -56,12 +72,12 @@ git ls-files frontend/.env frontend/.env.local frontend/.env.production
 # Esperado: salida vacía
 
 # 2) Build sin hardcodes prohibidos
-grep -RInE 'emergentagent|expense-tracker|preview\.emergentagent\.com' frontend/build/
+grep -RInEi 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo' frontend/build/
 # Esperado: salida vacía
 
 # 3) JS servido por nginx sin hardcodes
 MAIN_JS=$(curl -fsSL http://127.0.0.1:8088/login | grep -oE '/static/js/main\.[^" ]+\.js' | head -n 1)
-curl -fsSL "http://127.0.0.1:8088${MAIN_JS}" | grep -Eiq 'emergentagent|expense-tracker|preview\.emergentagent\.com' && echo "FAIL" || echo "OK"
+curl -fsSL "http://127.0.0.1:8088${MAIN_JS}" | grep -Eiq 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo' && echo "FAIL" || echo "OK"
 # Esperado: OK
 
 # 4) Endpoint demo responde 200
@@ -73,3 +89,35 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8088/api/seed-
 - Es una **plantilla de configuración pública** sin secretos.
 - Estandariza variables esperadas para dev/CI/ops.
 - Evita documentar valores sensibles en `.env` reales.
+
+
+## Admin Console + Reset DEMO
+
+- Consola admin disponible en `/admin` (requiere rol admin).
+- Reset DEMO desde UI: exige teclear `RESET DEMO`.
+- Para bootstrap admin:
+
+```bash
+bash scripts/bootstrap_admin.sh --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
+```
+
+- El seed (`POST /api/seed-demo-data`) marca registros como `is_demo=true` para permitir reset selectivo.
+
+
+- Si CloudShell no tiene dependencias Python del backend, el bootstrap usa API mode.
+  Puedes parametrizar:
+
+```bash
+QFINANCE_API_BASE_URL=http://127.0.0.1:8088/api BOOTSTRAP_ADMIN_EMAIL=admin@finrealty.com BOOTSTRAP_ADMIN_PASSWORD=admin123 \
+  bash scripts/bootstrap_admin.sh --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
+```
+
+
+### Limpieza de usuarios demo heredados
+
+```bash
+python scripts/cleanup_demo_users.py --dry-run
+python scripts/cleanup_demo_users.py --apply
+```
+
+> El script elimina usuarios `@finrealty.com` y garantiza que `encargado.finanzas@quantumgrupo.mx` quede activo/admin.

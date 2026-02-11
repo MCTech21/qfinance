@@ -106,20 +106,28 @@ yarn install
 yarn start
 ```
 
-## Usuarios Demo
+## Usuarios
 
-| Email | Contraseña | Rol |
-|-------|------------|-----|
-| admin@finrealty.com | admin123 | Administrador |
-| finanzas@finrealty.com | finanzas123 | Finanzas |
-| autorizador@finrealty.com | auth123 | Autorizador |
-| lectura@finrealty.com | lectura123 | Solo Lectura |
+No se incluyen credenciales demo por defecto.
+
+- Para promover tu cuenta real a administrador usa: `python scripts/bootstrap_admin.py --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas`.
+- Para limpiar usuarios demo heredados (`@finrealty.com`), usa `python scripts/cleanup_demo_users.py --apply`.
 
 ## Semáforo de Cumplimiento
 
 - 🟢 **Verde**: Ejercido ≤ 90% del presupuesto
 - 🟡 **Amarillo**: Ejercido entre 90% y 100%
 - 🔴 **Rojo**: Ejercido > 100% (requiere autorización)
+
+## CloudShell (sync + deploy recomendado)
+
+Después de cada merge/PR, ejecuta:
+
+```bash
+WEB_URL=http://52.53.215.40:8088 bash scripts/cloudshell_sync_and_deploy.sh
+```
+
+Este comando evita trabajar con artefactos viejos (hace sync fuerte del repo + deploy + verificación).
 
 ## Deploy frontend en EC2 (nginx)
 
