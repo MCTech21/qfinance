@@ -124,10 +124,12 @@ No se incluyen credenciales demo por defecto.
 Después de cada merge/PR, ejecuta:
 
 ```bash
-WEB_URL=http://52.53.215.40:8088 bash scripts/cloudshell_sync_and_deploy.sh
+WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
 ```
 
 Este comando evita trabajar con artefactos viejos (hace sync fuerte del repo + deploy + verificación).
+
+Si CloudShell no tiene `yarn`, `scripts/build_frontend.sh` cae automáticamente a `npm`.
 
 ## Deploy frontend en EC2 (nginx)
 

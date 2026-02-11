@@ -11,7 +11,7 @@
 Usa este comando único después de cada merge/PR para evitar código viejo local:
 
 ```bash
-WEB_URL=http://52.53.215.40:8088 bash scripts/cloudshell_sync_and_deploy.sh
+WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
 ```
 
 Este flujo hace:
@@ -27,9 +27,9 @@ scripts/build_frontend.sh
 ```
 
 Qué hace:
-- Instala dependencias del frontend con `yarn install --frozen-lockfile`.
+- Instala dependencias con `yarn` (preferido) o hace fallback a `npm` si `yarn` no existe.
 - Fuerza `NODE_OPTIONS=--max-old-space-size=4096` (configurable).
-- Ejecuta `yarn build`.
+- Ejecuta build con el gestor detectado.
 - Falla si detecta `emergentagent`, `expense-tracker` o `preview.emergentagent.com` en `frontend/build`.
 
 ## P1 - Deploy seguro
@@ -39,6 +39,7 @@ scripts/deploy_frontend_ec2.sh
 
 Qué hace:
 - (Opcional) habilita swap si no existe (`scripts/ec2_enable_swap.sh`).
+- En CloudShell se recomienda `ENABLE_SWAP=0` para evitar `swapon ... Invalid argument`.
 - Ejecuta build seguro (`scripts/build_frontend.sh`).
 - Publica con `rsync --delete frontend/build/ /var/www/qfinance/` solo si el build fue exitoso.
 - Ejecuta `nginx -t` y `systemctl reload nginx`.
