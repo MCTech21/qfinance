@@ -2352,10 +2352,14 @@ async def seed_demo_data():
 app.include_router(api_router)
 
 # CORS
+raw_cors_origins = os.environ.get('CORS_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000')
+cors_origins = [origin.strip() for origin in raw_cors_origins.split(',') if origin.strip()]
+allow_all_origins = '*' in cors_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=not allow_all_origins,
+    allow_origins=['*'] if allow_all_origins else cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
