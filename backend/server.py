@@ -784,7 +784,7 @@ async def get_movements(
     year: Optional[int] = None,
     month: Optional[int] = None,
     status: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_permission(Permission.VIEW_MOVEMENTS))
 ):
     query = {}
     if project_id:
@@ -812,7 +812,7 @@ async def get_movements(
     return movements
 
 @api_router.post("/movements")
-async def create_movement(movement_data: MovementCreate, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+async def create_movement(movement_data: MovementCreate, current_user: dict = Depends(require_permission(Permission.CREATE_MOVEMENT))):
     # VALIDACIÓN BLOQUEANTE: partida debe existir en catálogo
     await validate_partida(movement_data.partida_codigo)
     
