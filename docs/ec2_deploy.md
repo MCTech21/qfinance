@@ -39,3 +39,37 @@ curl -fsSL http://127.0.0.1:8088/login | head
 # Opcional: validar endpoint demo
 curl -fsS -X POST http://127.0.0.1:8088/api/seed-demo-data
 ```
+
+## Checklist final de verificación (EC2)
+
+También puedes ejecutar todo en bloque:
+
+```bash
+scripts/verify_ec2_release.sh
+```
+
+Checks individuales:
+
+```bash
+# 1) No env reales versionados (NO incluye .env.example)
+git ls-files frontend/.env frontend/.env.local frontend/.env.production
+# Esperado: salida vacía
+
+# 2) Build sin hardcodes prohibidos
+grep -RInE 'emergentagent|expense-tracker|preview\.emergentagent\.com' frontend/build/
+# Esperado: salida vacía
+
+# 3) JS servido por nginx sin hardcodes
+MAIN_JS=$(curl -fsSL http://127.0.0.1:8088/login | grep -oE '/static/js/main\.[^" ]+\.js' | head -n 1)
+curl -fsSL "http://127.0.0.1:8088${MAIN_JS}" | grep -Eiq 'emergentagent|expense-tracker|preview\.emergentagent\.com' && echo "FAIL" || echo "OK"
+# Esperado: OK
+
+# 4) Endpoint demo responde 200
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8088/api/seed-demo-data
+# Esperado: 200
+```
+
+### ¿Por qué `frontend/.env.example` sí se versiona?
+- Es una **plantilla de configuración pública** sin secretos.
+- Estandariza variables esperadas para dev/CI/ops.
+- Evita documentar valores sensibles en `.env` reales.

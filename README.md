@@ -45,7 +45,7 @@ WDS_SOCKET_PORT=3000
 
 > Si no existen estos archivos, los scripts de arranque los crean automáticamente con esos valores por defecto.
 > En producción, si `REACT_APP_BACKEND_URL` está vacío o no existe, el frontend usa rutas relativas (`/api/...`).
-> Usa `frontend/.env.example` como referencia y evita versionar `.env` reales por ambiente.
+> Usa `frontend/.env.example` como referencia (se versiona porque es plantilla sin secretos) y evita versionar `.env` reales por ambiente.
 
 ## Arranque local (Windows)
 
@@ -149,3 +149,10 @@ curl -fsSL http://127.0.0.1:8088/login | head
 ```
 
 Más detalle en `docs/ec2_deploy.md`.
+
+Checklist rápido “no env versionados” (excluye `.env.example`):
+
+```bash
+git ls-files frontend/.env frontend/.env.local frontend/.env.production
+# esperado: vacío
+```
