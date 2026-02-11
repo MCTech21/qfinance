@@ -121,3 +121,24 @@ python scripts/cleanup_demo_users.py --apply
 ```
 
 > El script elimina usuarios `@finrealty.com` y garantiza que `encargado.finanzas@quantumgrupo.mx` quede activo/admin.
+
+
+### Troubleshooting: `scripts/cloudshell_sync_and_deploy.sh: No such file or directory`
+
+Si CloudShell responde ese error, tu checkout local aún no trae el script nuevo. Ejecuta:
+
+```bash
+git fetch --all --prune
+git checkout main
+git pull --ff-only origin main
+git ls-tree -r --name-only origin/main | grep '^scripts/cloudshell_sync_and_deploy.sh$'
+```
+
+Si el último comando no imprime nada, tu `origin/main` todavía no contiene ese cambio.
+
+**Fallback inmediato (sin ese script):**
+
+```bash
+WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 scripts/deploy_frontend_ec2.sh
+WEB_URL=http://52.53.215.40:8088 scripts/verify_ec2_release.sh
+```

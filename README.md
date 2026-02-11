@@ -186,3 +186,22 @@ Checklist rápido “no env versionados” (excluye `.env.example`):
 git ls-files frontend/.env frontend/.env.local frontend/.env.production
 # esperado: vacío
 ```
+
+
+### Troubleshooting (`No such file or directory`)
+
+Si CloudShell marca `scripts/cloudshell_sync_and_deploy.sh: No such file or directory`, actualiza `main` y valida que exista en remoto:
+
+```bash
+git fetch --all --prune
+git checkout main
+git pull --ff-only origin main
+git ls-tree -r --name-only origin/main | grep '^scripts/cloudshell_sync_and_deploy.sh$'
+```
+
+Fallback (sin script):
+
+```bash
+WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 scripts/deploy_frontend_ec2.sh
+WEB_URL=http://52.53.215.40:8088 scripts/verify_ec2_release.sh
+```
