@@ -1,0 +1,87 @@
+<analysis>
+SESSION SUMMARY — QFinance (MVP Control Presupuestal Multiempresa)
+
+REGLAS CLAVE (NO NEGOCIABLES)
+- “QFinance” es SOLO marca/UI. NO renombrar la empresa “Grupo Q” en BD ni en catálogos.
+- Stack MVP actual: React + FastAPI + MongoDB con contrato REST congelado (OpenAPI/Swagger). Preparado para migrar a Postgres + Node/Express.
+- TZ: guardar timestamps en UTC y mostrar/procesar en America/Tijuana. Si CSV trae fecha sin hora, interpretarla como America/Tijuana.
+- Moneda: MXN y USD. Para USD el tipo_cambio es obligatorio. Guardar: moneda_original, monto_original, tipo_cambio, monto_mxn.
+- Semáforo: Verde ≤90%, Amarillo 90–100%, Rojo >100%.
+- Exceso (>100%) o registros pendiente//bin/bash requieren Autorizador.
+- Roles: Admin, Finanzas, Autorizador, Solo-lectura.
+- Audit trail mínimo obligatorio.
+
+ESTADO ACTUAL (COMPLETADO)
+- Hito 1 completo: arquitectura + OpenAPI/Swagger + esquemas.
+- Hito 2 Entrega A completa: Dashboard + Reportes + Detalle por Partida con filtros en tiempo real y drilldown; datos demo (2 proyectos, 6 partidas, 15 proveedores, 200 movimientos, 3 meses).
+- Ajuste Multiempresa + Catálogo COMPLETADO:
+  - Colección  con seed exactas: “Altitud 3”, “Terraviva Desarrollos”, “Grupo Q”.
+  -  obligatorio (sin huérfanos). UI filtra Empresa → Proyectos.
+  - Colección  como “source of truth”, validación bloqueante en budgets/movements.
+  - Catálogo exacto (NO MODIFICAR):
+    100 COSTO DIRECTO
+    101 TERRENO
+    102 PROYECTOS
+    103 LICENCIAS Y PERMISOS
+    104 EDIFICACION
+    105 URBANIZACION
+    106 INDIRECTOS DE OBRA
+    107 ACCESO
+    108 AMENIDADES
+    109 OFICINAS DE VENTAS
+    110 IMPREVISTOS
+    111 OBRAS CABECERAS
+    200 GASTOS DE VENTA Y ADMINISTRACION
+    201 GASTOS DE PUBLICIDAD Y PROMOCION
+    202 ACONDICIONAMIENTO DE MUESTRAS
+    203 COMISIONES SOBRE VENTA
+    204 DIRECCION DE PROYECTO
+    205 GASTOS ADMINISTRATIVOS
+    206 DOCUM TECNICA
+    207 GARANTIAS Y POSTVENTA
+    300 GASTOS FINANCIEROS
+    301 COMISIONES BANCARIAS
+    302 INTERESES
+    303 AMORTIZACION
+    400 INGRESOS
+    401 PRESTAMOS SOCIOS
+    402 ENGANCHES
+    403 INDIVIDUALIZACION
+    404 CREDITOS
+  - UI selector de partidas: “codigo - nombre”.
+- Endpoints nuevos ya agregados para catálogos: /empresas y /catalogo-partidas (no expandir API innecesariamente en lo siguiente).
+
+TRABAJO EN CURSO (P0) — REBRANDING UI
+- Cambiar marca visible de “FinRealty” a “QFinance” SOLO en UI/branding (title, textos, header, README).
+- Integrar logo corporativo local (archivo a subir por usuario: quantum_logo.png o quantum_logo.jpg).
+  - Guardar asset local (ej. /frontend/public/brand/quantum_logo.png).
+  - Crear favicon basado en el logo.
+- IMPORTANTE: Mantener foto del edificio en el login (no reemplazar). Logo se agrega como overlay/branding.
+- No cambiar funcionalidad.
+
+SIGUIENTE (P1) — ENTREGA B IMPORT/EXPORT (DESPUÉS DEL REBRANDING)
+IMPORT CSV (estricto)
+- Columnas mínimas exactas:
+  fecha, empresa, proyecto, partida, proveedor, moneda, monto, tipo_cambio, referencia, descripcion
+- Validaciones bloqueantes por fila:
+  empresa existe/activa; proyecto existe y pertenece a empresa; partida existe/activa; monto>0; moneda MXN/USD;
+  USD requiere tipo_cambio; fecha sin hora=America/Tijuana; guardar UTC.
+- Duplicados: omitir por llave única:
+  fecha+empresa+proyecto+proveedor+monto+referencia
+- Respuesta: conteos (insertadas/rechazadas/duplicadas) + errores por fila (columna + motivo).
+- Audit log: import inicio/fin con usuario, timestamps y conteos.
+
+EXPORT EXCEL (exacto lo que se ve en UI)
+- Export del reporte filtrado (Empresa/Proyecto/Mes/Moneda):
+  Hoja 1 “Resumen” (KPIs), Hoja 2 “Detalle” (por partida + semáforo).
+- Fechas mostradas en America/Tijuana.
+- Audit log: export con usuario, timestamp y filtros.
+
+CONTROL DE COSTOS
+- No deploy, solo Preview.
+- No agregar endpoints/schemas salvo imprescindible; si algo falla 2 veces, detenerse y proponer 2 fixes (causa raíz) y aplicar el de menor riesgo.
+
+BLOQUEO ACTUAL
+- Falta el archivo del logo (quantum_logo.png/jpg). En cuanto el usuario lo suba, continuar rebranding.
+
+</analysis>

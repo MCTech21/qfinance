@@ -375,7 +375,7 @@ CORS_ORIGINS=*
 
 ### Frontend (.env)
 ```
-REACT_APP_BACKEND_URL=https://[app].preview.emergentagent.com
+REACT_APP_BACKEND_URL=https://expense-tracker-app-18.preview.emergentagent.com
 ```
 
 ---
