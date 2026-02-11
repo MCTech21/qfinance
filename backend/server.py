@@ -1720,6 +1720,36 @@ async def update_config(key: str, value: Any, current_user: dict = Depends(requi
     await log_audit(current_user, "UPDATE", "config", key, {"before": old_value, "after": value})
     return {"message": "Configuración actualizada"}
 
+# ========================= DATA MIGRATION =========================
+@api_router.post("/migrate-movement-status")
+async def migrate_movement_status():
+    """Migrate old movement statuses to new format: normal/authorized -> posted"""
+    # Update normal -> posted
+    result_normal = await db.movements.update_many(
+        {"status": "normal"},
+        {"$set": {"status": MovementStatus.POSTED.value}}
+    )
+    
+    # Update authorized -> posted
+    result_auth = await db.movements.update_many(
+        {"status": "authorized"},
+        {"$set": {"status": MovementStatus.POSTED.value}}
+    )
+    
+    # Update pending_authorization -> pending_approval
+    result_pending = await db.movements.update_many(
+        {"status": "pending_authorization"},
+        {"$set": {"status": MovementStatus.PENDING_APPROVAL.value}}
+    )
+    
+    return {
+        "migrated": {
+            "normal_to_posted": result_normal.modified_count,
+            "authorized_to_posted": result_auth.modified_count,
+            "pending_authorization_to_pending_approval": result_pending.modified_count
+        }
+    }
+
 # ========================= DEMO DATA =========================
 @api_router.post("/seed-demo-data")
 async def seed_demo_data():
@@ -1739,6 +1769,7 @@ async def seed_demo_data():
     await db.exchange_rates.delete_many({})
     await db.audit_logs.delete_many({})
     await db.config.delete_many({})
+    await db.import_export_logs.delete_many({})
     
     # Create users
     users_data = [
