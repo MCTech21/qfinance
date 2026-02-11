@@ -19,7 +19,7 @@ Se agregó consola de administración en `/admin` (solo rol `admin`) con CRUD pa
 - Audit log admin para create/update/delete/restore/reverse/reset con before/after, resultado e ip/user-agent.
 
 ## Bootstrap admin
-Script: `scripts/bootstrap_admin.py`
+Script: `scripts/bootstrap_admin.sh` (recomendado para CloudShell)
 
 Defaults operativos configurados:
 - email: `encargado.finanzas@quantumgrupo.mx`
@@ -27,12 +27,12 @@ Defaults operativos configurados:
 
 Comando recomendado (exacto para tu caso):
 ```bash
-python scripts/bootstrap_admin.py --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
+bash scripts/bootstrap_admin.sh --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
 ```
 
 También puedes usar variables:
 ```bash
-ADMIN_EMAIL=encargado.finanzas@quantumgrupo.mx ADMIN_USERNAME=MoisesFinanzas python scripts/bootstrap_admin.py --deactivate-demo-users
+ADMIN_EMAIL=encargado.finanzas@quantumgrupo.mx ADMIN_USERNAME=MoisesFinanzas bash scripts/bootstrap_admin.sh --deactivate-demo-users
 ```
 
 ## Endpoints principales
@@ -47,3 +47,8 @@ ADMIN_EMAIL=encargado.finanzas@quantumgrupo.mx ADMIN_USERNAME=MoisesFinanzas pyt
 - `POST /api/admin/movimientos/{id}/reverse`
 - `GET /api/admin/reset-demo/preview`
 - `POST /api/admin/reset-demo`
+
+
+> Si estás en CloudShell sin libs Python de backend, el script usa **API mode** por defecto.
+> Variables opcionales para autenticar admin existente:
+> `QFINANCE_API_BASE_URL`, `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`.

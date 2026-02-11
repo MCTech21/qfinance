@@ -82,7 +82,16 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8088/api/seed-
 - Para bootstrap admin:
 
 ```bash
-python scripts/bootstrap_admin.py --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
+bash scripts/bootstrap_admin.sh --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
 ```
 
 - El seed (`POST /api/seed-demo-data`) marca registros como `is_demo=true` para permitir reset selectivo.
+
+
+- Si CloudShell no tiene dependencias Python del backend, el bootstrap usa API mode.
+  Puedes parametrizar:
+
+```bash
+QFINANCE_API_BASE_URL=http://127.0.0.1:8088/api BOOTSTRAP_ADMIN_EMAIL=admin@finrealty.com BOOTSTRAP_ADMIN_PASSWORD=admin123 \
+  bash scripts/bootstrap_admin.sh --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
+```
