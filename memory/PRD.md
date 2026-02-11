@@ -88,6 +88,42 @@ Sistema de control financiero y presupuestal para desarrollos inmobiliarios. Per
 - Lista de errores por fila con columna y motivo
 - Botón Export Excel mejorado
 
+### ✅ Flujo de Autorizaciones (P2) - COMPLETO (11-Feb-2025)
+
+**Estados de Movimientos**
+- `posted`: Contabilizado (aprobado o no requirió autorización)
+- `pending_approval`: Pendiente de autorización (NO contabiliza en ejecutado)
+- `rejected`: Rechazado (NO contabiliza)
+
+**Reglas de Autorización**
+- Movimiento con % avance >100% → `pending_approval`
+- Movimiento con presupuesto $0 → `pending_approval`
+- Solo Admin/Autorizador pueden aprobar/rechazar
+
+**Endpoints**
+- `GET /api/authorizations` - Lista con filtros (empresa, proyecto, año, mes, status)
+- `GET /api/authorizations/pending-summary` - KPI de pendientes
+- `PUT /api/authorizations/{id}` - Aprobar/Rechazar (reject requiere motivo)
+- `POST /api/migrate-movement-status` - Migración de estados legacy
+
+**Dashboard Actualizado**
+- "Ejecutado" solo cuenta `posted`
+- KPI "Pendiente por Autorizar" con monto y conteo
+- Link directo a Autorizaciones
+- Toggle `include_pending` disponible para Admin
+
+**UI Autorizaciones**
+- Filtros: Empresa → Proyecto, Mes, Año, Estado
+- KPIs: Pendientes, Monto Pendiente, Resueltos
+- Detalle de movimiento: empresa, proyecto, partida, proveedor, referencia, monto
+- **Impacto en Presupuesto**: presupuesto, ejecutado actual, monto movimiento, % actual, % si aprueba
+- Botones Aprobar/Rechazar con dialog de confirmación
+- Rechazo requiere motivo obligatorio
+- Historial de autorizaciones resueltas
+
+**Audit Log**
+- Aprobación/Rechazo registrado con usuario, timestamp, movement_id, motivo
+
 ---
 
 ## Próximas Tareas
