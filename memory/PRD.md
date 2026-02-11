@@ -128,15 +128,10 @@ Sistema de control financiero y presupuestal para desarrollos inmobiliarios. Per
 
 ## Próximas Tareas
 
-### 🟡 P2 - Flujo de Autorizaciones
-- Workflow para excesos >100%
-- Aprobación/rechazo por Autorizador
-- Historial de autorizaciones
-
 ### 🟢 P3 - RBAC y Auditoría Completa
-- Gestión completa de roles
-- Audit trail detallado
-- Permisos granulares
+- Gestión completa de roles y permisos granulares
+- Audit trail detallado con filtros avanzados
+- Dashboard de actividad por usuario
 
 ---
 
