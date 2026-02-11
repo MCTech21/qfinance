@@ -1,0 +1,11 @@
+fecha,empresa,proyecto,partida,proveedor,moneda,monto,tipo_cambio,referencia,descripcion
+2025-01-15,Empresa Inexistente,TORRE-A,104,CEMEX,MXN,150000,,FAC-ERR-001,Error empresa no existe
+2025-01-16,Altitud 3,PROYECTO-FAKE,104,ACERO,MXN,85000,,FAC-ERR-002,Error proyecto no existe
+2025-01-17,Altitud 3,TORRE-A,999,CEMEX,MXN,50000,,FAC-ERR-003,Error partida 999 no existe
+2025-01-18,Altitud 3,TORRE-A,104,PROVEEDOR-FAKE,MXN,45000,,FAC-ERR-004,Error proveedor no existe
+2025-01-19,Altitud 3,TORRE-A,104,CEMEX,EUR,30000,,FAC-ERR-005,Error moneda EUR no valida
+2025-01-20,Altitud 3,TORRE-A,104,CEMEX,MXN,-5000,,FAC-ERR-006,Error monto negativo
+2025-01-21,Altitud 3,TORRE-A,104,CEMEX,USD,2000,,FAC-ERR-007,Error USD sin tipo_cambio
+2025-01-22,Terraviva Desarrollos,TORRE-A,104,CEMEX,MXN,10000,,FAC-ERR-008,Error proyecto no pertenece a empresa
+fecha-invalida,Altitud 3,TORRE-A,104,CEMEX,MXN,10000,,FAC-ERR-009,Error fecha invalida
+2025-01-25,Altitud 3,TORRE-A,104,CEMEX,MXN,75000,,FAC-ERR-010,Este registro SI es valido
