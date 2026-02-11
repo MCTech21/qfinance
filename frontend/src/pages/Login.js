@@ -6,14 +6,11 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { toast } from "sonner";
 import { Lock, Mail, Loader2 } from "lucide-react";
-import axios from "axios";
-import { withApiPath } from "../lib/api";
 
 const Login = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [isSeeding, setIsSeeding] = useState(false);
   const { login, user } = useAuth();
   const navigate = useNavigate();
 
@@ -39,24 +36,6 @@ const Login = () => {
     }
   };
 
-  const handleSeedData = async () => {
-    setIsSeeding(true);
-    try {
-      await axios.post(withApiPath("/seed-demo-data"));
-      toast.success("Datos demo cargados correctamente");
-    } catch (error) {
-      toast.error("Error al cargar datos demo");
-    } finally {
-      setIsSeeding(false);
-    }
-  };
-
-  const demoUsers = [
-    { email: "admin@finrealty.com", password: "admin123", role: "Administrador" },
-    { email: "finanzas@finrealty.com", password: "finanzas123", role: "Finanzas" },
-    { email: "autorizador@finrealty.com", password: "auth123", role: "Autorizador" },
-    { email: "lectura@finrealty.com", password: "lectura123", role: "Solo Lectura" },
-  ];
 
   return (
     <div className="min-h-screen bg-background flex">
@@ -156,46 +135,6 @@ const Login = () => {
             </Button>
           </form>
           
-          {/* Demo section */}
-          <div className="pt-6 border-t border-border">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm text-muted-foreground">Usuarios demo:</span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleSeedData}
-                disabled={isSeeding}
-                data-testid="seed-data-btn"
-              >
-                {isSeeding ? (
-                  <>
-                    <Loader2 className="h-3 w-3 mr-2 animate-spin" />
-                    Cargando...
-                  </>
-                ) : (
-                  "Cargar datos demo"
-                )}
-              </Button>
-            </div>
-            
-            <div className="grid grid-cols-2 gap-2">
-              {demoUsers.map((demo) => (
-                <button
-                  key={demo.email}
-                  type="button"
-                  onClick={() => {
-                    setEmail(demo.email);
-                    setPassword(demo.password);
-                  }}
-                  className="text-left p-3 rounded-md border border-border hover:bg-muted/50 transition-colors"
-                  data-testid={`demo-user-${demo.role.toLowerCase().replace(/\s+/g, '-')}`}
-                >
-                  <p className="text-xs font-medium truncate">{demo.email}</p>
-                  <p className="text-xs text-muted-foreground">{demo.role}</p>
-                </button>
-              ))}
-            </div>
-          </div>
         </div>
       </div>
     </div>
