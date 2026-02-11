@@ -3,6 +3,9 @@ set -euo pipefail
 
 WEB_URL="${WEB_URL:-http://127.0.0.1:8088}"
 VERIFY_SEED_ENDPOINT="${VERIFY_SEED_ENDPOINT:-1}"
+BUILD_DIR="${BUILD_DIR:-frontend/build}"
+
+FORBIDDEN_PATTERN='emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo'
 
 check_no_versioned_env() {
   echo "[INFO] Verificando env no versionados (excepto .env.example)..."
@@ -15,12 +18,17 @@ check_no_versioned_env() {
 }
 
 check_build_strings() {
-  echo "[INFO] Buscando patrones prohibidos en frontend/build..."
-  if grep -RInEi 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo' frontend/build/; then
-    echo "[ERROR] Se encontraron patrones prohibidos en frontend/build/." >&2
+  echo "[INFO] Buscando patrones prohibidos en ${BUILD_DIR}..."
+  if [[ ! -d "${BUILD_DIR}" ]]; then
+    echo "[ERROR] No existe ${BUILD_DIR}. Ejecuta scripts/build_frontend.sh primero." >&2
     exit 1
   fi
-  echo "[OK] frontend/build limpio de referencias prohibidas (demo/emergent)."
+
+  if grep -RInEi "${FORBIDDEN_PATTERN}" "${BUILD_DIR}"; then
+    echo "[ERROR] Se encontraron patrones prohibidos en ${BUILD_DIR}." >&2
+    exit 1
+  fi
+  echo "[OK] ${BUILD_DIR} limpio de referencias prohibidas (demo/emergent)."
 }
 
 resolve_main_js_path() {
@@ -50,7 +58,7 @@ check_served_main_js() {
     exit 1
   fi
 
-  if curl -fsSL "${WEB_URL}${main_js}" | grep -Eiq 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo'; then
+  if curl -fsSL "${WEB_URL}${main_js}" | grep -Eiq "${FORBIDDEN_PATTERN}"; then
     echo "[ERROR] El JS servido contiene patrones prohibidos." >&2
     exit 1
   fi

@@ -5,6 +5,22 @@
 - Backend FastAPI escuchando en `127.0.0.1:8000`.
 - nginx proxea `/api/*` hacia `127.0.0.1:8000`.
 
+
+## CloudShell: sync + deploy sin desface
+
+Usa este comando único después de cada merge/PR para evitar código viejo local:
+
+```bash
+WEB_URL=http://52.53.215.40:8088 bash scripts/cloudshell_sync_and_deploy.sh
+```
+
+Este flujo hace:
+- `fetch + checkout + reset --hard + clean` contra `origin/main`.
+- build + publish (`rsync --delete`) + reload de nginx.
+- verificación post-deploy contra el host servido.
+
+> Si tu entorno no permite activar swap (por ejemplo, `swapon ... Invalid argument`), el deploy ya no se detiene por eso cuando `SWAP_REQUIRED=0` (default).
+
 ## P0 - Build seguro
 ```bash
 scripts/build_frontend.sh
