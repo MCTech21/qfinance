@@ -65,6 +65,11 @@ def request_json(method: str, url: str, payload=None, token: str = None):
         return 0, {"detail": f"Cannot reach API endpoint: {url} ({e.reason})"}
 
 
+
+def format_exception_message(exc: Exception) -> str:
+    msg = str(exc).strip()
+    return msg or exc.__class__.__name__
+
 def run_api_mode(args, email, username):
     base = args.api_base_url.rstrip("/")
 
@@ -196,15 +201,24 @@ def main():
         return
 
     if args.mode == "db":
-        run_db_mode(args, email, username)
+        try:
+            run_db_mode(args, email, username)
+        except Exception as exc:
+            raise SystemExit(f"DB mode failed: {format_exception_message(exc)}") from exc
         return
 
     # auto mode
     try:
         import motor  # noqa: F401
         if os.getenv("MONGO_URL") and os.getenv("DB_NAME"):
-            run_db_mode(args, email, username)
-            return
+            try:
+                run_db_mode(args, email, username)
+                return
+            except Exception as exc:
+                print(
+                    f"[bootstrap_admin] DB mode failed, falling back to API mode: {format_exception_message(exc)}",
+                    file=sys.stderr,
+                )
     except ModuleNotFoundError:
         pass
 
