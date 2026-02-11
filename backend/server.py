@@ -601,56 +601,62 @@ async def update_project(project_id: str, updates: ProjectBase, current_user: di
 
 # ========================= PARTIDA ROUTES =========================
 @api_router.get("/partidas", response_model=List[Partida])
-async def get_partidas(current_user: dict = Depends(get_current_user)):
+async def get_partidas(current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
     partidas = await db.partidas.find({}, {"_id": 0}).to_list(1000)
     return [Partida(**p) for p in partidas]
 
 @api_router.post("/partidas", response_model=Partida)
-async def create_partida(partida_data: PartidaBase, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+async def create_partida(partida_data: PartidaBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
     partida = Partida(**partida_data.model_dump())
     doc = partida.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
     await db.partidas.insert_one(doc)
-    await log_audit(current_user, "CREATE", "partidas", partida.id, {"data": doc})
+    await log_audit(current_user, "CREATE", "partidas", partida.id, {"data": {"code": doc['code'], "name": doc['name']}})
     return partida
 
 @api_router.put("/partidas/{partida_id}", response_model=Partida)
-async def update_partida(partida_id: str, updates: PartidaBase, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+async def update_partida(partida_id: str, updates: PartidaBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
     old_doc = await db.partidas.find_one({"id": partida_id}, {"_id": 0})
     if not old_doc:
         raise HTTPException(status_code=404, detail="Partida no encontrada")
     
     update_data = updates.model_dump()
     await db.partidas.update_one({"id": partida_id}, {"$set": update_data})
-    await log_audit(current_user, "UPDATE", "partidas", partida_id, {"before": old_doc, "after": update_data})
+    await log_audit(current_user, "UPDATE", "partidas", partida_id, {
+        "before": {"code": old_doc.get('code'), "name": old_doc.get('name')},
+        "after": {"code": update_data.get('code'), "name": update_data.get('name')}
+    })
     
     updated = await db.partidas.find_one({"id": partida_id}, {"_id": 0})
     return Partida(**updated)
 
 # ========================= PROVIDER ROUTES =========================
 @api_router.get("/providers", response_model=List[Provider])
-async def get_providers(current_user: dict = Depends(get_current_user)):
+async def get_providers(current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
     providers = await db.providers.find({}, {"_id": 0}).to_list(1000)
     return [Provider(**p) for p in providers]
 
 @api_router.post("/providers", response_model=Provider)
-async def create_provider(provider_data: ProviderBase, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+async def create_provider(provider_data: ProviderBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
     provider = Provider(**provider_data.model_dump())
     doc = provider.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
     await db.providers.insert_one(doc)
-    await log_audit(current_user, "CREATE", "providers", provider.id, {"data": doc})
+    await log_audit(current_user, "CREATE", "providers", provider.id, {"data": {"code": doc['code'], "name": doc['name']}})
     return provider
 
 @api_router.put("/providers/{provider_id}", response_model=Provider)
-async def update_provider(provider_id: str, updates: ProviderBase, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+async def update_provider(provider_id: str, updates: ProviderBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
     old_doc = await db.providers.find_one({"id": provider_id}, {"_id": 0})
     if not old_doc:
         raise HTTPException(status_code=404, detail="Proveedor no encontrado")
     
     update_data = updates.model_dump()
     await db.providers.update_one({"id": provider_id}, {"$set": update_data})
-    await log_audit(current_user, "UPDATE", "providers", provider_id, {"before": old_doc, "after": update_data})
+    await log_audit(current_user, "UPDATE", "providers", provider_id, {
+        "before": {"code": old_doc.get('code'), "name": old_doc.get('name')},
+        "after": {"code": update_data.get('code'), "name": update_data.get('name')}
+    })
     
     updated = await db.providers.find_one({"id": provider_id}, {"_id": 0})
     return Provider(**updated)
@@ -662,7 +668,7 @@ async def get_budgets(
     partida_codigo: Optional[str] = None,
     year: Optional[int] = None,
     month: Optional[int] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_permission(Permission.VIEW_BUDGETS))
 ):
     query = {}
     if project_id:
