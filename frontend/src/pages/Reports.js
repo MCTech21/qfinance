@@ -120,45 +120,156 @@ const Reports = () => {
     });
   };
 
-  const exportToExcel = () => {
+  const exportToExcel = async () => {
     if (!dashboardData) return;
+    setIsExporting(true);
     
-    const monthName = months.find(m => m.value === filters.month)?.label || filters.month;
+    try {
+      // Fetch export data from backend (logs audit)
+      const response = await api().get("/reports/export-data", {
+        params: {
+          empresa_id: filters.empresa_id !== "all" ? filters.empresa_id : undefined,
+          project_id: filters.project_id !== "all" ? filters.project_id : undefined,
+          year: filters.year,
+          month: filters.month
+        }
+      });
+      
+      const data = response.data;
+      const monthName = months.find(m => m.value === filters.month)?.label || filters.month;
+      
+      // HOJA 1: RESUMEN (KPIs)
+      const resumenData = [
+        ["REPORTE FINANCIERO - QFINANCE"],
+        [""],
+        ["FILTROS APLICADOS"],
+        ["Empresa:", data.filtros.empresa],
+        ["Proyecto:", data.filtros.proyecto],
+        ["Período:", data.periodo],
+        ["Generado:", data.generated_at],
+        ["Zona horaria:", data.timezone],
+        [""],
+        ["RESUMEN GENERAL"],
+        ["Concepto", "Valor"],
+        ["Presupuesto", data.resumen.presupuesto],
+        ["Ejecutado", data.resumen.ejecutado],
+        ["Variación", data.resumen.variacion],
+        ["% Avance", `${data.resumen.porcentaje.toFixed(1)}%`],
+        ["Estado", data.resumen.semaforo]
+      ];
+      
+      // HOJA 2: DETALLE POR PARTIDA
+      const detalleHeader = ["Código", "Partida", "Grupo", "Presupuesto", "Ejecutado", "Variación", "% Avance", "Semáforo"];
+      const detalleRows = data.detalle_partidas.map(p => [
+        p.codigo,
+        p.nombre,
+        p.grupo,
+        p.presupuesto,
+        p.ejecutado,
+        p.variacion,
+        `${p.porcentaje.toFixed(1)}%`,
+        p.semaforo
+      ]);
+      
+      const detalleData = [
+        ["DETALLE POR PARTIDA"],
+        ["Período:", data.periodo],
+        [""],
+        detalleHeader,
+        ...detalleRows
+      ];
+      
+      // Create workbook with 2 sheets
+      const wb = XLSX.utils.book_new();
+      
+      // Sheet 1: Resumen
+      const wsResumen = XLSX.utils.aoa_to_sheet(resumenData);
+      wsResumen['!cols'] = [{ wch: 20 }, { wch: 25 }];
+      XLSX.utils.book_append_sheet(wb, wsResumen, "Resumen");
+      
+      // Sheet 2: Detalle
+      const wsDetalle = XLSX.utils.aoa_to_sheet(detalleData);
+      wsDetalle['!cols'] = [
+        { wch: 10 }, { wch: 35 }, { wch: 15 }, 
+        { wch: 15 }, { wch: 15 }, { wch: 15 }, 
+        { wch: 12 }, { wch: 10 }
+      ];
+      XLSX.utils.book_append_sheet(wb, wsDetalle, "Detalle");
+      
+      // Generate and save file
+      const excelBuffer = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+      const blob = new Blob([excelBuffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      saveAs(blob, `QFinance_Reporte_${monthName}_${filters.year}.xlsx`);
+      
+      toast.success("Reporte exportado correctamente");
+    } catch (error) {
+      toast.error("Error al exportar reporte");
+      console.error(error);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  // IMPORT CSV Functions
+  const handleFileSelect = (e) => {
+    const file = e.target.files[0];
+    if (file && file.name.endsWith('.csv')) {
+      setImportFile(file);
+      setImportResult(null);
+    } else {
+      toast.error("Solo se aceptan archivos CSV");
+    }
+  };
+
+  const handleImportCSV = async () => {
+    if (!importFile) return;
     
-    const summaryData = [
-      ["REPORTE FINANCIERO", "", "", ""],
-      ["Período:", `${monthName} ${filters.year}`, "", ""],
-      ["", "", "", ""],
-      ["RESUMEN GENERAL", "", "", ""],
-      ["Presupuesto", formatCurrency(dashboardData.totals.budget), "", ""],
-      ["Ejecutado", formatCurrency(dashboardData.totals.real), "", ""],
-      ["Variación", formatCurrency(dashboardData.totals.variation), "", ""],
-      ["% Avance", `${dashboardData.totals.percentage.toFixed(1)}%`, "", ""],
-      ["", "", "", ""],
-      ["DETALLE POR PARTIDA", "", "", "", "", "", "", ""],
-      ["Código", "Partida", "Grupo", "Presupuesto", "Ejecutado", "Variación", "% Avance", "Estado"],
-      ...dashboardData.by_partida.map(p => [
-        p.partida_codigo,
-        p.partida_nombre,
-        p.partida_grupo,
-        p.budget,
-        p.real,
-        p.variation,
-        `${p.percentage.toFixed(1)}%`,
-        p.traffic_light === "green" ? "Normal" : p.traffic_light === "yellow" ? "Alerta" : "Exceso"
-      ])
-    ];
+    setIsImporting(true);
+    setImportResult(null);
     
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet(summaryData);
-    ws['!cols'] = [{ wch: 12 }, { wch: 35 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 12 }, { wch: 10 }];
-    XLSX.utils.book_append_sheet(wb, ws, "Reporte");
+    try {
+      const formData = new FormData();
+      formData.append('file', importFile);
+      
+      const response = await api().post("/movements/import-csv", formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      
+      setImportResult(response.data);
+      
+      if (response.data.insertadas > 0) {
+        toast.success(`${response.data.insertadas} movimientos importados`);
+        fetchData(); // Refresh data
+      }
+      
+      if (response.data.rechazadas > 0) {
+        toast.warning(`${response.data.rechazadas} filas rechazadas`);
+      }
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Error al importar CSV");
+      console.error(error);
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const downloadTemplateCSV = () => {
+    const headers = "fecha,empresa,proyecto,partida,proveedor,moneda,monto,tipo_cambio,referencia,descripcion";
+    const example1 = "2025-01-15,Altitud 3,TORRE-A,104,CEMEX,MXN,150000,,FAC-001,Concreto premezclado";
+    const example2 = "2025-01-20,Terraviva Desarrollos,PLAZA-M,105,TRANS,USD,5000,17.50,FAC-002,Transporte materiales";
+    const csvContent = `${headers}\n${example1}\n${example2}`;
     
-    const excelBuffer = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-    const data = new Blob([excelBuffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-    saveAs(data, `Reporte_Financiero_${monthName}_${filters.year}.xlsx`);
-    
-    toast.success("Reporte exportado");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    saveAs(blob, 'plantilla_import_movimientos.csv');
+    toast.success("Plantilla descargada");
+  };
+
+  const resetImport = () => {
+    setImportFile(null);
+    setImportResult(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
   };
 
   const exportDetailToExcel = () => {
