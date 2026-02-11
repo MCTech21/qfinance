@@ -16,11 +16,11 @@ check_no_versioned_env() {
 
 check_build_strings() {
   echo "[INFO] Buscando patrones prohibidos en frontend/build..."
-  if grep -RInE 'emergentagent|expense-tracker|preview\.emergentagent\.com' frontend/build/; then
+  if grep -RInEi 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo' frontend/build/; then
     echo "[ERROR] Se encontraron patrones prohibidos en frontend/build/." >&2
     exit 1
   fi
-  echo "[OK] frontend/build limpio de emergentagent/expense-tracker."
+  echo "[OK] frontend/build limpio de referencias prohibidas (demo/emergent)."
 }
 
 resolve_main_js_path() {
@@ -50,7 +50,7 @@ check_served_main_js() {
     exit 1
   fi
 
-  if curl -fsSL "${WEB_URL}${main_js}" | grep -Eiq 'emergentagent|expense-tracker|preview\.emergentagent\.com'; then
+  if curl -fsSL "${WEB_URL}${main_js}" | grep -Eiq 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo'; then
     echo "[ERROR] El JS servido contiene patrones prohibidos." >&2
     exit 1
   fi
