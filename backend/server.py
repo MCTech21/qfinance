@@ -192,7 +192,7 @@ class Movement(MovementBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     created_by: str
-    status: MovementStatus = MovementStatus.NORMAL
+    status: MovementStatus = MovementStatus.POSTED
     authorization_id: Optional[str] = None
 
 class MovementCreate(BaseModel):
