@@ -57,6 +57,37 @@ Sistema de control financiero y presupuestal para desarrollos inmobiliarios. Per
 - README.md actualizado
 - Foto del edificio en login MANTENIDA intacta
 
+### ✅ Entrega B: Import/Export (P1) - COMPLETO (11-Feb-2025)
+
+**Import CSV (/api/movements/import-csv)**
+- Columnas exactas: fecha, empresa, proyecto, partida, proveedor, moneda, monto, tipo_cambio, referencia, descripcion
+- Validaciones bloqueantes por fila:
+  - ✅ empresa existe y activa
+  - ✅ proyecto existe, activo y pertenece a empresa
+  - ✅ partida existe y activa en catalogo_partidas
+  - ✅ monto > 0
+  - ✅ moneda ∈ {MXN, USD}
+  - ✅ USD requiere tipo_cambio obligatorio
+  - ✅ fecha sin hora → interpreta America/Tijuana, guarda UTC
+- Detección duplicados: fecha+empresa+proyecto+proveedor+monto+referencia
+- Response: total_filas, insertadas, rechazadas, duplicadas_omitidas + errores por fila
+
+**Export Excel (/api/reports/export-data)**
+- Hoja 1 "Resumen": KPIs filtrados
+- Hoja 2 "Detalle": por partida + semáforo
+- Fechas en America/Tijuana
+- Refleja filtros aplicados en UI
+
+**Audit Log (/api/import-export-logs)**
+- Import: inicio/fin, usuario, timestamp, conteos, errores resumen
+- Export: usuario, timestamp, filtros usados
+
+**Frontend UI**
+- Dialog de Import CSV con plantilla descargable
+- Visualización de resultados (insertadas/rechazadas/duplicadas)
+- Lista de errores por fila con columna y motivo
+- Botón Export Excel mejorado
+
 ---
 
 ## Próximas Tareas
