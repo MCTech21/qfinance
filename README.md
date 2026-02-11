@@ -150,6 +150,28 @@ curl -fsSL http://127.0.0.1:8088/login | head
 
 Más detalle en `docs/ec2_deploy.md`.
 
+### Deploy por AWS SSM desde CloudShell (sin SSH)
+
+Para reducir conflictos de merge en este README, el runbook completo vive en:
+
+- `docs/cloudshell_ssm_deploy.md`
+
+Resumen rápido:
+
+```bash
+# Dentro del repo
+bash run_ssm_deploy_qfinance.sh
+
+# Si estás fuera del repo en CloudShell
+REPO_URL=<REPO_URL> bash scripts/cloudshell_bootstrap_ssm_deploy.sh
+```
+
+Salida esperada al final:
+- `COMMAND_ID=...`
+- `FINAL_STATUS=Success`
+- `DEPLOYING_COMMIT=...`
+- `VERIFY_EXIT_CODE=0`
+
 Checklist rápido “no env versionados” (excluye `.env.example`):
 
 ```bash
