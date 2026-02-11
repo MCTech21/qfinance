@@ -530,12 +530,12 @@ async def create_empresa(empresa_data: EmpresaBase, current_user: dict = Depends
 
 # ========================= CATALOGO PARTIDAS ROUTES =========================
 @api_router.get("/catalogo-partidas")
-async def get_catalogo_partidas(current_user: dict = Depends(get_current_user)):
+async def get_catalogo_partidas(current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
     partidas = await db.catalogo_partidas.find({}, {"_id": 0}).sort("codigo", 1).to_list(1000)
     return partidas
 
 @api_router.get("/catalogo-partidas/{codigo}")
-async def get_catalogo_partida(codigo: str, current_user: dict = Depends(get_current_user)):
+async def get_catalogo_partida(codigo: str, current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
     partida = await db.catalogo_partidas.find_one({"codigo": codigo}, {"_id": 0})
     if not partida:
         raise HTTPException(status_code=404, detail=f"Partida {codigo} no encontrada en catálogo")
@@ -554,7 +554,7 @@ async def validate_partida(codigo: str) -> dict:
 @api_router.get("/projects")
 async def get_projects(
     empresa_id: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))
 ):
     query = {}
     if empresa_id:
@@ -563,7 +563,7 @@ async def get_projects(
     return projects
 
 @api_router.post("/projects")
-async def create_project(project_data: ProjectBase, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+async def create_project(project_data: ProjectBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
     # Validar que empresa existe
     empresa = await db.empresas.find_one({"id": project_data.empresa_id}, {"_id": 0})
     if not empresa:
@@ -573,11 +573,12 @@ async def create_project(project_data: ProjectBase, current_user: dict = Depends
     doc = project.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
     await db.projects.insert_one(doc)
-    await log_audit(current_user, "CREATE", "projects", project.id, {"data": doc})
+    await log_audit(current_user, "CREATE", "projects", project.id, {"data": {"code": doc['code'], "name": doc['name'], "empresa_id": doc['empresa_id']}})
+    doc.pop('_id', None)
     return doc
 
 @api_router.put("/projects/{project_id}")
-async def update_project(project_id: str, updates: ProjectBase, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+async def update_project(project_id: str, updates: ProjectBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
     old_doc = await db.projects.find_one({"id": project_id}, {"_id": 0})
     if not old_doc:
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")
@@ -590,7 +591,10 @@ async def update_project(project_id: str, updates: ProjectBase, current_user: di
     
     update_data = updates.model_dump()
     await db.projects.update_one({"id": project_id}, {"$set": update_data})
-    await log_audit(current_user, "UPDATE", "projects", project_id, {"before": old_doc, "after": update_data})
+    await log_audit(current_user, "UPDATE", "projects", project_id, {
+        "before": {"code": old_doc.get('code'), "name": old_doc.get('name')},
+        "after": {"code": update_data.get('code'), "name": update_data.get('name')}
+    })
     
     updated = await db.projects.find_one({"id": project_id}, {"_id": 0})
     return Project(**updated)
