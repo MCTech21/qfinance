@@ -7,8 +7,7 @@ import { Label } from "../components/ui/label";
 import { toast } from "sonner";
 import { Lock, Mail, Loader2 } from "lucide-react";
 import axios from "axios";
-
-const API_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
+import { withApiPath } from "../lib/api";
 
 const Login = () => {
   const [email, setEmail] = useState("");
@@ -43,7 +42,7 @@ const Login = () => {
   const handleSeedData = async () => {
     setIsSeeding(true);
     try {
-      await axios.post(`${API_URL}/api/seed-demo-data`);
+      await axios.post(withApiPath("/seed-demo-data"));
       toast.success("Datos demo cargados correctamente");
     } catch (error) {
       toast.error("Error al cargar datos demo");
