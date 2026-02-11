@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Query, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -194,6 +194,8 @@ class Movement(MovementBase):
     created_by: str
     status: MovementStatus = MovementStatus.POSTED
     authorization_id: Optional[str] = None
+    is_demo: bool = False
+    reversal_of_id: Optional[str] = None
 
 class MovementCreate(BaseModel):
     project_id: str
@@ -405,6 +407,58 @@ async def log_audit(user: dict, action: str, entity_type: str, entity_id: str, c
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
     await db.audit_logs.insert_one(audit)
+
+async def log_admin_action(
+    request: Request,
+    user: dict,
+    action: str,
+    entity: str,
+    entity_id: str,
+    success: bool,
+    before: Optional[dict] = None,
+    after: Optional[dict] = None,
+    message: Optional[str] = None,
+):
+    payload = {
+        "result": "success" if success else "failure",
+        "before": before,
+        "after": after,
+        "message": message,
+        "user_agent": request.headers.get("user-agent"),
+    }
+    await log_audit(user, action, entity, entity_id, payload, ip_address=request.client.host if request.client else None)
+
+
+def ensure_admin(current_user: dict) -> dict:
+    if current_user.get("role") != UserRole.ADMIN.value:
+        raise HTTPException(status_code=403, detail="Solo administradores")
+    return current_user
+
+
+def active_query(include_inactive: bool = False, extra: Optional[dict] = None) -> dict:
+    query = extra.copy() if extra else {}
+    if not include_inactive:
+        query["is_active"] = {"$ne": False}
+    return query
+
+
+async def assert_no_references(entity: str, entity_id: str):
+    checks = {
+        "empresas": [("projects", {"empresa_id": entity_id}, "proyectos")],
+        "projects": [
+            ("budgets", {"project_id": entity_id}, "presupuestos"),
+            ("movements", {"project_id": entity_id}, "movimientos"),
+        ],
+        "providers": [("movements", {"provider_id": entity_id}, "movimientos")],
+        "users": [
+            ("movements", {"created_by": entity_id}, "movimientos"),
+            ("budgets", {"created_by": entity_id}, "presupuestos"),
+            ("authorizations", {"requested_by": entity_id}, "autorizaciones"),
+        ],
+    }
+    for collection, query, label in checks.get(entity, []):
+        if await db[collection].find_one(query, {"_id": 0}):
+            raise HTTPException(status_code=409, detail=f"No se puede eliminar físicamente: tiene referencias en {label}")
 
 def get_traffic_light(percentage: float) -> str:
     if percentage <= 90:
@@ -2335,6 +2389,13 @@ async def seed_demo_data():
         doc = config.model_dump()
         doc['updated_at'] = doc['updated_at'].isoformat()
         await db.config.insert_one(doc)
+
+    demo_collections = [
+        "users", "empresas", "projects", "catalogo_partidas", "partidas", "providers",
+        "budgets", "movements", "authorizations", "exchange_rates", "config", "import_export_logs"
+    ]
+    for name in demo_collections:
+        await db[name].update_many({}, {"$set": {"is_demo": True}})
     
     return {
         "message": "Demo data seeded successfully",
@@ -2347,6 +2408,314 @@ async def seed_demo_data():
             "months": "Enero, Febrero, Marzo 2025"
         }
     }
+
+
+class AdminResetRequest(BaseModel):
+    confirmation_text: str
+
+
+@api_router.get("/admin/catalogs/{entity}")
+async def admin_list_entity(
+    entity: str,
+    include_inactive: bool = False,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    collection_map = {
+        "empresas": ("empresas", [("nombre", 1)]),
+        "proyectos": ("projects", [("name", 1)]),
+        "catalogo_partidas": ("catalogo_partidas", [("codigo", 1)]),
+        "proveedores": ("providers", [("name", 1)]),
+        "usuarios": ("users", [("name", 1)]),
+    }
+    if entity not in collection_map:
+        raise HTTPException(status_code=404, detail="Entidad admin no soportada")
+
+    collection, sort = collection_map[entity]
+    query = active_query(include_inactive)
+    projection = {"_id": 0}
+    if collection == "users":
+        projection["password_hash"] = 0
+    cursor = db[collection].find(query, projection)
+    if sort:
+        cursor = cursor.sort(sort)
+    return await cursor.to_list(1000)
+
+
+@api_router.post("/admin/catalogs/{entity}")
+async def admin_create_entity(
+    entity: str,
+    payload: dict,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    now = datetime.now(timezone.utc).isoformat()
+    collection_map = {
+        "empresas": "empresas",
+        "proyectos": "projects",
+        "catalogo_partidas": "catalogo_partidas",
+        "proveedores": "providers",
+        "usuarios": "users",
+    }
+    if entity not in collection_map:
+        raise HTTPException(status_code=404, detail="Entidad admin no soportada")
+
+    collection = collection_map[entity]
+    doc = payload.copy()
+    doc["id"] = doc.get("id") or str(uuid.uuid4())
+    doc.setdefault("is_active", True)
+    doc.setdefault("is_demo", False)
+    doc.setdefault("created_at", now)
+    doc.setdefault("updated_at", now)
+
+    if collection == "users":
+        password = doc.pop("password", None)
+        if not password:
+            raise HTTPException(status_code=400, detail="password es requerido")
+        doc["password_hash"] = hash_password(password)
+
+    await db[collection].insert_one(doc)
+    await log_admin_action(request, current_user, "ADMIN_CREATE", entity, doc["id"], True, after={k: v for k, v in doc.items() if k != "password_hash"})
+    doc.pop("password_hash", None)
+    return doc
+
+
+@api_router.put("/admin/catalogs/{entity}/{entity_id}")
+async def admin_update_entity(
+    entity: str,
+    entity_id: str,
+    payload: dict,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    collection_map = {
+        "empresas": "empresas",
+        "proyectos": "projects",
+        "catalogo_partidas": "catalogo_partidas",
+        "proveedores": "providers",
+        "usuarios": "users",
+    }
+    if entity not in collection_map:
+        raise HTTPException(status_code=404, detail="Entidad admin no soportada")
+
+    collection = collection_map[entity]
+    old_doc = await db[collection].find_one({"id": entity_id}, {"_id": 0})
+    if not old_doc:
+        raise HTTPException(status_code=404, detail="Registro no encontrado")
+
+    if collection == "users" and "role" in payload and old_doc.get("role") == UserRole.ADMIN.value and payload.get("role") != UserRole.ADMIN.value:
+        admins = await db.users.count_documents({"role": UserRole.ADMIN.value, "is_active": {"$ne": False}})
+        if admins <= 1:
+            raise HTTPException(status_code=409, detail="No puedes quitar el último admin")
+
+    if collection == "users" and "password" in payload:
+        payload["password_hash"] = hash_password(payload.pop("password"))
+
+    if entity == "catalogo_partidas" and old_doc.get("codigo") != payload.get("codigo", old_doc.get("codigo")):
+        raise HTTPException(status_code=400, detail="No se permite cambiar código de partida")
+
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db[collection].update_one({"id": entity_id}, {"$set": payload})
+    updated = await db[collection].find_one({"id": entity_id}, {"_id": 0})
+
+    await log_admin_action(
+        request,
+        current_user,
+        "ADMIN_UPDATE",
+        entity,
+        entity_id,
+        True,
+        before={k: v for k, v in old_doc.items() if k != "password_hash"},
+        after={k: v for k, v in updated.items() if k != "password_hash"},
+    )
+    updated.pop("password_hash", None)
+    return updated
+
+
+@api_router.delete("/admin/catalogs/{entity}/{entity_id}")
+async def admin_delete_entity(
+    entity: str,
+    entity_id: str,
+    hard_delete: bool = False,
+    request: Request = None,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    collection_map = {
+        "empresas": "empresas",
+        "proyectos": "projects",
+        "catalogo_partidas": "catalogo_partidas",
+        "proveedores": "providers",
+        "usuarios": "users",
+    }
+    if entity not in collection_map:
+        raise HTTPException(status_code=404, detail="Entidad admin no soportada")
+    collection = collection_map[entity]
+
+    old_doc = await db[collection].find_one({"id": entity_id}, {"_id": 0})
+    if not old_doc:
+        raise HTTPException(status_code=404, detail="Registro no encontrado")
+
+    if hard_delete:
+        await assert_no_references(entity, entity_id)
+        await db[collection].delete_one({"id": entity_id})
+        if request:
+            await log_admin_action(request, current_user, "ADMIN_HARD_DELETE", entity, entity_id, True, before={k: v for k, v in old_doc.items() if k != "password_hash"})
+        return {"message": "Eliminado físicamente"}
+
+    await db[collection].update_one({"id": entity_id}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc).isoformat()}})
+    if request:
+        await log_admin_action(request, current_user, "ADMIN_SOFT_DELETE", entity, entity_id, True, before={k: v for k, v in old_doc.items() if k != "password_hash"}, after={"is_active": False})
+    return {"message": "Desactivado"}
+
+
+@api_router.post("/admin/catalogs/{entity}/{entity_id}/restore")
+async def admin_restore_entity(
+    entity: str,
+    entity_id: str,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    collection_map = {
+        "empresas": "empresas",
+        "proyectos": "projects",
+        "catalogo_partidas": "catalogo_partidas",
+        "proveedores": "providers",
+        "usuarios": "users",
+    }
+    if entity not in collection_map:
+        raise HTTPException(status_code=404, detail="Entidad admin no soportada")
+    collection = collection_map[entity]
+
+    old_doc = await db[collection].find_one({"id": entity_id}, {"_id": 0})
+    if not old_doc:
+        raise HTTPException(status_code=404, detail="Registro no encontrado")
+
+    await db[collection].update_one({"id": entity_id}, {"$set": {"is_active": True, "updated_at": datetime.now(timezone.utc).isoformat()}})
+    await log_admin_action(request, current_user, "ADMIN_RESTORE", entity, entity_id, True, before={"is_active": old_doc.get("is_active", True)}, after={"is_active": True})
+    return {"message": "Restaurado"}
+
+
+@api_router.get("/admin/movimientos")
+async def admin_get_movimientos(
+    include_inactive: bool = False,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    return await db.movements.find(active_query(include_inactive), {"_id": 0}).sort("created_at", -1).to_list(1000)
+
+
+@api_router.put("/admin/movimientos/{movement_id}")
+async def admin_update_movimiento(
+    movement_id: str,
+    payload: dict,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    old_doc = await db.movements.find_one({"id": movement_id}, {"_id": 0})
+    if not old_doc:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    if old_doc.get("status") == MovementStatus.POSTED.value:
+        raise HTTPException(status_code=409, detail="Movimiento posted no se puede editar")
+
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.movements.update_one({"id": movement_id}, {"$set": payload})
+    updated = await db.movements.find_one({"id": movement_id}, {"_id": 0})
+    await log_admin_action(request, current_user, "ADMIN_UPDATE", "movimientos", movement_id, True, before=old_doc, after=updated)
+    return updated
+
+
+@api_router.delete("/admin/movimientos/{movement_id}")
+async def admin_delete_movimiento(
+    movement_id: str,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    mov = await db.movements.find_one({"id": movement_id}, {"_id": 0})
+    if not mov:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    if mov.get("status") == MovementStatus.POSTED.value:
+        raise HTTPException(status_code=409, detail="Movimiento posted no se puede borrar")
+
+    await db.movements.update_one({"id": movement_id}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc).isoformat()}})
+    await log_admin_action(request, current_user, "ADMIN_SOFT_DELETE", "movimientos", movement_id, True, before=mov, after={"is_active": False})
+    return {"message": "Movimiento desactivado"}
+
+
+@api_router.post("/admin/movimientos/{movement_id}/reverse")
+async def admin_reverse_movement(
+    movement_id: str,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    movement = await db.movements.find_one({"id": movement_id}, {"_id": 0})
+    if not movement:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    if movement.get("status") != MovementStatus.POSTED.value:
+        raise HTTPException(status_code=409, detail="Solo movimientos posted pueden revertirse")
+
+    existing_reversal = await db.movements.find_one({"reversal_of_id": movement_id}, {"_id": 0})
+    if existing_reversal:
+        raise HTTPException(status_code=409, detail="Movimiento ya tiene reversa")
+
+    reverse_doc = movement.copy()
+    reverse_doc["id"] = str(uuid.uuid4())
+    reverse_doc["amount_original"] = -abs(float(movement.get("amount_original", 0)))
+    reverse_doc["amount_mxn"] = -abs(float(movement.get("amount_mxn", 0)))
+    reverse_doc["reference"] = f"REV-{movement.get('reference', movement_id)}"
+    reverse_doc["description"] = f"Reversa de {movement_id}. {movement.get('description','')}".strip()
+    reverse_doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    reverse_doc["created_by"] = current_user["user_id"]
+    reverse_doc["reversal_of_id"] = movement_id
+    reverse_doc["is_active"] = True
+
+    await db.movements.insert_one(reverse_doc)
+    await log_admin_action(request, current_user, "ADMIN_REVERSE", "movimientos", reverse_doc["id"], True, before=movement, after=reverse_doc)
+    return reverse_doc
+
+
+@api_router.get("/admin/reset-demo/preview")
+async def reset_demo_preview(current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
+    ensure_admin(current_user)
+    collections = ["movements", "budgets", "authorizations", "providers", "catalogo_partidas", "projects", "empresas", "users", "exchange_rates", "config", "import_export_logs"]
+    return {name: await db[name].count_documents({"is_demo": True}) for name in collections}
+
+
+@api_router.post("/admin/reset-demo")
+async def reset_demo_data(
+    payload: AdminResetRequest,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    if payload.confirmation_text != "RESET DEMO":
+        raise HTTPException(status_code=400, detail="Confirmación inválida. Escribe exactamente RESET DEMO")
+
+    order = ["movements", "budgets", "authorizations", "providers", "catalogo_partidas", "projects", "empresas", "exchange_rates", "config", "import_export_logs"]
+    session = await client.start_session()
+    deleted = {}
+    try:
+        async with session.start_transaction():
+            for collection in order:
+                result = await db[collection].delete_many({"is_demo": True}, session=session)
+                deleted[collection] = result.deleted_count
+
+            my_user = await db.users.find_one({"id": current_user["user_id"]}, {"_id": 0}, session=session)
+            users_result = await db.users.delete_many({"is_demo": True, "id": {"$ne": current_user["user_id"]}}, session=session)
+            deleted["users"] = users_result.deleted_count
+            if my_user and my_user.get("is_demo"):
+                await db.users.update_one({"id": my_user["id"]}, {"$set": {"is_demo": False, "is_active": True}}, session=session)
+    finally:
+        await session.end_session()
+
+    await log_admin_action(request, current_user, "ADMIN_RESET_DEMO", "database", "demo", True, after=deleted)
+    return {"message": "Reset DEMO ejecutado", "deleted": deleted}
 
 # Include router
 app.include_router(api_router)
