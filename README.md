@@ -150,6 +150,34 @@ curl -fsSL http://127.0.0.1:8088/login | head
 
 Más detalle en `docs/ec2_deploy.md`.
 
+### Deploy por AWS SSM desde CloudShell (sin SSH)
+
+Si ya hiciste merge y quieres desplegar en EC2 vía SSM, usa:
+
+```bash
+# 1) En CloudShell, clona/actualiza el repo
+cd ~
+[ -d qfinance_git/.git ] || git clone <REPO_URL> qfinance_git
+cd qfinance_git
+git fetch --all --prune
+git checkout main || git checkout master
+git pull --ff-only
+
+# 2) Ejecuta runner SSM
+bash run_ssm_deploy_qfinance.sh
+```
+
+Salida esperada al final:
+- `COMMAND_ID=...`
+- `FINAL_STATUS=Success`
+- `DEPLOYING_COMMIT=...`
+- `VERIFY_EXIT_CODE=0`
+
+> Si ves `bash: scripts/run_ssm_deploy_qfinance.sh: No such file or directory`,
+> estás fuera del checkout del repo. Entra al directorio del repo (`cd ~/qfinance_git`)
+> y vuelve a ejecutar el comando.
+
+
 Checklist rápido “no env versionados” (excluye `.env.example`):
 
 ```bash
