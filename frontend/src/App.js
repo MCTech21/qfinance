@@ -11,6 +11,7 @@ import Catalogs from "./pages/Catalogs";
 import Users from "./pages/Users";
 import AuditLog from "./pages/AuditLog";
 import Settings from "./pages/Settings";
+import AdminConsole from "./pages/AdminConsole";
 import DashboardLayout from "./components/DashboardLayout";
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
@@ -103,6 +104,14 @@ function App() {
             <ProtectedRoute allowedRoles={["admin", "autorizador"]}>
               <DashboardLayout>
                 <AuditLog />
+              </DashboardLayout>
+            </ProtectedRoute>
+          } />
+          
+          <Route path="/admin" element={
+            <ProtectedRoute allowedRoles={["admin"]}>
+              <DashboardLayout>
+                <AdminConsole />
               </DashboardLayout>
             </ProtectedRoute>
           } />
