@@ -73,3 +73,16 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8088/api/seed-
 - Es una **plantilla de configuración pública** sin secretos.
 - Estandariza variables esperadas para dev/CI/ops.
 - Evita documentar valores sensibles en `.env` reales.
+
+
+## Admin Console + Reset DEMO
+
+- Consola admin disponible en `/admin` (requiere rol admin).
+- Reset DEMO desde UI: exige teclear `RESET DEMO`.
+- Para bootstrap admin:
+
+```bash
+python scripts/bootstrap_admin.py --email tu@correo.com --deactivate-demo-users
+```
+
+- El seed (`POST /api/seed-demo-data`) marca registros como `is_demo=true` para permitir reset selectivo.
