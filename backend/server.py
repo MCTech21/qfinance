@@ -1387,7 +1387,7 @@ async def get_dashboard(
             "traffic_light": get_traffic_light(pct)
         })
     
-    # Pending authorizations count
+    # Pending authorizations count (for badge in menu)
     pending_auths = await db.authorizations.count_documents({"status": "pending"})
     
     return {
@@ -1400,10 +1400,15 @@ async def get_dashboard(
             "percentage": percentage,
             "traffic_light": get_traffic_light(percentage)
         },
+        "pending": {
+            "count": pending_count,
+            "total_mxn": pending_total_mxn
+        },
         "by_partida": sorted(partidas_summary, key=lambda x: x['percentage'], reverse=True),
         "by_project": sorted(projects_summary, key=lambda x: x['percentage'], reverse=True),
         "pending_authorizations": pending_auths,
-        "movements_count": len(movements)
+        "movements_count": len(movements),
+        "include_pending": include_pending
     }
 
 @api_router.get("/reports/partida-detail/{partida_codigo}")
