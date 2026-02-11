@@ -931,7 +931,7 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     return {"movement": doc, "requires_authorization": requires_auth, "reason": auth_reason if requires_auth else None}
 
 @api_router.post("/movements/import-csv")
-async def import_movements_csv(file: UploadFile = File(...), current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+async def import_movements_csv(file: UploadFile = File(...), current_user: dict = Depends(require_permission(Permission.IMPORT_MOVEMENTS))):
     """
     Import CSV con validaciones estrictas según especificación Entrega B.
     Columnas requeridas: fecha, empresa, proyecto, partida, proveedor, moneda, monto, tipo_cambio, referencia, descripcion
