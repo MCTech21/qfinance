@@ -974,7 +974,7 @@ async def import_movements_csv(file: UploadFile = File(...), current_user: dict 
         current_movements = await db.movements.find({
             "project_id": project['id'],
             "partida_codigo": partida['codigo'],
-            "status": {"$in": ["normal", "authorized"]}
+            "status": MovementStatus.POSTED.value
         }, {"_id": 0}).to_list(5000)
         
         current_spent = sum(
@@ -987,13 +987,14 @@ async def import_movements_csv(file: UploadFile = File(...), current_user: dict 
         
         requires_auth = False
         auth_reason = ""
+        percentage_if_posted = (new_total / budget_amount * 100) if budget_amount > 0 else 0
         
         if budget_amount == 0:
             requires_auth = True
-            auth_reason = "Presupuesto no definido ($0)"
-        elif (new_total / budget_amount) > 1.0:
+            auth_reason = "Presupuesto no definido ($0) - requiere autorización"
+        elif percentage_if_posted > 100:
             requires_auth = True
-            auth_reason = f"Exceso de presupuesto: {(new_total / budget_amount * 100):.1f}%"
+            auth_reason = f"Exceso de presupuesto: {percentage_if_posted:.1f}% (>100%)"
         
         # CREATE MOVEMENT
         descripcion = row.get('descripcion', '').strip() if row.get('descripcion') else None
@@ -1010,7 +1011,7 @@ async def import_movements_csv(file: UploadFile = File(...), current_user: dict 
             reference=referencia,
             description=descripcion,
             created_by=current_user["user_id"],
-            status=MovementStatus.PENDING_AUTHORIZATION if requires_auth else MovementStatus.NORMAL
+            status=MovementStatus.PENDING_APPROVAL if requires_auth else MovementStatus.POSTED
         )
         
         doc = movement.model_dump()
@@ -1025,6 +1026,15 @@ async def import_movements_csv(file: UploadFile = File(...), current_user: dict 
             )
             auth_doc = auth.model_dump()
             auth_doc['created_at'] = auth_doc['created_at'].isoformat()
+            # Add budget context
+            auth_doc['budget_context'] = {
+                'partida_codigo': partida['codigo'],
+                'presupuesto': budget_amount,
+                'ejecutado_actual': current_spent,
+                'monto_movimiento': monto_mxn,
+                'porcentaje_actual': (current_spent / budget_amount * 100) if budget_amount > 0 else 0,
+                'porcentaje_si_aprueba': percentage_if_posted
+            }
             await db.authorizations.insert_one(auth_doc)
             doc['authorization_id'] = auth.id
             results.authorizations_required.append(movement.id)
