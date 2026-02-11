@@ -1085,14 +1085,127 @@ async def import_movements_legacy(file: UploadFile = File(...), current_user: di
 @api_router.get("/authorizations")
 async def get_authorizations(
     status: Optional[str] = None,
+    empresa_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
     current_user: dict = Depends(get_current_user)
 ):
+    """Get authorizations with filters and enriched movement data"""
     query = {}
     if status:
         query["status"] = status
     
-    auths = await db.authorizations.find(query, {"_id": 0}).to_list(1000)
-    return auths
+    auths = await db.authorizations.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    
+    # Enrich with movement details
+    project_docs = await db.projects.find({}, {"_id": 0}).to_list(1000)
+    project_map = {p['id']: p for p in project_docs}
+    
+    empresa_docs = await db.empresas.find({}, {"_id": 0}).to_list(1000)
+    empresa_map = {e['id']: e for e in empresa_docs}
+    
+    provider_docs = await db.providers.find({}, {"_id": 0}).to_list(1000)
+    provider_map = {p['id']: p for p in provider_docs}
+    
+    partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(1000)
+    partida_map = {p['codigo']: p for p in partida_docs}
+    
+    enriched_auths = []
+    for auth in auths:
+        movement = None
+        if auth.get('movement_id'):
+            movement = await db.movements.find_one({"id": auth['movement_id']}, {"_id": 0})
+        
+        if movement:
+            project = project_map.get(movement.get('project_id'), {})
+            empresa = empresa_map.get(project.get('empresa_id'), {})
+            provider = provider_map.get(movement.get('provider_id'), {})
+            partida = partida_map.get(movement.get('partida_codigo'), {})
+            
+            # Apply filters
+            if empresa_id and empresa.get('id') != empresa_id:
+                continue
+            if project_id and project.get('id') != project_id:
+                continue
+            
+            mov_date = date_parser.parse(movement['date'])
+            if year and mov_date.year != year:
+                continue
+            if month and mov_date.month != month:
+                continue
+            
+            auth['movement_details'] = {
+                'date': movement.get('date'),
+                'empresa_id': empresa.get('id'),
+                'empresa_nombre': empresa.get('nombre', 'N/A'),
+                'project_id': project.get('id'),
+                'project_code': project.get('code', 'N/A'),
+                'project_name': project.get('name', 'N/A'),
+                'partida_codigo': movement.get('partida_codigo'),
+                'partida_nombre': partida.get('nombre', 'N/A'),
+                'provider_name': provider.get('name', 'N/A'),
+                'moneda': movement.get('currency'),
+                'monto_original': movement.get('amount_original'),
+                'tipo_cambio': movement.get('exchange_rate'),
+                'monto_mxn': movement.get('amount_mxn'),
+                'referencia': movement.get('reference'),
+                'descripcion': movement.get('description')
+            }
+        else:
+            # Skip if no movement and filters are applied
+            if empresa_id or project_id or year or month:
+                continue
+            auth['movement_details'] = None
+        
+        enriched_auths.append(auth)
+    
+    return enriched_auths
+
+@api_router.get("/authorizations/pending-summary")
+async def get_pending_summary(
+    empresa_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get summary of pending authorizations for dashboard KPI"""
+    now = to_tijuana(datetime.now(timezone.utc))
+    year = year or now.year
+    month = month or now.month
+    
+    # Get pending movements
+    pending_query = {"status": MovementStatus.PENDING_APPROVAL.value}
+    pending_movements = await db.movements.find(pending_query, {"_id": 0}).to_list(5000)
+    
+    # Filter by empresa/project/date
+    project_docs = await db.projects.find({}, {"_id": 0}).to_list(1000)
+    project_map = {p['id']: p for p in project_docs}
+    
+    filtered_pending = []
+    for mov in pending_movements:
+        project = project_map.get(mov.get('project_id'), {})
+        
+        if empresa_id and project.get('empresa_id') != empresa_id:
+            continue
+        if project_id and mov.get('project_id') != project_id:
+            continue
+        
+        mov_date = date_parser.parse(mov['date'])
+        if mov_date.year != year or mov_date.month != month:
+            continue
+        
+        filtered_pending.append(mov)
+    
+    total_pending_mxn = sum(m.get('amount_mxn', 0) for m in filtered_pending)
+    
+    return {
+        "pending_count": len(filtered_pending),
+        "pending_total_mxn": total_pending_mxn,
+        "year": year,
+        "month": month
+    }
 
 @api_router.put("/authorizations/{auth_id}")
 async def resolve_authorization(
@@ -1107,26 +1220,34 @@ async def resolve_authorization(
     if auth['status'] != 'pending':
         raise HTTPException(status_code=400, detail="Autorización ya resuelta")
     
+    # Reject requires notes/motivo
+    if resolution.status == AuthorizationStatus.REJECTED and not resolution.notes:
+        raise HTTPException(status_code=400, detail="Rechazo requiere motivo/notas")
+    
     update_data = {
         "status": resolution.status.value,
         "resolved_at": datetime.now(timezone.utc).isoformat(),
         "resolved_by": current_user["user_id"],
+        "resolved_by_email": current_user["email"],
         "notes": resolution.notes
     }
     
     await db.authorizations.update_one({"id": auth_id}, {"$set": update_data})
     
-    # Update movement status
+    # Update movement status: approved -> posted, rejected -> rejected
     if auth.get('movement_id'):
-        new_status = MovementStatus.AUTHORIZED if resolution.status == AuthorizationStatus.APPROVED else MovementStatus.REJECTED
+        new_status = MovementStatus.POSTED if resolution.status == AuthorizationStatus.APPROVED else MovementStatus.REJECTED
         await db.movements.update_one(
             {"id": auth['movement_id']},
             {"$set": {"status": new_status.value}}
         )
     
-    await log_audit(current_user, "RESOLVE", "authorizations", auth_id, {
+    # Detailed audit log for approve/reject
+    await log_audit(current_user, f"AUTH_{resolution.status.value.upper()}", "authorizations", auth_id, {
+        "movement_id": auth.get('movement_id'),
         "resolution": resolution.status.value,
-        "notes": resolution.notes
+        "notes": resolution.notes,
+        "budget_context": auth.get('budget_context')
     })
     
     return {"message": f"Autorización {resolution.status.value}"}
