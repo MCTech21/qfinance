@@ -300,23 +300,111 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 def require_roles(*roles: UserRole):
     async def role_checker(current_user: dict = Depends(get_current_user)):
         if current_user["role"] not in [r.value for r in roles]:
-            raise HTTPException(status_code=403, detail="Permisos insuficientes")
+            raise HTTPException(status_code=403, detail="Permisos insuficientes para esta acción")
         return current_user
     return role_checker
 
-async def log_audit(user: dict, action: str, entity: str, entity_id: str, changes: dict):
-    audit = AuditLog(
-        user_id=user["user_id"],
-        user_email=user["email"],
-        user_role=user["role"],
-        action=action,
-        entity=entity,
-        entity_id=entity_id,
-        changes=changes
-    )
-    doc = audit.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    await db.audit_logs.insert_one(doc)
+# ========================= RBAC PERMISSIONS MATRIX =========================
+# Define granular permissions per action type
+class Permission(str, Enum):
+    # Dashboard/Reports
+    VIEW_DASHBOARD = "view_dashboard"
+    VIEW_REPORTS = "view_reports"
+    EXPORT_DATA = "export_data"
+    
+    # Movements
+    CREATE_MOVEMENT = "create_movement"
+    VIEW_MOVEMENTS = "view_movements"
+    IMPORT_MOVEMENTS = "import_movements"
+    
+    # Authorizations
+    VIEW_AUTHORIZATIONS = "view_authorizations"
+    APPROVE_REJECT = "approve_reject"
+    
+    # Catalogs (empresas, proyectos, partidas, proveedores)
+    VIEW_CATALOGS = "view_catalogs"
+    MANAGE_CATALOGS = "manage_catalogs"
+    
+    # Budgets
+    VIEW_BUDGETS = "view_budgets"
+    MANAGE_BUDGETS = "manage_budgets"
+    
+    # Users
+    VIEW_USERS = "view_users"
+    MANAGE_USERS = "manage_users"
+    
+    # Audit
+    VIEW_AUDIT = "view_audit"
+    EXPORT_AUDIT = "export_audit"
+
+# Role -> Permissions mapping
+ROLE_PERMISSIONS = {
+    UserRole.ADMIN.value: [p.value for p in Permission],  # Admin: ALL
+    
+    UserRole.FINANZAS.value: [
+        Permission.VIEW_DASHBOARD.value,
+        Permission.VIEW_REPORTS.value,
+        Permission.EXPORT_DATA.value,
+        Permission.CREATE_MOVEMENT.value,
+        Permission.VIEW_MOVEMENTS.value,
+        Permission.IMPORT_MOVEMENTS.value,
+        Permission.VIEW_AUTHORIZATIONS.value,  # Can view but NOT approve/reject
+        Permission.VIEW_CATALOGS.value,
+        Permission.VIEW_BUDGETS.value,
+        Permission.MANAGE_BUDGETS.value,  # Can manage budgets
+    ],
+    
+    UserRole.AUTORIZADOR.value: [
+        Permission.VIEW_DASHBOARD.value,
+        Permission.VIEW_REPORTS.value,
+        Permission.EXPORT_DATA.value,
+        Permission.VIEW_MOVEMENTS.value,
+        Permission.VIEW_AUTHORIZATIONS.value,
+        Permission.APPROVE_REJECT.value,
+        Permission.VIEW_CATALOGS.value,
+        Permission.VIEW_BUDGETS.value,
+        Permission.VIEW_AUDIT.value,
+    ],
+    
+    UserRole.SOLO_LECTURA.value: [
+        Permission.VIEW_DASHBOARD.value,
+        Permission.VIEW_REPORTS.value,
+        Permission.VIEW_MOVEMENTS.value,
+        Permission.VIEW_AUTHORIZATIONS.value,
+        Permission.VIEW_CATALOGS.value,
+        Permission.VIEW_BUDGETS.value,
+    ],
+}
+
+def require_permission(*permissions: Permission):
+    """Check if user has at least one of the required permissions"""
+    async def permission_checker(current_user: dict = Depends(get_current_user)):
+        user_role = current_user.get("role")
+        user_permissions = ROLE_PERMISSIONS.get(user_role, [])
+        
+        if not any(p.value in user_permissions for p in permissions):
+            raise HTTPException(
+                status_code=403, 
+                detail=f"Permisos insuficientes. Se requiere: {', '.join([p.value for p in permissions])}"
+            )
+        return current_user
+    return permission_checker
+
+async def log_audit(user: dict, action: str, entity_type: str, entity_id: str, changes: dict, ip_address: str = None):
+    """Enhanced audit logging with IP and standardized format"""
+    audit = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["user_id"],
+        "user_email": user["email"],
+        "user_role": user["role"],
+        "action": action,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "changes": changes,
+        "ip_address": ip_address,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    await db.audit_logs.insert_one(audit)
 
 def get_traffic_light(percentage: float) -> str:
     if percentage <= 90:
