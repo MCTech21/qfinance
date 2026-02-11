@@ -769,126 +769,202 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     
     return {"movement": doc, "requires_authorization": requires_auth, "reason": auth_reason if requires_auth else None}
 
-@api_router.post("/movements/import")
-async def import_movements(file: UploadFile = File(...), current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+@api_router.post("/movements/import-csv")
+async def import_movements_csv(file: UploadFile = File(...), current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+    """
+    Import CSV con validaciones estrictas según especificación Entrega B.
+    Columnas requeridas: fecha, empresa, proyecto, partida, proveedor, moneda, monto, tipo_cambio, referencia, descripcion
+    """
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos CSV")
     
+    # Log inicio de import
+    import_start = datetime.now(timezone.utc)
+    
     content = await file.read()
-    decoded = content.decode('utf-8-sig')
+    # Try different encodings
+    try:
+        decoded = content.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        try:
+            decoded = content.decode('latin-1')
+        except UnicodeDecodeError:
+            decoded = content.decode('utf-8', errors='replace')
+    
     reader = csv.DictReader(io.StringIO(decoded))
     
     results = CSVImportResult(
-        success_count=0,
-        error_count=0,
-        errors=[],
+        total_filas=0,
+        insertadas=0,
+        rechazadas=0,
+        duplicadas_omitidas=0,
+        errores=[],
         movements_created=[],
         authorizations_required=[]
     )
     
-    # Get lookups
-    projects = {p['code']: p for p in await db.projects.find({}, {"_id": 0}).to_list(1000)}
-    partidas = {p['code']: p for p in await db.partidas.find({}, {"_id": 0}).to_list(1000)}
-    providers = {p['code']: p for p in await db.providers.find({}, {"_id": 0}).to_list(1000)}
-    exchange_rates = {r['date']: r['rate'] for r in await db.exchange_rates.find({}, {"_id": 0}).to_list(1000)}
+    # Columnas requeridas exactas
+    required_columns = ['fecha', 'empresa', 'proyecto', 'partida', 'proveedor', 'moneda', 'monto', 'referencia']
+    
+    # Get lookups - empresas, proyectos, partidas del catálogo, proveedores
+    empresas = {e['nombre'].upper(): e for e in await db.empresas.find({}, {"_id": 0}).to_list(1000)}
+    empresas_by_id = {e['id']: e for e in await db.empresas.find({}, {"_id": 0}).to_list(1000)}
+    
+    projects_list = await db.projects.find({}, {"_id": 0}).to_list(1000)
+    # Map by code AND name (upper) for flexibility
+    projects_by_code = {p['code'].upper(): p for p in projects_list}
+    projects_by_name = {p['name'].upper(): p for p in projects_list}
+    
+    # Catálogo de partidas (source of truth)
+    catalogo = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(1000)
+    partidas_by_codigo = {p['codigo']: p for p in catalogo}
+    partidas_by_nombre = {p['nombre'].upper(): p for p in catalogo}
+    
+    providers_list = await db.providers.find({}, {"_id": 0}).to_list(1000)
+    providers_by_code = {p['code'].upper(): p for p in providers_list}
+    providers_by_name = {p['name'].upper(): p for p in providers_list}
     
     row_num = 1
+    rows_processed = []
+    
     for row in reader:
         row_num += 1
+        results.total_filas += 1
         errors = []
         
-        # Validate required fields
-        required = ['fecha', 'proyecto', 'partida', 'proveedor', 'moneda', 'monto', 'referencia']
-        for field in required:
-            if field not in row or not row[field].strip():
-                errors.append(f"Campo '{field}' requerido")
+        # Normalize column names (lowercase, strip)
+        row = {k.lower().strip(): v.strip() if v else '' for k, v in row.items()}
+        
+        # Validate required columns exist
+        for col in required_columns:
+            if col not in row or not row.get(col, '').strip():
+                errors.append({"columna": col, "motivo": f"Campo '{col}' requerido y vacío"})
         
         if errors:
-            results.errors.append({"row": row_num, "errors": errors})
-            results.error_count += 1
+            results.errores.append({"fila": row_num, "errores": errors})
+            results.rechazadas += 1
             continue
         
-        # Validate project
-        project = projects.get(row['proyecto'].strip())
+        # 1) VALIDAR EMPRESA existe y activa
+        empresa_val = row.get('empresa', '').strip().upper()
+        empresa = empresas.get(empresa_val)
+        if not empresa:
+            errors.append({"columna": "empresa", "motivo": f"Empresa '{row.get('empresa')}' no existe"})
+        elif not empresa.get('is_active', True):
+            errors.append({"columna": "empresa", "motivo": f"Empresa '{row.get('empresa')}' está inactiva"})
+        
+        # 2) VALIDAR PROYECTO existe, activo y pertenece a empresa
+        proyecto_val = row.get('proyecto', '').strip().upper()
+        project = projects_by_code.get(proyecto_val) or projects_by_name.get(proyecto_val)
         if not project:
-            errors.append(f"Proyecto '{row['proyecto']}' no encontrado")
+            errors.append({"columna": "proyecto", "motivo": f"Proyecto '{row.get('proyecto')}' no existe"})
+        elif not project.get('is_active', True):
+            errors.append({"columna": "proyecto", "motivo": f"Proyecto '{row.get('proyecto')}' está inactivo"})
+        elif empresa and project.get('empresa_id') != empresa.get('id'):
+            empresa_proyecto = empresas_by_id.get(project.get('empresa_id'), {})
+            errors.append({"columna": "proyecto", "motivo": f"Proyecto '{row.get('proyecto')}' no pertenece a empresa '{row.get('empresa')}' (pertenece a '{empresa_proyecto.get('nombre', 'N/A')}')"})
         
-        # Validate partida
-        partida = partidas.get(row['partida'].strip())
+        # 3) VALIDAR PARTIDA existe y activa en catalogo_partidas
+        partida_val = row.get('partida', '').strip()
+        partida = partidas_by_codigo.get(partida_val) or partidas_by_nombre.get(partida_val.upper())
         if not partida:
-            errors.append(f"Partida '{row['partida']}' no encontrada")
+            errors.append({"columna": "partida", "motivo": f"Partida '{row.get('partida')}' no existe en catálogo"})
+        elif not partida.get('is_active', True):
+            errors.append({"columna": "partida", "motivo": f"Partida '{row.get('partida')}' está inactiva"})
         
-        # Validate provider
-        provider = providers.get(row['proveedor'].strip())
+        # 4) VALIDAR PROVEEDOR existe
+        proveedor_val = row.get('proveedor', '').strip().upper()
+        provider = providers_by_code.get(proveedor_val) or providers_by_name.get(proveedor_val)
         if not provider:
-            errors.append(f"Proveedor '{row['proveedor']}' no encontrado")
+            errors.append({"columna": "proveedor", "motivo": f"Proveedor '{row.get('proveedor')}' no existe"})
+        elif not provider.get('is_active', True):
+            errors.append({"columna": "proveedor", "motivo": f"Proveedor '{row.get('proveedor')}' está inactivo"})
         
-        # Validate currency
-        currency = row['moneda'].strip().upper()
-        if currency not in ['MXN', 'USD']:
-            errors.append(f"Moneda '{currency}' no válida (MXN/USD)")
-        
-        # Validate amount
+        # 5) VALIDAR MONTO > 0
         try:
-            amount = float(row['monto'].replace(',', '').strip())
-            if amount <= 0:
-                errors.append("Monto debe ser mayor a 0")
+            monto = float(row.get('monto', '0').replace(',', '').replace('$', '').strip())
+            if monto <= 0:
+                errors.append({"columna": "monto", "motivo": "Monto debe ser mayor a 0"})
         except ValueError:
-            errors.append(f"Monto '{row['monto']}' no es válido")
-            amount = 0
+            errors.append({"columna": "monto", "motivo": f"Monto '{row.get('monto')}' no es un número válido"})
+            monto = 0
         
-        # Validate date
-        try:
-            parsed_date = parse_date_tijuana(row['fecha'].strip())
-            date_key = parsed_date.strftime('%Y-%m-%d')
-        except Exception:
-            errors.append(f"Fecha '{row['fecha']}' no válida")
-            parsed_date = None
-            date_key = None
+        # 6) VALIDAR MONEDA ∈ {MXN, USD}
+        moneda = row.get('moneda', '').strip().upper()
+        if moneda not in ['MXN', 'USD']:
+            errors.append({"columna": "moneda", "motivo": f"Moneda '{row.get('moneda')}' no válida (solo MXN o USD)"})
         
-        # Get exchange rate
-        exchange_rate = 1.0
-        if currency == 'USD':
-            if date_key and date_key in exchange_rates:
-                exchange_rate = exchange_rates[date_key]
+        # 7) VALIDAR TIPO_CAMBIO si USD
+        tipo_cambio_str = row.get('tipo_cambio', '').strip()
+        tipo_cambio = 1.0
+        if moneda == 'USD':
+            if not tipo_cambio_str:
+                errors.append({"columna": "tipo_cambio", "motivo": "USD requiere tipo_cambio obligatorio"})
             else:
-                errors.append(f"Tipo de cambio no encontrado para {date_key}")
+                try:
+                    tipo_cambio = float(tipo_cambio_str.replace(',', ''))
+                    if tipo_cambio <= 0:
+                        errors.append({"columna": "tipo_cambio", "motivo": "tipo_cambio debe ser mayor a 0"})
+                except ValueError:
+                    errors.append({"columna": "tipo_cambio", "motivo": f"tipo_cambio '{tipo_cambio_str}' no es válido"})
+        elif moneda == 'MXN':
+            tipo_cambio = 1.0
         
+        # 8) VALIDAR FECHA - interpretar como America/Tijuana si no tiene hora
+        fecha_str = row.get('fecha', '').strip()
+        parsed_date = None
+        try:
+            parsed_date = parse_date_tijuana(fecha_str)
+        except Exception as e:
+            errors.append({"columna": "fecha", "motivo": f"Fecha '{fecha_str}' no válida (use formato YYYY-MM-DD o DD/MM/YYYY)"})
+        
+        # Si hay errores de validación, rechazar fila
         if errors:
-            results.errors.append({"row": row_num, "errors": errors})
-            results.error_count += 1
+            results.errores.append({"fila": row_num, "errores": errors})
+            results.rechazadas += 1
             continue
         
-        # Check duplicates
-        dup_check = await db.movements.find_one({
+        # 9) CHECK DUPLICADOS: fecha+empresa+proyecto+proveedor+monto+referencia
+        referencia = row.get('referencia', '').strip()
+        dup_query = {
             "date": parsed_date.isoformat(),
+            "project_id": project['id'],
             "provider_id": provider['id'],
-            "amount_original": amount,
-            "reference": row['referencia'].strip()
-        }, {"_id": 0})
+            "amount_original": monto,
+            "reference": referencia
+        }
         
-        if dup_check:
-            results.errors.append({"row": row_num, "errors": ["Movimiento duplicado"]})
-            results.error_count += 1
+        # También verificar si ya procesamos en este batch
+        dup_key = f"{parsed_date.isoformat()}|{empresa['id']}|{project['id']}|{provider['id']}|{monto}|{referencia}"
+        if dup_key in rows_processed:
+            results.errores.append({"fila": row_num, "errores": [{"columna": "duplicado", "motivo": "Duplicado en el mismo archivo CSV"}]})
+            results.duplicadas_omitidas += 1
             continue
         
-        # Calculate amount in MXN
-        amount_mxn = amount * exchange_rate
+        dup_check = await db.movements.find_one(dup_query, {"_id": 0})
+        if dup_check:
+            results.duplicadas_omitidas += 1
+            continue  # Omitir silenciosamente como duplicado
         
-        # Check budget
+        rows_processed.append(dup_key)
+        
+        # CALCULAR monto_mxn
+        monto_mxn = monto * tipo_cambio
+        
+        # CHECK BUDGET para determinar si requiere autorización
         year = parsed_date.year
         month = parsed_date.month
         
         budget = await db.budgets.find_one({
             "project_id": project['id'],
-            "partida_id": partida['id'],
+            "partida_codigo": partida['codigo'],
             "year": year,
             "month": month
         }, {"_id": 0})
         
         current_movements = await db.movements.find({
             "project_id": project['id'],
-            "partida_id": partida['id'],
+            "partida_codigo": partida['codigo'],
             "status": {"$in": ["normal", "authorized"]}
         }, {"_id": 0}).to_list(5000)
         
@@ -898,7 +974,7 @@ async def import_movements(file: UploadFile = File(...), current_user: dict = De
         )
         
         budget_amount = budget['amount_mxn'] if budget else 0
-        new_total = current_spent + amount_mxn
+        new_total = current_spent + monto_mxn
         
         requires_auth = False
         auth_reason = ""
@@ -910,18 +986,20 @@ async def import_movements(file: UploadFile = File(...), current_user: dict = De
             requires_auth = True
             auth_reason = f"Exceso de presupuesto: {(new_total / budget_amount * 100):.1f}%"
         
-        # Create movement
+        # CREATE MOVEMENT
+        descripcion = row.get('descripcion', '').strip() if row.get('descripcion') else None
+        
         movement = Movement(
             project_id=project['id'],
-            partida_id=partida['id'],
+            partida_codigo=partida['codigo'],
             provider_id=provider['id'],
             date=parsed_date,
-            currency=Currency(currency),
-            amount_original=amount,
-            exchange_rate=exchange_rate,
-            amount_mxn=amount_mxn,
-            reference=row['referencia'].strip(),
-            description=row.get('descripcion', '').strip() if row.get('descripcion') else None,
+            currency=Currency(moneda),
+            amount_original=monto,
+            exchange_rate=tipo_cambio,
+            amount_mxn=monto_mxn,
+            reference=referencia,
+            description=descripcion,
             created_by=current_user["user_id"],
             status=MovementStatus.PENDING_AUTHORIZATION if requires_auth else MovementStatus.NORMAL
         )
@@ -944,14 +1022,45 @@ async def import_movements(file: UploadFile = File(...), current_user: dict = De
         
         await db.movements.insert_one(doc)
         results.movements_created.append(movement.id)
-        results.success_count += 1
+        results.insertadas += 1
     
-    await log_audit(current_user, "IMPORT", "movements", "batch", {
-        "success": results.success_count,
-        "errors": results.error_count
+    # LOG AUDIT de import
+    import_end = datetime.now(timezone.utc)
+    errores_resumen = [f"Fila {e['fila']}: {'; '.join([err['motivo'] for err in e['errores']])}" for e in results.errores[:20]]
+    
+    import_audit = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["user_id"],
+        "user_email": current_user["email"],
+        "action": "IMPORT_CSV",
+        "timestamp_inicio": import_start.isoformat(),
+        "timestamp_fin": import_end.isoformat(),
+        "filtros": {"filename": file.filename},
+        "conteos": {
+            "total_filas": results.total_filas,
+            "insertadas": results.insertadas,
+            "rechazadas": results.rechazadas,
+            "duplicadas_omitidas": results.duplicadas_omitidas
+        },
+        "errores_resumen": errores_resumen
+    }
+    await db.import_export_logs.insert_one(import_audit)
+    
+    await log_audit(current_user, "IMPORT_CSV", "movements", "batch", {
+        "total_filas": results.total_filas,
+        "insertadas": results.insertadas,
+        "rechazadas": results.rechazadas,
+        "duplicadas_omitidas": results.duplicadas_omitidas,
+        "filename": file.filename
     })
     
     return results
+
+# Keep legacy endpoint for backwards compatibility
+@api_router.post("/movements/import")
+async def import_movements_legacy(file: UploadFile = File(...), current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+    """Legacy import - redirects to new import-csv endpoint"""
+    return await import_movements_csv(file, current_user)
 
 # ========================= AUTHORIZATION ROUTES =========================
 @api_router.get("/authorizations")
