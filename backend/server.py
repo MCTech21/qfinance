@@ -1259,6 +1259,7 @@ async def get_dashboard(
     project_id: Optional[str] = None,
     year: Optional[int] = None,
     month: Optional[int] = None,
+    include_pending: bool = False,  # Toggle para ver posted vs total incluyendo pendientes
     current_user: dict = Depends(get_current_user)
 ):
     now = to_tijuana(datetime.now(timezone.utc))
@@ -1281,8 +1282,12 @@ async def get_dashboard(
     
     budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(1000)
     
-    # Get movements
-    movement_query = {"status": {"$in": ["normal", "authorized"]}}
+    # Get movements - SOLO posted por default (ejecutado real)
+    posted_statuses = [MovementStatus.POSTED.value]
+    if include_pending:
+        posted_statuses.append(MovementStatus.PENDING_APPROVAL.value)
+    
+    movement_query = {"status": {"$in": posted_statuses}}
     if project_id:
         movement_query["project_id"] = project_id
     elif empresa_id:
@@ -1295,6 +1300,21 @@ async def get_dashboard(
         m for m in all_movements
         if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
     ]
+    
+    # Get pending movements for KPI (separate query)
+    pending_query = {"status": MovementStatus.PENDING_APPROVAL.value}
+    if project_id:
+        pending_query["project_id"] = project_id
+    elif empresa_id:
+        pending_query["project_id"] = {"$in": project_ids}
+    
+    all_pending = await db.movements.find(pending_query, {"_id": 0}).to_list(5000)
+    pending_movements = [
+        m for m in all_pending
+        if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
+    ]
+    pending_total_mxn = sum(m['amount_mxn'] for m in pending_movements)
+    pending_count = len(pending_movements)
     
     # Calculate totals
     total_budget = sum(b['amount_mxn'] for b in budgets)
