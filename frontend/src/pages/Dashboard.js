@@ -5,8 +5,9 @@ import KPICard from "../components/KPICard";
 import TrafficLight from "../components/TrafficLight";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { Wallet, TrendingUp, AlertTriangle, CheckCircle, Building, FileWarning } from "lucide-react";
+import { Wallet, TrendingUp, AlertTriangle, CheckCircle, Building, FileWarning, Clock } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from "recharts";
+import { Link } from "react-router-dom";
 
 const Dashboard = () => {
   const { api } = useAuth();
