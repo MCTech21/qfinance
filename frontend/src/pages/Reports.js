@@ -317,13 +317,169 @@ const Reports = () => {
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <h1 className="font-heading text-3xl font-bold tracking-tight">Reportes</h1>
-          <p className="text-muted-foreground">Análisis y exportación de datos financieros</p>
+          <p className="text-muted-foreground">Análisis, importación y exportación de datos financieros</p>
         </div>
         
-        <Button onClick={exportToExcel} disabled={!dashboardData} data-testid="export-excel-btn">
-          <Download className="h-4 w-4 mr-2" />
-          Exportar Excel
-        </Button>
+        <div className="flex gap-2">
+          {/* Import CSV Dialog */}
+          <Dialog open={showImportDialog} onOpenChange={setShowImportDialog}>
+            <DialogTrigger asChild>
+              <Button variant="outline" data-testid="import-csv-btn">
+                <Upload className="h-4 w-4 mr-2" />
+                Importar CSV
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-lg">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <FileText className="h-5 w-5" />
+                  Importar Movimientos desde CSV
+                </DialogTitle>
+                <DialogDescription>
+                  Sube un archivo CSV con los movimientos financieros. Asegúrate de usar el formato correcto.
+                </DialogDescription>
+              </DialogHeader>
+              
+              <div className="space-y-4">
+                {/* Template download */}
+                <Button variant="link" size="sm" className="p-0 h-auto" onClick={downloadTemplateCSV}>
+                  <Download className="h-3 w-3 mr-1" />
+                  Descargar plantilla CSV de ejemplo
+                </Button>
+                
+                {/* File input */}
+                <div className="border-2 border-dashed rounded-lg p-6 text-center">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".csv"
+                    onChange={handleFileSelect}
+                    className="hidden"
+                    id="csv-file-input"
+                    data-testid="csv-file-input"
+                  />
+                  <label 
+                    htmlFor="csv-file-input" 
+                    className="cursor-pointer flex flex-col items-center gap-2"
+                  >
+                    <Upload className="h-8 w-8 text-muted-foreground" />
+                    <span className="text-sm text-muted-foreground">
+                      {importFile ? importFile.name : "Click para seleccionar archivo CSV"}
+                    </span>
+                  </label>
+                </div>
+                
+                {/* Import button */}
+                {importFile && !importResult && (
+                  <Button 
+                    onClick={handleImportCSV} 
+                    disabled={isImporting}
+                    className="w-full"
+                    data-testid="process-import-btn"
+                  >
+                    {isImporting ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Procesando...
+                      </>
+                    ) : (
+                      <>
+                        <Upload className="h-4 w-4 mr-2" />
+                        Procesar Import
+                      </>
+                    )}
+                  </Button>
+                )}
+                
+                {/* Import Results */}
+                {importResult && (
+                  <div className="space-y-3" data-testid="import-result">
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <div className="p-3 bg-muted rounded-lg">
+                        <span className="text-muted-foreground">Total filas</span>
+                        <p className="font-bold text-lg">{importResult.total_filas}</p>
+                      </div>
+                      <div className="p-3 bg-emerald-500/10 rounded-lg">
+                        <span className="text-emerald-600">Insertadas</span>
+                        <p className="font-bold text-lg text-emerald-600">{importResult.insertadas}</p>
+                      </div>
+                      <div className="p-3 bg-red-500/10 rounded-lg">
+                        <span className="text-red-600">Rechazadas</span>
+                        <p className="font-bold text-lg text-red-600">{importResult.rechazadas}</p>
+                      </div>
+                      <div className="p-3 bg-yellow-500/10 rounded-lg">
+                        <span className="text-yellow-600">Duplicadas</span>
+                        <p className="font-bold text-lg text-yellow-600">{importResult.duplicadas_omitidas}</p>
+                      </div>
+                    </div>
+                    
+                    {/* Errors list */}
+                    {importResult.errores && importResult.errores.length > 0 && (
+                      <div className="mt-3 max-h-48 overflow-y-auto">
+                        <p className="text-sm font-medium mb-2 flex items-center gap-1">
+                          <AlertCircle className="h-4 w-4 text-red-500" />
+                          Errores encontrados:
+                        </p>
+                        <div className="space-y-1">
+                          {importResult.errores.slice(0, 10).map((err, idx) => (
+                            <div key={idx} className="text-xs p-2 bg-red-500/5 rounded border border-red-500/20">
+                              <span className="font-medium">Fila {err.fila}:</span>
+                              <ul className="ml-3 mt-1">
+                                {err.errores.map((e, i) => (
+                                  <li key={i} className="text-red-600">
+                                    {e.columna}: {e.motivo}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          ))}
+                          {importResult.errores.length > 10 && (
+                            <p className="text-xs text-muted-foreground">
+                              ...y {importResult.errores.length - 10} errores más
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {importResult.insertadas > 0 && (
+                      <div className="flex items-center gap-2 text-sm text-emerald-600">
+                        <CheckCircle className="h-4 w-4" />
+                        Importación completada exitosamente
+                      </div>
+                    )}
+                    
+                    <Button variant="outline" onClick={resetImport} className="w-full">
+                      <X className="h-4 w-4 mr-2" />
+                      Importar otro archivo
+                    </Button>
+                  </div>
+                )}
+                
+                {/* Required columns info */}
+                <div className="text-xs text-muted-foreground bg-muted p-3 rounded-lg">
+                  <p className="font-medium mb-1">Columnas requeridas:</p>
+                  <code className="text-[10px]">
+                    fecha, empresa, proyecto, partida, proveedor, moneda, monto, tipo_cambio, referencia, descripcion
+                  </code>
+                  <p className="mt-2 text-[10px]">
+                    • USD requiere tipo_cambio • Fecha formato YYYY-MM-DD • Partida por código (ej: 104)
+                  </p>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
+          
+          {/* Export Excel Button */}
+          <Button onClick={exportToExcel} disabled={!dashboardData || isExporting} data-testid="export-excel-btn">
+            {isExporting ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : (
+              <Download className="h-4 w-4 mr-2" />
+            )}
+            Exportar Excel
+          </Button>
+        </div>
       </div>
 
       {/* Filters */}
