@@ -1820,7 +1820,7 @@ async def get_export_data(
 async def get_import_export_logs(
     action: Optional[str] = None,
     limit: int = Query(50, le=500),
-    current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.AUTORIZADOR))
+    current_user: dict = Depends(require_permission(Permission.VIEW_AUDIT))
 ):
     """Get import/export audit logs"""
     query = {}
@@ -1830,34 +1830,145 @@ async def get_import_export_logs(
     logs = await db.import_export_logs.find(query, {"_id": 0}).sort("timestamp_inicio", -1).to_list(limit)
     return logs
 
-# ========================= AUDIT LOG ROUTES =========================
+# ========================= AUDIT LOG ROUTES (ENHANCED P3.2) =========================
 @api_router.get("/audit-logs")
 async def get_audit_logs(
-    entity: Optional[str] = None,
+    entity_type: Optional[str] = None,
     entity_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    user_role: Optional[str] = None,
+    action: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     limit: int = Query(100, le=1000),
-    current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.AUTORIZADOR))
+    current_user: dict = Depends(require_permission(Permission.VIEW_AUDIT))
 ):
+    """Enhanced audit log with advanced filters"""
     query = {}
-    if entity:
-        query["entity"] = entity
+    if entity_type:
+        query["entity_type"] = entity_type
     if entity_id:
         query["entity_id"] = entity_id
     if user_id:
         query["user_id"] = user_id
+    if user_role:
+        query["user_role"] = user_role
+    if action:
+        query["action"] = {"$regex": action, "$options": "i"}
+    
+    # Date range filter
+    if date_from or date_to:
+        query["timestamp"] = {}
+        if date_from:
+            query["timestamp"]["$gte"] = date_from
+        if date_to:
+            query["timestamp"]["$lte"] = date_to + "T23:59:59"
     
     logs = await db.audit_logs.find(query, {"_id": 0}).sort("timestamp", -1).to_list(limit)
     return logs
 
+@api_router.get("/audit-logs/export-csv")
+async def export_audit_logs_csv(
+    entity_type: Optional[str] = None,
+    user_id: Optional[str] = None,
+    action: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = Query(5000, le=10000),
+    current_user: dict = Depends(require_permission(Permission.EXPORT_AUDIT))
+):
+    """Export audit log to CSV (Admin only)"""
+    query = {}
+    if entity_type:
+        query["entity_type"] = entity_type
+    if user_id:
+        query["user_id"] = user_id
+    if action:
+        query["action"] = {"$regex": action, "$options": "i"}
+    if date_from or date_to:
+        query["timestamp"] = {}
+        if date_from:
+            query["timestamp"]["$gte"] = date_from
+        if date_to:
+            query["timestamp"]["$lte"] = date_to + "T23:59:59"
+    
+    logs = await db.audit_logs.find(query, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+    
+    # Build CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Timestamp", "Usuario", "Email", "Rol", "Acción", "Entidad", "Entity ID", "Cambios"])
+    
+    for log in logs:
+        changes_str = str(log.get('changes', {}))[:200]  # Truncate changes for CSV
+        writer.writerow([
+            log.get('timestamp', ''),
+            log.get('user_id', ''),
+            log.get('user_email', ''),
+            log.get('user_role', ''),
+            log.get('action', ''),
+            log.get('entity_type', ''),
+            log.get('entity_id', ''),
+            changes_str
+        ])
+    
+    await log_audit(current_user, "EXPORT_AUDIT_CSV", "audit_logs", "export", {
+        "filters": {"entity_type": entity_type, "user_id": user_id, "action": action, "date_from": date_from, "date_to": date_to},
+        "count": len(logs)
+    })
+    
+    return {
+        "csv_content": output.getvalue(),
+        "filename": f"audit_log_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv",
+        "count": len(logs)
+    }
+
+@api_router.get("/audit-logs/summary")
+async def get_audit_summary(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    current_user: dict = Depends(require_permission(Permission.VIEW_AUDIT))
+):
+    """Get audit log summary for dashboard"""
+    query = {}
+    if date_from or date_to:
+        query["timestamp"] = {}
+        if date_from:
+            query["timestamp"]["$gte"] = date_from
+        if date_to:
+            query["timestamp"]["$lte"] = date_to + "T23:59:59"
+    
+    logs = await db.audit_logs.find(query, {"_id": 0}).to_list(5000)
+    
+    # Count by action
+    by_action = {}
+    by_user = {}
+    by_entity = {}
+    
+    for log in logs:
+        action = log.get('action', 'UNKNOWN')
+        user = log.get('user_email', 'N/A')
+        entity = log.get('entity_type', 'N/A')
+        
+        by_action[action] = by_action.get(action, 0) + 1
+        by_user[user] = by_user.get(user, 0) + 1
+        by_entity[entity] = by_entity.get(entity, 0) + 1
+    
+    return {
+        "total_logs": len(logs),
+        "by_action": dict(sorted(by_action.items(), key=lambda x: x[1], reverse=True)[:20]),
+        "by_user": dict(sorted(by_user.items(), key=lambda x: x[1], reverse=True)[:10]),
+        "by_entity": dict(sorted(by_entity.items(), key=lambda x: x[1], reverse=True)[:10])
+    }
+
 # ========================= CONFIG ROUTES =========================
 @api_router.get("/config")
-async def get_config(current_user: dict = Depends(get_current_user)):
+async def get_config(current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
     configs = await db.config.find({}, {"_id": 0}).to_list(100)
     return {c['key']: c['value'] for c in configs}
 
 @api_router.put("/config/{key}")
-async def update_config(key: str, value: Any, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+async def update_config(key: str, value: Any, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
     existing = await db.config.find_one({"key": key}, {"_id": 0})
     
     if existing:
