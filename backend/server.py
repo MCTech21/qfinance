@@ -509,12 +509,12 @@ async def update_user(user_id: str, updates: dict, current_user: dict = Depends(
 
 # ========================= EMPRESA ROUTES =========================
 @api_router.get("/empresas")
-async def get_empresas(current_user: dict = Depends(get_current_user)):
+async def get_empresas(current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
     empresas = await db.empresas.find({}, {"_id": 0}).to_list(1000)
     return empresas
 
 @api_router.post("/empresas")
-async def create_empresa(empresa_data: EmpresaBase, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+async def create_empresa(empresa_data: EmpresaBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
     existing = await db.empresas.find_one({"nombre": empresa_data.nombre}, {"_id": 0})
     if existing:
         raise HTTPException(status_code=400, detail="Empresa ya existe")
@@ -524,7 +524,8 @@ async def create_empresa(empresa_data: EmpresaBase, current_user: dict = Depends
     doc['created_at'] = doc['created_at'].isoformat()
     doc['updated_at'] = doc['updated_at'].isoformat()
     await db.empresas.insert_one(doc)
-    await log_audit(current_user, "CREATE", "empresas", empresa.id, {"data": doc})
+    await log_audit(current_user, "CREATE", "empresas", empresa.id, {"data": {"nombre": doc['nombre']}})
+    doc.pop('_id', None)
     return doc
 
 # ========================= CATALOGO PARTIDAS ROUTES =========================
