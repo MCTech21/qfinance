@@ -156,7 +156,7 @@ const Dashboard = () => {
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <KPICard
           title="Presupuesto"
           value={dashboardData?.totals?.budget || 0}
@@ -177,6 +177,28 @@ const Dashboard = () => {
           icon={dashboardData?.totals?.variation >= 0 ? CheckCircle : AlertTriangle}
           subtitle={dashboardData?.totals?.variation >= 0 ? "Bajo presupuesto" : "Sobre presupuesto"}
         />
+        {/* Pending KPI */}
+        <div className="metric-card" data-testid="pending-kpi">
+          <div className="flex items-start justify-between mb-3">
+            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+              Pendiente por Autorizar
+            </span>
+            <div className="p-2 rounded-md bg-amber-500/10 text-amber-400">
+              <Clock className="h-4 w-4" />
+            </div>
+          </div>
+          <p className="text-2xl font-bold font-mono">
+            {formatCurrency(dashboardData?.pending?.total_mxn || 0)}
+          </p>
+          <p className="text-xs text-muted-foreground mt-2">
+            {dashboardData?.pending?.count || 0} movimientos pendientes
+          </p>
+          {(dashboardData?.pending?.count || 0) > 0 && (
+            <Link to="/authorizations" className="text-xs text-amber-400 hover:underline mt-1 inline-block">
+              Ver autorizaciones →
+            </Link>
+          )}
+        </div>
         <div className="metric-card">
           <div className="flex items-start justify-between mb-3">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
@@ -194,7 +216,7 @@ const Dashboard = () => {
             />
           </div>
           <p className="text-xs text-muted-foreground mt-2">
-            {dashboardData?.pending_authorizations || 0} autorizaciones pendientes
+            {dashboardData?.pending_authorizations || 0} autorizaciones totales
           </p>
         </div>
       </div>
