@@ -154,6 +154,16 @@ Más detalle en `docs/ec2_deploy.md`.
 
 Si ya hiciste merge y quieres desplegar en EC2 vía SSM, usa:
 
+Atajo recomendado (evita errores por estar fuera del repo en CloudShell):
+
+```bash
+# Si ya existe ~/qfinance_git o ~/qfinance lo reutiliza.
+# Si no existe, exporta REPO_URL (URL del botón Code en GitHub) y clona.
+REPO_URL=<REPO_URL> bash scripts/cloudshell_bootstrap_ssm_deploy.sh
+```
+
+Flujo manual equivalente:
+
 ```bash
 # 1) En CloudShell, entra a un checkout existente o clona uno nuevo
 cd ~
