@@ -4,7 +4,7 @@ const path = require("path");
 
 const projectRoot = path.resolve(__dirname, "..");
 const buildDir = path.join(projectRoot, "build");
-const forbiddenPattern = /emergentagent|expense-tracker|preview\.emergentagent\.com/gi;
+const forbiddenPattern = /expense-tracker|preview\.expense-tracker\.local/gi;
 
 const backendUrl = (process.env.REACT_APP_BACKEND_URL || "").trim();
 if (backendUrl && forbiddenPattern.test(backendUrl)) {
@@ -44,7 +44,7 @@ for (const filePath of filesToScan) {
 }
 
 if (findings.length > 0) {
-  console.error("[ERROR] Se detectaron dominios prohibidos de emergentagent en el build:");
+  console.error("[ERROR] Se detectaron dominios prohibidos en el build:");
   findings.forEach((file) => console.error(` - ${file}`));
   process.exit(1);
 }

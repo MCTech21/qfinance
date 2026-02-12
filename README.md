@@ -106,20 +106,50 @@ yarn install
 yarn start
 ```
 
-## Usuarios Demo
+## Usuarios
 
-| Email | Contraseña | Rol |
-|-------|------------|-----|
-| admin@finrealty.com | admin123 | Administrador |
-| finanzas@finrealty.com | finanzas123 | Finanzas |
-| autorizador@finrealty.com | auth123 | Autorizador |
-| lectura@finrealty.com | lectura123 | Solo Lectura |
+No se incluyen credenciales demo por defecto.
+
+- Para promover tu cuenta real a administrador usa: `python scripts/bootstrap_admin.py --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas`.
+- Para limpiar usuarios demo heredados (`@finrealty.com`), usa `python scripts/cleanup_demo_users.py --apply`.
 
 ## Semáforo de Cumplimiento
 
 - 🟢 **Verde**: Ejercido ≤ 90% del presupuesto
 - 🟡 **Amarillo**: Ejercido entre 90% y 100%
 - 🔴 **Rojo**: Ejercido > 100% (requiere autorización)
+
+
+## EC2-first deploy (CloudShell ligero)
+
+Desde ahora, CloudShell **no debe clonar/buildar local**. Solo orquesta deploy en EC2.
+
+```bash
+EC2_HOST=52.53.215.40 \
+WEB_URL=http://52.53.215.40:8088 \
+ENABLE_SWAP=0 MIN_FREE_MB=600 \
+bash scripts/cloudshell_sync_and_deploy.sh
+```
+
+Variables requeridas/recomendadas:
+- `EC2_HOST` (ssh), `EC2_USER` (default `ubuntu`)
+- `WEB_URL`, `ENABLE_SWAP`, `MIN_FREE_MB`
+- opcional: `EC2_WORK_DIR=/opt/qfinance_git`, `BRANCH=main`
+- opcional SSM: `DEPLOY_TRANSPORT=ssm` + `EC2_INSTANCE_ID`
+
+El trabajo pesado vive en EC2 en `scripts/ec2_sync_and_deploy.sh`.
+
+## CloudShell (sync + deploy recomendado)
+
+Después de cada merge/PR, ejecuta:
+
+```bash
+WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
+```
+
+Este comando ahora orquesta el deploy remoto EC2-first (sin git/build pesado en CloudShell).
+
+Si CloudShell no tiene `yarn`, `scripts/build_frontend.sh` cae automáticamente a `npm install --legacy-peer-deps --no-package-lock` para evitar choques de peer deps sin ensuciar lockfiles.
 
 ## Deploy frontend en EC2 (nginx)
 
@@ -177,4 +207,90 @@ Checklist rápido “no env versionados” (excluye `.env.example`):
 ```bash
 git ls-files frontend/.env frontend/.env.local frontend/.env.production
 # esperado: vacío
+```
+
+
+### Troubleshooting (`No such file or directory`)
+
+Si CloudShell marca `scripts/cloudshell_sync_and_deploy.sh: No such file or directory`, actualiza `main` y valida que exista en remoto:
+
+```bash
+git fetch --all --prune
+git checkout main
+git pull --ff-only origin main
+git ls-tree -r --name-only origin/main | grep '^scripts/cloudshell_sync_and_deploy.sh$'
+```
+
+Fallback (sin script):
+
+```bash
+WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 scripts/deploy_frontend_ec2.sh
+WEB_URL=http://52.53.215.40:8088 scripts/verify_ec2_release.sh
+```
+
+
+### Troubleshooting (`ENOSPC` en CloudShell)
+
+Si aparece `ENOSPC: no space left on device` durante `npm install`:
+
+```bash
+rm -rf frontend/node_modules frontend/build
+npm cache clean --force || true
+rm -rf /tmp/qfinance-npm-cache
+
+df -h
+WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
+```
+
+
+### Troubleshooting (`Cannot find module 'ajv/dist/compile/codegen'`)
+
+Si aparece ese error en CloudShell (path npm), ejecuta limpieza y reintento:
+
+```bash
+rm -rf frontend/node_modules frontend/build
+npm cache clean --force || true
+rm -rf /tmp/qfinance-npm-cache
+
+WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
+```
+
+
+### Troubleshooting: `The build failed because the process exited too early`
+
+Ese error suele ser falta de memoria en CloudShell. El script ya reintenta automáticamente en modo ahorro.
+
+También puedes forzarlo manualmente:
+
+```bash
+NODE_MEMORY_MB=2048 NODE_MEMORY_MB_SAFE=1024 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
+```
+
+
+### Troubleshooting: `cannot lock ref ... No space left on device`
+
+Si `git fetch` falla en CloudShell por falta de espacio/bloqueos (`index.lock`, `refs/.../HEAD.lock`), el script `scripts/cloudshell_sync_and_deploy.sh` ya intenta recuperación automática:
+- limpia `frontend/node_modules`, `frontend/build`, `/tmp/qfinance-npm-cache`
+- limpia locks de `.git`
+- ejecuta `git gc --prune=now`
+- reintenta `git fetch --all --prune`
+- si sigue fallando por `unpack-objects failed`/`failed to write object`, hace **reclone limpio automático** del repo (mismo remote/branch).
+
+Puedes forzar un umbral mínimo de espacio libre (MB) antes del sync:
+
+```bash
+MIN_FREE_MB=600 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
+```
+
+
+## Reset rápido de contraseña admin
+
+```bash
+QFINANCE_API_BASE_URL=http://52.53.215.40:8088/api BOOTSTRAP_ADMIN_EMAIL=admin@finrealty.com BOOTSTRAP_ADMIN_PASSWORD=admin123 python scripts/reset_admin_password.py --mode api --apply   --email encargado.finanzas@quantumgrupo.mx   --username MoisesFinanzas   --new-password 'NuevaClaveSegura!2026'
+```
+
+## Comando post-merge para actualizar frontend (CloudShell -> EC2)
+
+```bash
+EC2_HOST=52.53.215.40 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 MIN_FREE_MB=600 bash scripts/cloudshell_sync_and_deploy.sh
 ```
