@@ -9,9 +9,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "../components/ui/dialog";
 import { Badge } from "../components/ui/badge";
 import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle } from "lucide-react";
+import { buildYearOptions } from "../lib/yearRange";
 
 const Movements = () => {
-  const { api } = useAuth();
+  const { api, user } = useAuth();
   const [movements, setMovements] = useState([]);
   const [empresas, setEmpresas] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -29,8 +30,8 @@ const Movements = () => {
     empresa_id: "all",
     project_id: "all",
     partida_codigo: "all",
-    year: 2025,
-    month: 1
+    year: new Date().getFullYear(),
+    month: new Date().getMonth() + 1
   });
   
   const [formData, setFormData] = useState({
@@ -44,6 +45,8 @@ const Movements = () => {
     reference: "",
     description: ""
   });
+
+  const yearOptions = buildYearOptions();
 
   const months = [
     { value: 1, label: "Enero" }, { value: 2, label: "Febrero" }, { value: 3, label: "Marzo" },
@@ -321,7 +324,7 @@ const Movements = () => {
                         <SelectValue placeholder="Seleccionar partida..." />
                       </SelectTrigger>
                       <SelectContent className="max-h-[300px]">
-                        {catalogoPartidas.map(p => (
+                        {catalogoPartidas.filter((p) => user?.role !== "captura_ingresos" || String(p.codigo).startsWith("4")).map(p => (
                           <SelectItem key={p.codigo} value={p.codigo}>
                             {p.codigo} - {p.nombre}
                           </SelectItem>
@@ -485,7 +488,7 @@ const Movements = () => {
               </SelectTrigger>
               <SelectContent className="max-h-[300px]">
                 <SelectItem value="all">Todas las partidas</SelectItem>
-                {catalogoPartidas.map(p => (
+                {catalogoPartidas.filter((p) => user?.role !== "captura_ingresos" || String(p.codigo).startsWith("4")).map(p => (
                   <SelectItem key={p.codigo} value={p.codigo}>{p.codigo} - {p.nombre}</SelectItem>
                 ))}
               </SelectContent>
@@ -513,7 +516,7 @@ const Movements = () => {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {[2024, 2025, 2026].map(y => (
+                {yearOptions.map(y => (
                   <SelectItem key={y} value={String(y)}>{y}</SelectItem>
                 ))}
               </SelectContent>

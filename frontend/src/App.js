@@ -61,7 +61,7 @@ function App() {
           } />
           
           <Route path="/movements" element={
-            <ProtectedRoute allowedRoles={["admin", "finanzas"]}>
+            <ProtectedRoute allowedRoles={["admin", "finanzas", "captura_ingresos"]}>
               <DashboardLayout>
                 <Movements />
               </DashboardLayout>
@@ -85,7 +85,7 @@ function App() {
           } />
           
           <Route path="/catalogs" element={
-            <ProtectedRoute allowedRoles={["admin"]}>
+            <ProtectedRoute allowedRoles={["admin", "finanzas"]}>
               <DashboardLayout>
                 <Catalogs />
               </DashboardLayout>
