@@ -40,6 +40,7 @@ JWT_SECRET=change-me-in-local
 
 ```env
 REACT_APP_BACKEND_URL=http://localhost:8000
+REACT_APP_ENABLE_POSTHOG=false
 WDS_SOCKET_PORT=3000
 ```
 
@@ -85,6 +86,11 @@ Con backend y frontend arriba:
    - Abrir `http://localhost:3000`
 4. CORS:
    - El frontend debe poder iniciar sesión y consultar `/api/auth/me` sin error de CORS.
+5. Health API:
+   - Abrir `http://localhost:8000/api/health`
+   - Esperado: `{"status":"ok","api":"up"}`
+6. Analytics (opcional):
+   - Con `REACT_APP_ENABLE_POSTHOG=false` no carga PostHog y no hay reintentos en bucle si hay AdBlock.
 
 ## Arranque manual (alternativo)
 

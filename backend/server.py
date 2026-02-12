@@ -47,6 +47,10 @@ security = HTTPBearer()
 async def root():
     return {"status": "ok", "service": "FinRealty API", "version": "1.0.0"}
 
+@app.get("/api/health")
+async def api_health():
+    return {"status": "ok", "api": "up"}
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -497,10 +501,16 @@ async def register(user_data: UserCreate):
 @api_router.post("/auth/login", response_model=TokenResponse)
 async def login(credentials: UserLogin):
     user_doc = await db.users.find_one({"email": credentials.email}, {"_id": 0})
-    if not user_doc or not verify_password(credentials.password, user_doc.get('password_hash', '')):
+    if not user_doc:
+        logger.info("Login failed: user not found for email=%s", credentials.email)
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
-    
+
+    if not verify_password(credentials.password, user_doc.get('password_hash', '')):
+        logger.info("Login failed: invalid password for email=%s", credentials.email)
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
     if not user_doc.get('is_active', True):
+        logger.info("Login failed: inactive user id=%s", user_doc.get('id'))
         raise HTTPException(status_code=401, detail="Usuario desactivado")
     
     token = create_token(user_doc['id'], user_doc['email'], user_doc['role'])
@@ -2422,6 +2432,23 @@ async def seed_demo_data():
     }
 
 
+ADMIN_ENTITY_COLLECTIONS = {
+    "empresas": ("empresas", [("nombre", 1)]),
+    "proyectos": ("projects", [("name", 1)]),
+    "catalogo_partidas": ("catalogo_partidas", [("codigo", 1)]),
+    "proveedores": ("providers", [("name", 1)]),
+    "usuarios": ("users", [("name", 1)]),
+}
+
+ADMIN_CATALOGOS_ALIAS = {
+    "e": "empresas",
+    "p": "proyectos",
+    "c": "catalogo_partidas",
+    "d": "proveedores",
+    "u": "usuarios",
+}
+
+
 class AdminResetRequest(BaseModel):
     confirmation_text: str
 
@@ -2433,17 +2460,10 @@ async def admin_list_entity(
     current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     ensure_admin(current_user)
-    collection_map = {
-        "empresas": ("empresas", [("nombre", 1)]),
-        "proyectos": ("projects", [("name", 1)]),
-        "catalogo_partidas": ("catalogo_partidas", [("codigo", 1)]),
-        "proveedores": ("providers", [("name", 1)]),
-        "usuarios": ("users", [("name", 1)]),
-    }
-    if entity not in collection_map:
+    if entity not in ADMIN_ENTITY_COLLECTIONS:
         raise HTTPException(status_code=404, detail="Entidad admin no soportada")
 
-    collection, sort = collection_map[entity]
+    collection, sort = ADMIN_ENTITY_COLLECTIONS[entity]
     query = active_query(include_inactive)
     projection = {"_id": 0}
     if collection == "users":
@@ -2452,6 +2472,26 @@ async def admin_list_entity(
     if sort:
         cursor = cursor.sort(sort)
     return await cursor.to_list(1000)
+
+
+@api_router.get("/admin/catalogos/{tipo}")
+async def admin_catalogos_alias(
+    tipo: str,
+    de_inactive: bool = False,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    mapped_entity = ADMIN_CATALOGOS_ALIAS.get(tipo, tipo)
+    return await admin_list_entity(mapped_entity, include_inactive=de_inactive, current_user=current_user)
+
+
+@api_router.get("/admin/catalogos/{tipo}_de_inactive={de_inactive}")
+async def admin_catalogos_legacy_path(
+    tipo: str,
+    de_inactive: bool,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    mapped_entity = ADMIN_CATALOGOS_ALIAS.get(tipo, tipo)
+    return await admin_list_entity(mapped_entity, include_inactive=de_inactive, current_user=current_user)
 
 
 @api_router.post("/admin/catalogs/{entity}")
@@ -2463,17 +2503,10 @@ async def admin_create_entity(
 ):
     ensure_admin(current_user)
     now = datetime.now(timezone.utc).isoformat()
-    collection_map = {
-        "empresas": "empresas",
-        "proyectos": "projects",
-        "catalogo_partidas": "catalogo_partidas",
-        "proveedores": "providers",
-        "usuarios": "users",
-    }
-    if entity not in collection_map:
+    if entity not in ADMIN_ENTITY_COLLECTIONS:
         raise HTTPException(status_code=404, detail="Entidad admin no soportada")
 
-    collection = collection_map[entity]
+    collection = ADMIN_ENTITY_COLLECTIONS[entity][0]
     doc = payload.copy()
     doc["id"] = doc.get("id") or str(uuid.uuid4())
     doc.setdefault("is_active", True)
@@ -2502,17 +2535,10 @@ async def admin_update_entity(
     current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     ensure_admin(current_user)
-    collection_map = {
-        "empresas": "empresas",
-        "proyectos": "projects",
-        "catalogo_partidas": "catalogo_partidas",
-        "proveedores": "providers",
-        "usuarios": "users",
-    }
-    if entity not in collection_map:
+    if entity not in ADMIN_ENTITY_COLLECTIONS:
         raise HTTPException(status_code=404, detail="Entidad admin no soportada")
 
-    collection = collection_map[entity]
+    collection = ADMIN_ENTITY_COLLECTIONS[entity][0]
     old_doc = await db[collection].find_one({"id": entity_id}, {"_id": 0})
     if not old_doc:
         raise HTTPException(status_code=404, detail="Registro no encontrado")

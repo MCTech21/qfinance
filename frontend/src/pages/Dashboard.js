@@ -20,6 +20,7 @@ const Dashboard = () => {
   const [selectedYear, setSelectedYear] = useState(2025);
   const [selectedMonth, setSelectedMonth] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
+  const [chartsReady, setChartsReady] = useState(false);
 
   const months = [
     { value: 1, label: "Enero" }, { value: 2, label: "Febrero" }, { value: 3, label: "Marzo" },
@@ -28,6 +29,11 @@ const Dashboard = () => {
     { value: 10, label: "Octubre" }, { value: 11, label: "Noviembre" }, { value: 12, label: "Diciembre" },
   ];
 
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setChartsReady(true));
+    return () => cancelAnimationFrame(frame);
+  }, []);
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
@@ -229,8 +235,9 @@ const Dashboard = () => {
             <CardTitle className="font-heading text-lg">Avance por Partida</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="h-[300px]">
-              <ResponsiveContainer width="100%" height="100%">
+            <div className="h-[300px] min-h-[300px]">
+              {chartsReady && (
+              <ResponsiveContainer width="100%" height="100%" debounce={200}>
                 <BarChart data={dashboardData?.by_partida || []} layout="vertical">
                   <CartesianGrid strokeDasharray="3 3" stroke="hsl(240 5% 17%)" />
                   <XAxis type="number" domain={[0, 120]} stroke="hsl(240 5% 65%)" fontSize={12} />
@@ -260,6 +267,7 @@ const Dashboard = () => {
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -270,8 +278,9 @@ const Dashboard = () => {
             <CardTitle className="font-heading text-lg">Avance por Proyecto</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="h-[300px]">
-              <ResponsiveContainer width="100%" height="100%">
+            <div className="h-[300px] min-h-[300px]">
+              {chartsReady && (
+              <ResponsiveContainer width="100%" height="100%" debounce={200}>
                 <BarChart data={dashboardData?.by_project || []} layout="vertical">
                   <CartesianGrid strokeDasharray="3 3" stroke="hsl(240 5% 17%)" />
                   <XAxis type="number" domain={[0, 120]} stroke="hsl(240 5% 65%)" fontSize={12} />
@@ -298,6 +307,7 @@ const Dashboard = () => {
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
+              )}
             </div>
           </CardContent>
         </Card>
