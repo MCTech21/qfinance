@@ -254,6 +254,7 @@ Si `git fetch` falla en CloudShell por falta de espacio/bloqueos (`index.lock`, 
 - limpia locks de `.git`
 - ejecuta `git gc --prune=now`
 - reintenta `git fetch --all --prune`
+- si sigue fallando por `unpack-objects failed`/`failed to write object`, hace **reclone limpio automático** del repo (mismo remote/branch).
 
 Puedes forzar un umbral mínimo de espacio libre (MB) antes del sync:
 

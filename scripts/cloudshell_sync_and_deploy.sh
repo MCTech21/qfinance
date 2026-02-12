@@ -40,6 +40,21 @@ cleanup_low_space() {
   show_space
 }
 
+reclone_repo() {
+  local current_dir parent_dir repo_name remote_url
+  current_dir="$(pwd)"
+  parent_dir="$(dirname "${current_dir}")"
+  repo_name="$(basename "${current_dir}")"
+  remote_url="$(git remote get-url origin)"
+
+  echo "[WARN] Reintentando por reclone limpio en ${parent_dir}/${repo_name} ..."
+  cd "${parent_dir}"
+  rm -rf "${repo_name}"
+  git clone --depth 1 --branch "${BRANCH}" "${remote_url}" "${repo_name}"
+  cd "${repo_name}"
+  show_space
+}
+
 ensure_space() {
   local current
   current="$(free_mb)"
@@ -52,6 +67,7 @@ ensure_space() {
 
 sync_repo() {
   echo "[INFO] Sincronizando repo local con origin/${BRANCH} ..."
+  show_space
   set +e
   local out
   out=$(git fetch --all --prune 2>&1)
@@ -63,7 +79,19 @@ sync_repo() {
     if echo "${out}" | grep -Eiq 'No space left on device|cannot lock ref|index\.lock'; then
       echo "[WARN] Falló git fetch por espacio/bloqueos. Intentando recuperación automática..."
       cleanup_low_space
-      git fetch --all --prune
+      set +e
+      out=$(git fetch --all --prune 2>&1)
+      code=$?
+      set -e
+      echo "${out}"
+
+      if [[ ${code} -ne 0 ]]; then
+        if echo "${out}" | grep -Eiq 'No space left on device|cannot lock ref|index\.lock|unpack-objects failed|failed to write object'; then
+          reclone_repo
+        else
+          return ${code}
+        fi
+      fi
     else
       return ${code}
     fi
