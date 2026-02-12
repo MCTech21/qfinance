@@ -29,7 +29,7 @@ scripts/build_frontend.sh
 Qué hace:
 - Instala dependencias con `yarn` (preferido) o hace fallback a `npm install --legacy-peer-deps --no-package-lock` si `yarn` no existe.
 - Fuerza `NODE_OPTIONS=--max-old-space-size=4096` (configurable).
-- Ejecuta build con el gestor detectado.
+- Ejecuta build con el gestor detectado y, si detecta error por memoria, reintenta en modo ahorro (`NODE_MEMORY_MB_SAFE`, `GENERATE_SOURCEMAP=false`, `DISABLE_ESLINT_PLUGIN=true`).
 - Falla si detecta `emergentagent`, `expense-tracker` o `preview.emergentagent.com` en `frontend/build`.
 
 ## P1 - Deploy seguro
@@ -173,4 +173,15 @@ npm cache clean --force || true
 rm -rf /tmp/qfinance-npm-cache
 
 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
+```
+
+
+### Troubleshooting: `The build failed because the process exited too early`
+
+Ese error suele ser falta de memoria en CloudShell. El script ya reintenta automáticamente en modo ahorro.
+
+También puedes forzarlo manualmente:
+
+```bash
+NODE_MEMORY_MB=2048 NODE_MEMORY_MB_SAFE=1024 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
 ```

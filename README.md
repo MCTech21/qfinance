@@ -234,3 +234,14 @@ rm -rf /tmp/qfinance-npm-cache
 
 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
 ```
+
+
+### Troubleshooting: `The build failed because the process exited too early`
+
+Ese error suele ser falta de memoria en CloudShell. El script ya reintenta automáticamente en modo ahorro.
+
+También puedes forzarlo manualmente:
+
+```bash
+NODE_MEMORY_MB=2048 NODE_MEMORY_MB_SAFE=1024 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
+```

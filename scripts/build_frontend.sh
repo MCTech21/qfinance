@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FRONTEND_DIR="${FRONTEND_DIR:-${ROOT_DIR}/frontend}"
 NODE_MEMORY_MB="${NODE_MEMORY_MB:-4096}"
+NODE_MEMORY_MB_SAFE="${NODE_MEMORY_MB_SAFE:-1536}"
 FRONTEND_PM="${FRONTEND_PM:-auto}" # auto|yarn|npm
 NPM_CACHE_DIR="${NPM_CACHE_DIR:-/tmp/qfinance-npm-cache}"
 
@@ -104,6 +105,40 @@ ensure_ajv_codegen() {
   fi
 }
 
+
+run_build_with_retry() {
+  local primary_cmd=("$@")
+  local log_file
+  log_file="$(mktemp)"
+
+  set +e
+  "${primary_cmd[@]}" 2>&1 | tee "${log_file}"
+  local code=${PIPESTATUS[0]}
+  set -e
+
+  if [[ ${code} -eq 0 ]]; then
+    rm -f "${log_file}"
+    return 0
+  fi
+
+  if grep -Eiq 'exited too early|out of memory|heap out of memory|Killed' "${log_file}"; then
+    echo "[WARN] Build falló por memoria. Reintentando en modo ahorro..."
+    export GENERATE_SOURCEMAP=false
+    export DISABLE_ESLINT_PLUGIN=true
+    export NODE_OPTIONS="--max-old-space-size=${NODE_MEMORY_MB_SAFE}"
+    echo "[INFO] NODE_OPTIONS(retry)=${NODE_OPTIONS}"
+    echo "[INFO] GENERATE_SOURCEMAP=${GENERATE_SOURCEMAP} DISABLE_ESLINT_PLUGIN=${DISABLE_ESLINT_PLUGIN}"
+
+    set +e
+    "${primary_cmd[@]}" 2>&1 | tee "${log_file}"
+    code=${PIPESTATUS[0]}
+    set -e
+  fi
+
+  rm -f "${log_file}"
+  return ${code}
+}
+
 echo "[INFO] Instalando dependencias frontend..."
 if [[ "${PM}" == "yarn" ]]; then
   yarn install --frozen-lockfile
@@ -114,9 +149,9 @@ fi
 
 echo "[INFO] Build frontend..."
 if [[ "${PM}" == "yarn" ]]; then
-  yarn build
+  run_build_with_retry yarn build
 else
-  npm run build
+  run_build_with_retry npm run build
 fi
 
 echo "[INFO] Verificando artefactos sin dominios prohibidos..."
