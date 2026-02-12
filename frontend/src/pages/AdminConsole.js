@@ -9,7 +9,7 @@ const entityConfig = {
   proyectos: { label: "Proyectos", fields: ["code", "name", "empresa_id", "description"] },
   catalogo_partidas: { label: "Partidas", fields: ["codigo", "nombre", "grupo"] },
   proveedores: { label: "Proveedores", fields: ["code", "name", "rfc"] },
-  usuarios: { label: "Usuarios", fields: ["email", "name", "role", "is_active", "is_demo"] },
+  usuarios: { label: "Usuarios", fields: ["email", "name", "role", "is_active"] },
 };
 
 const AdminConsole = () => {
@@ -20,8 +20,6 @@ const AdminConsole = () => {
   const [search, setSearch] = useState("");
   const [form, setForm] = useState({});
   const [editingId, setEditingId] = useState(null);
-  const [preview, setPreview] = useState({});
-  const [resetText, setResetText] = useState("");
   const [postedMovements, setPostedMovements] = useState([]);
 
   const loadRows = useCallback(async () => {
@@ -29,18 +27,9 @@ const AdminConsole = () => {
     setRows(response.data || []);
   }, [api, tab, includeInactive]);
 
-  const loadPreview = useCallback(async () => {
-    const response = await api().get("/admin/reset-demo/preview");
-    setPreview(response.data || {});
-  }, [api]);
-
   useEffect(() => {
     loadRows().catch(() => toast.error("No se pudo cargar admin"));
   }, [loadRows]);
-
-  useEffect(() => {
-    loadPreview().catch(() => {});
-  }, [loadPreview]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return rows;
@@ -101,18 +90,6 @@ const AdminConsole = () => {
     }
   };
 
-  const resetDemo = async () => {
-    try {
-      await api().post("/admin/reset-demo", { confirmation_text: resetText });
-      toast.success("RESET DEMO ejecutado");
-      await loadRows();
-      await loadPreview();
-      setResetText("");
-    } catch (err) {
-      toast.error(err?.response?.data?.detail || "Error en RESET DEMO");
-    }
-  };
-
   const columns = entityConfig[tab].fields;
 
   return (
@@ -125,35 +102,25 @@ const AdminConsole = () => {
         ))}
       </div>
 
-      <div className="grid md:grid-cols-2 gap-4">
-        <div className="space-y-3 border border-border rounded-lg p-4">
-          <h3 className="font-semibold">{editingId ? "Editar" : "Crear"} {entityConfig[tab].label}</h3>
-          <form onSubmit={submit} className="space-y-2">
-            {columns.map((field) => (
-              <Input
-                key={field}
-                placeholder={field}
-                value={form[field] ?? ""}
-                onChange={(e) => setForm((prev) => ({ ...prev, [field]: e.target.value }))}
-              />
-            ))}
-            {tab === "usuarios" && !editingId && (
-              <Input placeholder="password" type="password" value={form.password ?? ""} onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value }))} />
-            )}
-            <div className="flex gap-2">
-              <Button type="submit">Guardar</Button>
-              {editingId && <Button type="button" variant="outline" onClick={() => { setEditingId(null); setForm({}); }}>Cancelar</Button>}
-            </div>
-          </form>
-        </div>
-
-        <div className="space-y-3 border border-border rounded-lg p-4">
-          <h3 className="font-semibold">Reset DEMO</h3>
-          <div className="text-sm text-muted-foreground">Escribe exactamente <strong>RESET DEMO</strong></div>
-          <Input value={resetText} onChange={(e) => setResetText(e.target.value)} placeholder="RESET DEMO" />
-          <Button variant="destructive" onClick={resetDemo}>Ejecutar Reset DEMO</Button>
-          <div className="text-xs">Preview: {Object.entries(preview).map(([k, v]) => `${k}:${v}`).join(" | ")}</div>
-        </div>
+      <div className="space-y-3 border border-border rounded-lg p-4">
+        <h3 className="font-semibold">{editingId ? "Editar" : "Crear"} {entityConfig[tab].label}</h3>
+        <form onSubmit={submit} className="space-y-2">
+          {columns.map((field) => (
+            <Input
+              key={field}
+              placeholder={field}
+              value={form[field] ?? ""}
+              onChange={(e) => setForm((prev) => ({ ...prev, [field]: e.target.value }))}
+            />
+          ))}
+          {tab === "usuarios" && !editingId && (
+            <Input placeholder="password" type="password" value={form.password ?? ""} onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value }))} />
+          )}
+          <div className="flex gap-2">
+            <Button type="submit">Guardar</Button>
+            {editingId && <Button type="button" variant="outline" onClick={() => { setEditingId(null); setForm({}); }}>Cancelar</Button>}
+          </div>
+        </form>
       </div>
 
       <div className="space-y-3">

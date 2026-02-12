@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Reset admin/user password for QFinance.
+"""Reset password for an existing user using admin API or DB mode.
 
 Default mode is dry-run; pass --apply to execute updates.
-Supports API mode (preferred for CloudShell) and DB mode fallback.
 """
 
 import argparse
@@ -22,16 +21,16 @@ DEFAULT_BOOTSTRAP_PASSWORD = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "admin123")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Reset password for target admin/user")
+    parser = argparse.ArgumentParser(description="Reset password for target user")
     parser.add_argument("--mode", choices=["api", "db", "auto"], default="auto")
     parser.add_argument("--apply", action="store_true", help="Apply changes (default is dry-run)")
     parser.add_argument("--email", default=DEFAULT_TARGET_EMAIL, help="Target user email")
     parser.add_argument("--username", default=DEFAULT_TARGET_USERNAME, help="Target user name")
     parser.add_argument("--new-password", default=DEFAULT_NEW_PASSWORD, help="New plain password")
 
-    parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL, help="API base URL")
-    parser.add_argument("--bootstrap-email", default=DEFAULT_BOOTSTRAP_EMAIL, help="Admin email for API auth")
-    parser.add_argument("--bootstrap-password", default=DEFAULT_BOOTSTRAP_PASSWORD, help="Admin password for API auth")
+    parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL, help="Base API URL, e.g. http://host:8088/api")
+    parser.add_argument("--bootstrap-email", default=DEFAULT_BOOTSTRAP_EMAIL, help="Bootstrap admin email")
+    parser.add_argument("--bootstrap-password", default=DEFAULT_BOOTSTRAP_PASSWORD, help="Bootstrap admin password")
 
     parser.add_argument("--mongo-url", default=os.getenv("MONGO_URL", "mongodb://localhost:27017"), help="Mongo URL for DB mode")
     parser.add_argument("--db-name", default=os.getenv("DB_NAME", "qfinance"), help="Mongo DB name")
@@ -49,65 +48,87 @@ def request_json(method: str, url: str, payload=None, token: str = None):
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode("utf-8")
-            return resp.status, json.loads(body) if body else {}
+            return resp.status, json.loads(body) if body else {}, url
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") if e.fp else ""
         try:
             parsed = json.loads(body) if body else {}
         except Exception:
             parsed = {"detail": body or str(e)}
-        return e.code, parsed
+        return e.code, parsed, url
     except urllib.error.URLError as e:
-        return 0, {"detail": f"Cannot reach API endpoint: {url} ({e.reason})"}
+        return 0, {"detail": f"Cannot reach API endpoint: {url} ({e.reason})"}, url
 
 
 def run_api_mode(args: argparse.Namespace) -> int:
     base = args.api_base_url.rstrip("/")
-    status, login_data = request_json(
+
+    status, login_data, url = request_json(
         "POST",
         f"{base}/auth/login",
         {"email": args.bootstrap_email, "password": args.bootstrap_password},
     )
     if status != 200:
-        print(f"[ERROR] API login failed ({status}): {login_data}", file=sys.stderr)
+        print(f"[ERROR] API login failed ({status}) url={url}: {login_data}", file=sys.stderr)
         return 1
 
     token = login_data.get("access_token")
     if not token:
-        print("[ERROR] API login did not return access_token", file=sys.stderr)
+        print(f"[ERROR] API login did not return access_token url={url}", file=sys.stderr)
         return 1
 
-    query = urllib.parse.urlencode({"include_inactive": "true"})
-    status, users = request_json("GET", f"{base}/admin/catalogs/usuarios?{query}", token=token)
+    query = urllib.parse.urlencode({"email": args.email, "username": args.username, "include_inactive": "true"})
+    status, users, url = request_json("GET", f"{base}/admin/users?{query}", token=token)
     if status != 200:
-        print(f"[ERROR] Cannot list users ({status}): {users}", file=sys.stderr)
+        print(f"[ERROR] Cannot find user ({status}) url={url}: {users}", file=sys.stderr)
+        return 1
+    if not users:
+        print(f"[ERROR] User not found for email={args.email} username={args.username} url={url}", file=sys.stderr)
         return 1
 
+    # Prefer exact email match, then exact username.
     target = None
     for user in users:
         if args.email and user.get("email", "").lower() == args.email.lower():
             target = user
             break
-        if args.username and user.get("name") == args.username:
-            target = user
-            break
-
-    if not target:
-        print(f"[ERROR] Target user not found: email={args.email} username={args.username}", file=sys.stderr)
+    if target is None:
+        for user in users:
+            if args.username and user.get("name") == args.username:
+                target = user
+                break
+    if target is None:
+        print(f"[ERROR] Candidates found but no exact match email={args.email} username={args.username}: {users}", file=sys.stderr)
         return 1
 
-    print(f"[INFO] Target found via API: id={target.get('id')} email={target.get('email')} name={target.get('name')}")
+    print(f"[INFO] Target found: id={target.get('id')} email={target.get('email')} name={target.get('name')} active={target.get('is_active')}")
     if not args.apply:
         print("[DRY-RUN] No changes applied. Re-run with --apply.")
         return 0
 
-    payload = {"password": args.new_password, "is_active": True, "role": "admin", "is_demo": False}
-    status, data = request_json("PUT", f"{base}/admin/catalogs/usuarios/{target['id']}", payload, token=token)
+    status, data, url = request_json(
+        "PATCH",
+        f"{base}/admin/users/{target['id']}/password",
+        {"password": args.new_password},
+        token=token,
+    )
     if status != 200:
-        print(f"[ERROR] Cannot reset password ({status}): {data}", file=sys.stderr)
+        print(f"[ERROR] Cannot reset password ({status}) url={url}: {data}", file=sys.stderr)
         return 1
 
-    print(f"[OK] Password updated via API for {data.get('email')} ({data.get('id')})")
+    print(f"[OK] Password updated for user_id={target['id']}")
+
+    # Mandatory validation: login with target credentials.
+    status, login_target_data, url = request_json(
+        "POST",
+        f"{base}/auth/login",
+        {"email": target.get("email"), "password": args.new_password},
+    )
+    if status != 200:
+        print(f"[ERROR] Post-reset login failed ({status}) url={url}: {login_target_data}", file=sys.stderr)
+        return 1
+
+    print(f"[OK] Post-reset login validated for {target.get('email')}")
     return 0
 
 
@@ -136,30 +157,30 @@ def run_db_mode(args: argparse.Namespace) -> int:
     password_hash = bcrypt.hashpw(args.new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     result = db.users.update_one(
         {"id": target["id"]},
-        {"$set": {"password_hash": password_hash, "is_active": True, "role": "admin", "is_demo": False}},
+        {"$set": {"password_hash": password_hash, "is_active": True, "role": "admin"}},
     )
     if result.matched_count != 1:
-        print("[ERROR] Failed to update user password in DB", file=sys.stderr)
+        print(f"[ERROR] Could not update DB user id={target.get('id')}", file=sys.stderr)
         return 1
 
-    print(f"[OK] Password updated via DB for {target.get('email')} ({target.get('id')})")
+    print(f"[OK] Password updated in DB for {target.get('email')} ({target.get('id')})")
     return 0
 
 
 def main() -> int:
     args = parse_args()
+
     if args.mode == "api":
         return run_api_mode(args)
     if args.mode == "db":
         return run_db_mode(args)
 
-    api_status = run_api_mode(args)
-    if api_status == 0:
+    rc = run_api_mode(args)
+    if rc == 0:
         return 0
-
     print("[WARN] API mode failed; trying DB mode...", file=sys.stderr)
     return run_db_mode(args)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

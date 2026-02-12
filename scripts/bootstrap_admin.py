@@ -22,7 +22,6 @@ def parse_args():
     parser.add_argument("--name", default=DEFAULT_ADMIN_USERNAME, help="Name for created user")
     parser.add_argument("--password-hash", help="DB mode only: password_hash for created user")
     parser.add_argument("--new-password", default="admin123", help="API mode: password for created target user")
-    parser.add_argument("--deactivate-demo-users", action="store_true", help="Deactivate demo users")
     parser.add_argument("--mode", choices=["auto", "db", "api"], default="auto", help="Execution mode")
     parser.add_argument("--api-base-url", default=os.getenv("QFINANCE_API_BASE_URL", DEFAULT_API_BASE_URL), help="API base URL")
     parser.add_argument("--bootstrap-email", default=os.getenv("BOOTSTRAP_ADMIN_EMAIL", DEFAULT_BOOTSTRAP_EMAIL), help="Existing admin email for API auth")
@@ -121,17 +120,6 @@ def run_api_mode(args, email, username):
         raise SystemExit(f"Cannot promote target user ({status})")
     print(f"Updated existing user as admin via API: id={target['id']} email={target.get('email')} name={target.get('name')}")
 
-    if args.deactivate_demo_users:
-        changed = 0
-        for user in users:
-            if user.get("id") == target.get("id"):
-                continue
-            if user.get("is_demo") is True:
-                status, _ = request_json("PUT", f"{base}/users/{user['id']}", {"is_active": False}, token=token)
-                if status == 200:
-                    changed += 1
-        print(f"Demo users deactivated (API mode): {changed}")
-
 
 def run_db_mode(args, email, username):
     from motor.motor_asyncio import AsyncIOMotorClient  # optional dependency
@@ -158,7 +146,7 @@ def run_db_mode(args, email, username):
         if user:
             await db.users.update_one(
                 {"id": user["id"]},
-                {"$set": {"role": "admin", "is_active": True, "is_demo": False}},
+                {"$set": {"role": "admin", "is_active": True}},
             )
             print(f"Updated existing user as admin: id={user['id']} email={user.get('email')} name={user.get('name')}")
         else:
@@ -168,19 +156,11 @@ def run_db_mode(args, email, username):
                 "name": username or args.name,
                 "role": "admin",
                 "is_active": True,
-                "is_demo": False,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "password_hash": args.password_hash or "",
             }
             await db.users.insert_one(doc)
             print(f"Created new admin user: email={email} name={doc['name']}")
-
-        if args.deactivate_demo_users:
-            result = await db.users.update_many(
-                {"is_demo": True, "email": {"$ne": email}},
-                {"$set": {"is_active": False}},
-            )
-            print(f"Demo users deactivated: {result.modified_count}")
 
         client.close()
 

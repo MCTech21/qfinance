@@ -40,6 +40,7 @@ JWT_SECRET=change-me-in-local
 
 ```env
 REACT_APP_BACKEND_URL=http://localhost:8000
+REACT_APP_ENABLE_POSTHOG=false
 WDS_SOCKET_PORT=3000
 ```
 
@@ -85,6 +86,11 @@ Con backend y frontend arriba:
    - Abrir `http://localhost:3000`
 4. CORS:
    - El frontend debe poder iniciar sesión y consultar `/api/auth/me` sin error de CORS.
+5. Health API:
+   - Abrir `http://localhost:8000/api/health`
+   - Esperado: `{"status":"ok","api":"up"}`
+6. Analytics (opcional):
+   - Con `REACT_APP_ENABLE_POSTHOG=false` no carga PostHog y no hay reintentos en bucle si hay AdBlock.
 
 ## Arranque manual (alternativo)
 
@@ -108,10 +114,9 @@ yarn start
 
 ## Usuarios
 
-No se incluyen credenciales demo por defecto.
+No se incluyen credenciales preconfiguradas por defecto.
 
 - Para promover tu cuenta real a administrador usa: `python scripts/bootstrap_admin.py --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas`.
-- Para limpiar usuarios demo heredados (`@finrealty.com`), usa `python scripts/cleanup_demo_users.py --apply`.
 
 ## Semáforo de Cumplimiento
 

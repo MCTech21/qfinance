@@ -1,7 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
-import axios from "axios";
-
-import { API_BASE_URL, withApiPath } from "../lib/api";
+import { createApiClient } from "../lib/http";
 const AuthContext = createContext(null);
 
 export const AuthProvider = ({ children }) => {
@@ -9,13 +7,7 @@ export const AuthProvider = ({ children }) => {
   const [token, setToken] = useState(localStorage.getItem("token"));
   const [isLoading, setIsLoading] = useState(true);
 
-  const api = useCallback(() => {
-    const instance = axios.create({
-      baseURL: API_BASE_URL,
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    return instance;
-  }, [token]);
+  const api = useCallback(() => createApiClient(token), [token]);
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -36,7 +28,7 @@ export const AuthProvider = ({ children }) => {
   }, [token, api]);
 
   const login = async (email, password) => {
-    const response = await axios.post(withApiPath("/auth/login"), { email, password });
+    const response = await createApiClient().post("/auth/login", { email, password });
     const { access_token, user: userData } = response.data;
     localStorage.setItem("token", access_token);
     setToken(access_token);

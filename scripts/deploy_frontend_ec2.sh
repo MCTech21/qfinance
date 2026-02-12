@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FRONTEND_DIR="${FRONTEND_DIR:-${ROOT_DIR}/frontend}"
 DEPLOY_TARGET_DIR="${DEPLOY_TARGET_DIR:-/var/www/qfinance}"
 ENABLE_SWAP="${ENABLE_SWAP:-1}"
-VERIFY_SEED_ENDPOINT="${VERIFY_SEED_ENDPOINT:-1}"
 WEB_URL="${WEB_URL:-http://127.0.0.1:8088}"
 SKIP_NGINX_RELOAD="${SKIP_NGINX_RELOAD:-0}"
 
@@ -43,6 +42,6 @@ else
 fi
 
 echo "[INFO] Ejecutando verificación final post-deploy..."
-VERIFY_SEED_ENDPOINT="${VERIFY_SEED_ENDPOINT}" WEB_URL="${WEB_URL}" "${ROOT_DIR}/scripts/verify_ec2_release.sh"
+WEB_URL="${WEB_URL}" "${ROOT_DIR}/scripts/verify_ec2_release.sh"
 
 echo "[OK] Deploy frontend finalizado."
