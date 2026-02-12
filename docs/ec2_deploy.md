@@ -159,3 +159,18 @@ rm -rf /tmp/qfinance-npm-cache
 df -h
 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
 ```
+
+
+### Troubleshooting: `Cannot find module 'ajv/dist/compile/codegen'`
+
+En fallback con npm, el build script ya intenta autorreparar esta dependencia (`ajv` + `ajv-keywords`) antes de compilar.
+
+Si persiste en CloudShell, limpia módulos/cache y reintenta:
+
+```bash
+rm -rf frontend/node_modules frontend/build
+npm cache clean --force || true
+rm -rf /tmp/qfinance-npm-cache
+
+WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
+```

@@ -89,11 +89,27 @@ npm_install_with_retry() {
   return ${code}
 }
 
+
+ensure_ajv_codegen() {
+  if node -e "require.resolve('ajv/dist/compile/codegen')" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "[WARN] Dependencia faltante: ajv/dist/compile/codegen. Aplicando reparación npm para webpack..."
+  npm install --legacy-peer-deps --no-package-lock --cache "${NPM_CACHE_DIR}" ajv@^8.17.1 ajv-keywords@^5.1.0
+
+  if ! node -e "require.resolve('ajv/dist/compile/codegen')" >/dev/null 2>&1; then
+    echo "[ERROR] No se pudo resolver ajv/dist/compile/codegen después de la reparación." >&2
+    return 1
+  fi
+}
+
 echo "[INFO] Instalando dependencias frontend..."
 if [[ "${PM}" == "yarn" ]]; then
   yarn install --frozen-lockfile
 else
   npm_install_with_retry
+  ensure_ajv_codegen
 fi
 
 echo "[INFO] Build frontend..."
