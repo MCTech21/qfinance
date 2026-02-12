@@ -143,3 +143,19 @@ Si el último comando no imprime nada, tu `origin/main` todavía no contiene ese
 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 scripts/deploy_frontend_ec2.sh
 WEB_URL=http://52.53.215.40:8088 scripts/verify_ec2_release.sh
 ```
+
+
+### Troubleshooting: `ENOSPC: no space left on device` durante npm install
+
+El build script ya reintenta automáticamente una vez cuando detecta ENOSPC (limpia `node_modules` + cache npm temporal en `/tmp/qfinance-npm-cache`).
+
+Si aún falla en CloudShell, libera espacio y reintenta:
+
+```bash
+rm -rf frontend/node_modules frontend/build
+npm cache clean --force || true
+rm -rf /tmp/qfinance-npm-cache
+
+df -h
+WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
+```
