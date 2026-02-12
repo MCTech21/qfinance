@@ -27,7 +27,7 @@ scripts/build_frontend.sh
 ```
 
 Qué hace:
-- Instala dependencias con `yarn` (preferido) o hace fallback a `npm` si `yarn` no existe.
+- Instala dependencias con `yarn` (preferido) o hace fallback a `npm install --legacy-peer-deps --no-package-lock` si `yarn` no existe.
 - Fuerza `NODE_OPTIONS=--max-old-space-size=4096` (configurable).
 - Ejecuta build con el gestor detectado.
 - Falla si detecta `emergentagent`, `expense-tracker` o `preview.emergentagent.com` en `frontend/build`.

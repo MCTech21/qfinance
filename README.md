@@ -129,7 +129,7 @@ WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_
 
 Este comando evita trabajar con artefactos viejos (hace sync fuerte del repo + deploy + verificación).
 
-Si CloudShell no tiene `yarn`, `scripts/build_frontend.sh` cae automáticamente a `npm`.
+Si CloudShell no tiene `yarn`, `scripts/build_frontend.sh` cae automáticamente a `npm install --legacy-peer-deps --no-package-lock` para evitar choques de peer deps sin ensuciar lockfiles.
 
 ## Deploy frontend en EC2 (nginx)
 

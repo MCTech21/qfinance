@@ -51,7 +51,7 @@ echo "[INFO] Instalando dependencias frontend..."
 if [[ "${PM}" == "yarn" ]]; then
   yarn install --frozen-lockfile
 else
-  npm install
+  npm install --legacy-peer-deps --no-package-lock
 fi
 
 echo "[INFO] Build frontend..."
