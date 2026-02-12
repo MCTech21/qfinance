@@ -185,3 +185,18 @@ También puedes forzarlo manualmente:
 ```bash
 NODE_MEMORY_MB=2048 NODE_MEMORY_MB_SAFE=1024 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
 ```
+
+
+### Troubleshooting: `cannot lock ref ... No space left on device`
+
+Si `git fetch` falla en CloudShell por falta de espacio/bloqueos (`index.lock`, `refs/.../HEAD.lock`), el script `scripts/cloudshell_sync_and_deploy.sh` ya intenta recuperación automática:
+- limpia `frontend/node_modules`, `frontend/build`, `/tmp/qfinance-npm-cache`
+- limpia locks de `.git`
+- ejecuta `git gc --prune=now`
+- reintenta `git fetch --all --prune`
+
+Puedes forzar un umbral mínimo de espacio libre (MB) antes del sync:
+
+```bash
+MIN_FREE_MB=600 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
+```
