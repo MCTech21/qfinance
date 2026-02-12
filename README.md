@@ -119,6 +119,26 @@ No se incluyen credenciales demo por defecto.
 - 🟡 **Amarillo**: Ejercido entre 90% y 100%
 - 🔴 **Rojo**: Ejercido > 100% (requiere autorización)
 
+
+## EC2-first deploy (CloudShell ligero)
+
+Desde ahora, CloudShell **no debe clonar/buildar local**. Solo orquesta deploy en EC2.
+
+```bash
+EC2_HOST=52.53.215.40 \
+WEB_URL=http://52.53.215.40:8088 \
+ENABLE_SWAP=0 MIN_FREE_MB=600 \
+bash scripts/cloudshell_sync_and_deploy.sh
+```
+
+Variables requeridas/recomendadas:
+- `EC2_HOST` (ssh), `EC2_USER` (default `ubuntu`)
+- `WEB_URL`, `ENABLE_SWAP`, `MIN_FREE_MB`
+- opcional: `EC2_WORK_DIR=/opt/qfinance_git`, `BRANCH=main`
+- opcional SSM: `DEPLOY_TRANSPORT=ssm` + `EC2_INSTANCE_ID`
+
+El trabajo pesado vive en EC2 en `scripts/ec2_sync_and_deploy.sh`.
+
 ## CloudShell (sync + deploy recomendado)
 
 Después de cada merge/PR, ejecuta:
@@ -127,7 +147,7 @@ Después de cada merge/PR, ejecuta:
 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
 ```
 
-Este comando evita trabajar con artefactos viejos (hace sync fuerte del repo + deploy + verificación).
+Este comando ahora orquesta el deploy remoto EC2-first (sin git/build pesado en CloudShell).
 
 Si CloudShell no tiene `yarn`, `scripts/build_frontend.sh` cae automáticamente a `npm install --legacy-peer-deps --no-package-lock` para evitar choques de peer deps sin ensuciar lockfiles.
 

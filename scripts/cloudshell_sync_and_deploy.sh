@@ -1,119 +1,93 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Uso:
-#   WEB_URL=http://52.53.215.40:8088 bash scripts/cloudshell_sync_and_deploy.sh
-# Opcionales:
-#   BRANCH=main ENABLE_SWAP=0 VERIFY_SEED_ENDPOINT=1
-#   Nota: en CloudShell ENABLE_SWAP=0 evita errores de swapon (default de este script).
+# CloudShell orchestrator (EC2-first): NO build/git pesado local.
 
+DEPLOY_TRANSPORT="${DEPLOY_TRANSPORT:-ssh}" # ssh|ssm
+EC2_HOST="${EC2_HOST:-}"
+EC2_USER="${EC2_USER:-ubuntu}"
+EC2_SSH_PORT="${EC2_SSH_PORT:-22}"
+EC2_SSH_KEY="${EC2_SSH_KEY:-}"
+EC2_INSTANCE_ID="${EC2_INSTANCE_ID:-}"
+EC2_WORK_DIR="${EC2_WORK_DIR:-/opt/qfinance_git}"
+REPO_URL="${REPO_URL:-git@github.com:MCTech21/qfinance.git}"
 BRANCH="${BRANCH:-main}"
 WEB_URL="${WEB_URL:-http://127.0.0.1:8088}"
 ENABLE_SWAP="${ENABLE_SWAP:-0}"
 VERIFY_SEED_ENDPOINT="${VERIFY_SEED_ENDPOINT:-1}"
 MIN_FREE_MB="${MIN_FREE_MB:-350}"
 
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  echo "[ERROR] Ejecuta este script dentro del repo git." >&2
-  exit 1
-fi
-
-show_space() {
-  echo "[INFO] Espacio en disco (repo):"
-  df -h . | sed 's/^/[INFO] /'
-  echo "[INFO] Inodos disponibles (repo):"
-  df -i . | sed 's/^/[INFO] /'
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || { echo "[ERROR] Falta comando requerido: $1" >&2; exit 1; }
 }
 
-free_mb() {
-  df -Pm . | awk 'NR==2 {print $4}'
+remote_payload="WEB_URL='${WEB_URL}' ENABLE_SWAP='${ENABLE_SWAP}' MIN_FREE_MB='${MIN_FREE_MB}' VERIFY_SEED_ENDPOINT='${VERIFY_SEED_ENDPOINT}' BRANCH='${BRANCH}' EC2_WORK_DIR='${EC2_WORK_DIR}' REPO_URL='${REPO_URL}' bash '${EC2_WORK_DIR}/scripts/ec2_sync_and_deploy.sh'"
+
+run_ssh() {
+  require_cmd ssh
+  [[ -n "${EC2_HOST}" ]] || { echo "[ERROR] EC2_HOST es requerido para DEPLOY_TRANSPORT=ssh" >&2; exit 1; }
+
+  local ssh_opts=(-p "${EC2_SSH_PORT}" -o ServerAliveInterval=30 -o ServerAliveCountMax=5)
+  if [[ -n "${EC2_SSH_KEY}" ]]; then
+    ssh_opts+=(-i "${EC2_SSH_KEY}")
+  fi
+
+  echo "[INFO] Validando conectividad SSH a ${EC2_USER}@${EC2_HOST}:${EC2_SSH_PORT} ..."
+  ssh "${ssh_opts[@]}" "${EC2_USER}@${EC2_HOST}" "echo '[OK] SSH reachability confirmada'"
+
+  echo "[INFO] Ejecutando deploy EC2-first vía SSH ..."
+  ssh "${ssh_opts[@]}" "${EC2_USER}@${EC2_HOST}" "bash -lc \"${remote_payload}\""
 }
 
-cleanup_low_space() {
-  echo "[WARN] Ejecutando limpieza para recuperar espacio..."
-  rm -rf frontend/node_modules frontend/build /tmp/qfinance-npm-cache || true
-  npm cache clean --force >/dev/null 2>&1 || true
-  rm -f .git/index.lock .git/packed-refs.lock .git/shallow.lock || true
-  find .git/refs -name '*.lock' -type f -delete 2>/dev/null || true
-  git reflog expire --expire=now --all >/dev/null 2>&1 || true
-  git gc --prune=now >/dev/null 2>&1 || true
-  show_space
-}
+run_ssm() {
+  require_cmd aws
+  [[ -n "${EC2_INSTANCE_ID}" ]] || { echo "[ERROR] EC2_INSTANCE_ID es requerido para DEPLOY_TRANSPORT=ssm" >&2; exit 1; }
 
-reclone_repo() {
-  local current_dir parent_dir repo_name remote_url
-  current_dir="$(pwd)"
-  parent_dir="$(dirname "${current_dir}")"
-  repo_name="$(basename "${current_dir}")"
-  remote_url="$(git remote get-url origin)"
+  echo "[INFO] Validando conectividad SSM para instance ${EC2_INSTANCE_ID} ..."
+  aws ssm describe-instance-information \
+    --filters "Key=InstanceIds,Values=${EC2_INSTANCE_ID}" \
+    --query 'InstanceInformationList[0].PingStatus' \
+    --output text | grep -Eq 'Online|ConnectionLost' || {
+      echo "[ERROR] La instancia no aparece como gestionada por SSM." >&2
+      exit 1
+    }
 
-  echo "[WARN] Reintentando por reclone limpio en ${parent_dir}/${repo_name} ..."
-  cd "${parent_dir}"
-  rm -rf "${repo_name}"
-  git clone --depth 1 --branch "${BRANCH}" "${remote_url}" "${repo_name}"
-  cd "${repo_name}"
-  show_space
-}
+  echo "[INFO] Ejecutando deploy EC2-first vía SSM ..."
+  local cmd_id
+  cmd_id=$(aws ssm send-command \
+    --instance-ids "${EC2_INSTANCE_ID}" \
+    --document-name "AWS-RunShellScript" \
+    --comment "qfinance ec2-first deploy" \
+    --parameters "commands=[\"${remote_payload}\"]" \
+    --query 'Command.CommandId' \
+    --output text)
 
-ensure_space() {
-  local current
-  current="$(free_mb)"
-  show_space
-  if [[ "${current}" -lt "${MIN_FREE_MB}" ]]; then
-    echo "[WARN] Espacio libre bajo (${current}MB < ${MIN_FREE_MB}MB)."
-    cleanup_low_space
+  echo "[INFO] COMMAND_ID=${cmd_id}"
+  aws ssm wait command-executed --command-id "${cmd_id}" --instance-id "${EC2_INSTANCE_ID}"
+
+  local status
+  status=$(aws ssm get-command-invocation --command-id "${cmd_id}" --instance-id "${EC2_INSTANCE_ID}" --query 'Status' --output text)
+  echo "[INFO] FINAL_STATUS=${status}"
+
+  aws ssm get-command-invocation --command-id "${cmd_id}" --instance-id "${EC2_INSTANCE_ID}" --query 'StandardOutputContent' --output text
+  if [[ "${status}" != "Success" ]]; then
+    echo "[ERROR] Deploy vía SSM falló." >&2
+    aws ssm get-command-invocation --command-id "${cmd_id}" --instance-id "${EC2_INSTANCE_ID}" --query 'StandardErrorContent' --output text >&2 || true
+    exit 1
   fi
 }
 
-sync_repo() {
-  echo "[INFO] Sincronizando repo local con origin/${BRANCH} ..."
-  show_space
-  set +e
-  local out
-  out=$(git fetch --all --prune 2>&1)
-  local code=$?
-  set -e
-  echo "${out}"
+case "${DEPLOY_TRANSPORT}" in
+  ssh)
+    run_ssh
+    ;;
+  ssm)
+    run_ssm
+    ;;
+  *)
+    echo "[ERROR] DEPLOY_TRANSPORT inválido: ${DEPLOY_TRANSPORT} (usa ssh|ssm)" >&2
+    exit 1
+    ;;
+esac
 
-  if [[ ${code} -ne 0 ]]; then
-    if echo "${out}" | grep -Eiq 'No space left on device|cannot lock ref|index\.lock'; then
-      echo "[WARN] Falló git fetch por espacio/bloqueos. Intentando recuperación automática..."
-      cleanup_low_space
-      set +e
-      out=$(git fetch --all --prune 2>&1)
-      code=$?
-      set -e
-      echo "${out}"
-
-      if [[ ${code} -ne 0 ]]; then
-        if echo "${out}" | grep -Eiq 'No space left on device|cannot lock ref|index\.lock|unpack-objects failed|failed to write object'; then
-          reclone_repo
-        else
-          return ${code}
-        fi
-      fi
-    else
-      return ${code}
-    fi
-  fi
-
-  git checkout "${BRANCH}"
-  rm -f .git/index.lock .git/packed-refs.lock .git/shallow.lock || true
-  find .git/refs -name '*.lock' -type f -delete 2>/dev/null || true
-  git reset --hard "origin/${BRANCH}"
-  git clean -fd
-}
-
-ensure_space
-sync_repo
-
-echo "[INFO] Estado después de sync:"
-git status -sb
-
-echo "[INFO] Iniciando deploy frontend (WEB_URL=${WEB_URL}) ..."
-WEB_URL="${WEB_URL}" ENABLE_SWAP="${ENABLE_SWAP}" VERIFY_SEED_ENDPOINT="${VERIFY_SEED_ENDPOINT}" scripts/deploy_frontend_ec2.sh
-
-echo "[INFO] Verificación final explícita contra host servido ..."
-WEB_URL="${WEB_URL}" VERIFY_SEED_ENDPOINT="${VERIFY_SEED_ENDPOINT}" scripts/verify_ec2_release.sh
-
-echo "[OK] CloudShell sync + deploy completado sin desfaces."
+echo "[OK] CloudShell orchestration finalizada (EC2-first)."

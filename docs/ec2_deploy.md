@@ -6,20 +6,27 @@
 - nginx proxea `/api/*` hacia `127.0.0.1:8000`.
 
 
-## CloudShell: sync + deploy sin desface
+## CloudShell: orquestador EC2-first (sin build/git pesado local)
 
-Usa este comando único después de cada merge/PR para evitar código viejo local:
+CloudShell **solo orquesta**; todo el trabajo de git/build/deploy se ejecuta en EC2.
 
 ```bash
-WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
+EC2_HOST=52.53.215.40 \
+WEB_URL=http://52.53.215.40:8088 \
+ENABLE_SWAP=0 MIN_FREE_MB=600 \
+bash scripts/cloudshell_sync_and_deploy.sh
 ```
 
-Este flujo hace:
-- `fetch + checkout + reset --hard + clean` contra `origin/main`.
-- build + publish (`rsync --delete`) + reload de nginx.
-- verificación post-deploy contra el host servido.
+Variables clave:
+- `EC2_HOST` (requerido en modo `ssh`).
+- `EC2_USER` (default `ubuntu`).
+- `EC2_WORK_DIR` (default `/opt/qfinance_git`).
+- `REPO_URL` (default `git@github.com:MCTech21/qfinance.git`).
+- `BRANCH` (default `main`).
+- `WEB_URL`, `ENABLE_SWAP`, `MIN_FREE_MB`.
+- `DEPLOY_TRANSPORT=ssh|ssm` (default `ssh`, para `ssm` usa `EC2_INSTANCE_ID`).
 
-> Si tu entorno no permite activar swap (por ejemplo, `swapon ... Invalid argument`), el deploy ya no se detiene por eso cuando `SWAP_REQUIRED=0` (default).
+> El sync/build/deploy real ocurre en `scripts/ec2_sync_and_deploy.sh` dentro de EC2.
 
 ## P0 - Build seguro
 ```bash
@@ -201,3 +208,14 @@ Puedes forzar un umbral mínimo de espacio libre (MB) antes del sync:
 ```bash
 MIN_FREE_MB=600 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
 ```
+
+
+## EC2-first runner
+
+Script nuevo: `scripts/ec2_sync_and_deploy.sh` (se ejecuta en EC2).
+
+Qué hace:
+- asegura repo en `EC2_WORK_DIR` (`clone` si no existe, `fetch/reset/clean` si existe),
+- valida disco e inodos (`df -h`, `df -i`),
+- aborta si `free_mb < MIN_FREE_MB` o `IUse% > 95`,
+- ejecuta `scripts/deploy_frontend_ec2.sh` y `scripts/verify_ec2_release.sh` en EC2.
