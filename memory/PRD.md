@@ -41,7 +41,7 @@ Sistema de control financiero y presupuestal para desarrollos inmobiliarios. Per
 - Dashboard con KPIs en tiempo real
 - Reportes con detalle por partida y drilldown
 - Filtros: Empresa, Proyecto, Mes, Moneda
-- Datos demo: 2 proyectos, 6 partidas, 15 proveedores, 200 movimientos, 3 meses
+- Datos iniciales: 2 proyectos, 6 partidas, 15 proveedores, 200 movimientos, 3 meses
 
 ### ✅ Multiempresa + Catálogo - COMPLETO
 - Colección `empresas` con 3 empresas

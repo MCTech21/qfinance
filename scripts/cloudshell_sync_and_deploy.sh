@@ -14,14 +14,13 @@ REPO_URL="${REPO_URL:-git@github.com:MCTech21/qfinance.git}"
 BRANCH="${BRANCH:-main}"
 WEB_URL="${WEB_URL:-http://127.0.0.1:8088}"
 ENABLE_SWAP="${ENABLE_SWAP:-0}"
-VERIFY_SEED_ENDPOINT="${VERIFY_SEED_ENDPOINT:-1}"
 MIN_FREE_MB="${MIN_FREE_MB:-350}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "[ERROR] Falta comando requerido: $1" >&2; exit 1; }
 }
 
-remote_payload="WEB_URL='${WEB_URL}' ENABLE_SWAP='${ENABLE_SWAP}' MIN_FREE_MB='${MIN_FREE_MB}' VERIFY_SEED_ENDPOINT='${VERIFY_SEED_ENDPOINT}' BRANCH='${BRANCH}' EC2_WORK_DIR='${EC2_WORK_DIR}' REPO_URL='${REPO_URL}' bash '${EC2_WORK_DIR}/scripts/ec2_sync_and_deploy.sh'"
+remote_payload="WEB_URL='${WEB_URL}' ENABLE_SWAP='${ENABLE_SWAP}' MIN_FREE_MB='${MIN_FREE_MB}' BRANCH='${BRANCH}' EC2_WORK_DIR='${EC2_WORK_DIR}' REPO_URL='${REPO_URL}' bash '${EC2_WORK_DIR}/scripts/ec2_sync_and_deploy.sh'"
 
 run_ssh() {
   require_cmd ssh

@@ -9,7 +9,6 @@ REPO_URL="${REPO_URL:-git@github.com:MCTech21/qfinance.git}"
 BRANCH="${BRANCH:-main}"
 WEB_URL="${WEB_URL:-http://127.0.0.1:8088}"
 ENABLE_SWAP="${ENABLE_SWAP:-0}"
-VERIFY_SEED_ENDPOINT="${VERIFY_SEED_ENDPOINT:-1}"
 MIN_FREE_MB="${MIN_FREE_MB:-350}"
 
 run_privileged() {
@@ -83,10 +82,10 @@ main() {
   assert_space_health "${EC2_WORK_DIR}"
 
   echo "[INFO] Ejecutando deploy frontend en EC2 ..."
-  run_privileged bash -lc "cd '${EC2_WORK_DIR}' && WEB_URL='${WEB_URL}' ENABLE_SWAP='${ENABLE_SWAP}' VERIFY_SEED_ENDPOINT='${VERIFY_SEED_ENDPOINT}' bash scripts/deploy_frontend_ec2.sh"
+  run_privileged bash -lc "cd '${EC2_WORK_DIR}' && WEB_URL='${WEB_URL}' ENABLE_SWAP='${ENABLE_SWAP}' bash scripts/deploy_frontend_ec2.sh"
 
   echo "[INFO] Ejecutando verificación final en EC2 ..."
-  run_privileged bash -lc "cd '${EC2_WORK_DIR}' && WEB_URL='${WEB_URL}' VERIFY_SEED_ENDPOINT='${VERIFY_SEED_ENDPOINT}' bash scripts/verify_ec2_release.sh"
+  run_privileged bash -lc "cd '${EC2_WORK_DIR}' && WEB_URL='${WEB_URL}' bash scripts/verify_ec2_release.sh"
 
   echo "[OK] EC2-first deploy completado."
 }

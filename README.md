@@ -114,10 +114,9 @@ yarn start
 
 ## Usuarios
 
-No se incluyen credenciales demo por defecto.
+No se incluyen credenciales preconfiguradas por defecto.
 
 - Para promover tu cuenta real a administrador usa: `python scripts/bootstrap_admin.py --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas`.
-- Para limpiar usuarios demo heredados (`@finrealty.com`), usa `python scripts/cleanup_demo_users.py --apply`.
 
 ## Semáforo de Cumplimiento
 

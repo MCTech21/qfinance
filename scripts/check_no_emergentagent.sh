@@ -2,7 +2,7 @@
 set -euo pipefail
 
 TARGET_DIR="${1:-frontend/build}"
-PATTERN='emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo'
+PATTERN='emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com'
 
 if [[ ! -d "${TARGET_DIR}" ]]; then
   echo "[ERROR] No existe directorio para validar: ${TARGET_DIR}" >&2
@@ -14,4 +14,4 @@ if grep -RInEi "${PATTERN}" "${TARGET_DIR}"; then
   exit 1
 fi
 
-echo "[OK] Validación anti-hardcode completada: sin referencias demo/emergent prohibidas."
+echo "[OK] Validación anti-hardcode completada: sin referencias emergent prohibidas."

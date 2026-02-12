@@ -86,14 +86,7 @@ echo "VERIFY_EXIT_CODE=${VERIFY_EXIT_CODE}"
 
 sudo ss -lntp | grep -E '(:8088|:8000)' || true
 
-SEED_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8088/api/seed-demo-data || true)"
-echo "SEED_HTTP_CODE=${SEED_CODE}"
-
 [[ "${VERIFY_EXIT_CODE}" == "0" ]] || exit "${VERIFY_EXIT_CODE}"
-[[ "${SEED_CODE}" == "200" ]] || {
-  echo "ERROR: seed endpoint no devolvio 200"
-  exit 21
-}
 EOS
 
 REMOTE_B64="$(printf '%s' "${REMOTE_SCRIPT}" | base64 | tr -d '\n')"

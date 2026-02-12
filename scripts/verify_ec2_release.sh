@@ -2,10 +2,9 @@
 set -euo pipefail
 
 WEB_URL="${WEB_URL:-http://127.0.0.1:8088}"
-VERIFY_SEED_ENDPOINT="${VERIFY_SEED_ENDPOINT:-1}"
 BUILD_DIR="${BUILD_DIR:-frontend/build}"
 
-FORBIDDEN_PATTERN='emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo'
+FORBIDDEN_PATTERN='emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com'
 
 check_no_versioned_env() {
   echo "[INFO] Verificando env no versionados (excepto .env.example)..."
@@ -28,7 +27,7 @@ check_build_strings() {
     echo "[ERROR] Se encontraron patrones prohibidos en ${BUILD_DIR}." >&2
     exit 1
   fi
-  echo "[OK] ${BUILD_DIR} limpio de referencias prohibidas (demo/emergent)."
+  echo "[OK] ${BUILD_DIR} limpio de referencias prohibidas."
 }
 
 resolve_main_js_path() {
@@ -66,25 +65,9 @@ check_served_main_js() {
   echo "[OK] JS servido limpio: ${main_js}"
 }
 
-check_seed_demo() {
-  if [[ "${VERIFY_SEED_ENDPOINT}" != "1" ]]; then
-    echo "[INFO] Saltando verificación de /api/seed-demo-data (VERIFY_SEED_ENDPOINT=${VERIFY_SEED_ENDPOINT})."
-    return
-  fi
-
-  echo "[INFO] Probando POST ${WEB_URL}/api/seed-demo-data ..."
-  local code
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${WEB_URL}/api/seed-demo-data")
-  if [[ "${code}" != "200" ]]; then
-    echo "[ERROR] /api/seed-demo-data respondió HTTP ${code} (esperado 200)." >&2
-    exit 1
-  fi
-  echo "[OK] /api/seed-demo-data respondió 200."
-}
 
 check_no_versioned_env
 check_build_strings
 check_served_main_js
-check_seed_demo
 
 echo "[OK] Checklist final EC2 completado."

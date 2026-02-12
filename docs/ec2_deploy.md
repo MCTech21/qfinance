@@ -55,13 +55,13 @@ Qué hace:
 ## Validaciones rápidas
 ```bash
 # Debe quedar vacío
-grep -RInEi 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo' frontend/build/
+grep -RInEi 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com' frontend/build/
 
 # Debe responder HTML y referenciar static/js/main.*.js
 curl -fsSL http://127.0.0.1:8088/login | head
 
-# Opcional: validar endpoint demo
-curl -fsS -X POST http://127.0.0.1:8088/api/seed-demo-data
+# Opcional: validar endpoint
+curl -fsS -X POST http://127.0.0.1:8088/api/health
 ```
 
 ## Checklist final de verificación (EC2)
@@ -80,16 +80,16 @@ git ls-files frontend/.env frontend/.env.local frontend/.env.production
 # Esperado: salida vacía
 
 # 2) Build sin hardcodes prohibidos
-grep -RInEi 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo' frontend/build/
+grep -RInEi 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com' frontend/build/
 # Esperado: salida vacía
 
 # 3) JS servido por nginx sin hardcodes
 MAIN_JS=$(curl -fsSL http://127.0.0.1:8088/login | grep -oE '/static/js/main\.[^" ]+\.js' | head -n 1)
-curl -fsSL "http://127.0.0.1:8088${MAIN_JS}" | grep -Eiq 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com|Usuarios demo|Cargar datos demo' && echo "FAIL" || echo "OK"
+curl -fsSL "http://127.0.0.1:8088${MAIN_JS}" | grep -Eiq 'emergentagent|emergent\.sh|app\.emergent\.sh|utm_source=emergent-badge|Made with Emergent|expense-tracker|preview\.emergentagent\.com|admin@finrealty\.com|finanzas@finrealty\.com|autorizador@finrealty\.com|lectura@finrealty\.com' && echo "FAIL" || echo "OK"
 # Esperado: OK
 
-# 4) Endpoint demo responde 200
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8088/api/seed-demo-data
+# 4) Endpoint health responde 200
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8088/api/health
 # Esperado: 200
 ```
 
@@ -99,17 +99,16 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8088/api/seed-
 - Evita documentar valores sensibles en `.env` reales.
 
 
-## Admin Console + Reset DEMO
+## Admin Console + Reset administrativo
 
 - Consola admin disponible en `/admin` (requiere rol admin).
-- Reset DEMO desde UI: exige teclear `RESET DEMO`.
+- Reset administrativo desde UI: exige teclear confirmación requerida.
 - Para bootstrap admin:
 
 ```bash
-bash scripts/bootstrap_admin.sh --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
+bash scripts/bootstrap_admin.sh --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas 
 ```
 
-- El seed (`POST /api/seed-demo-data`) marca registros como `is_demo=true` para permitir reset selectivo.
 
 
 - Si CloudShell no tiene dependencias Python del backend, el bootstrap usa API mode.
@@ -117,15 +116,13 @@ bash scripts/bootstrap_admin.sh --mode api --email encargado.finanzas@quantumgru
 
 ```bash
 QFINANCE_API_BASE_URL=http://127.0.0.1:8088/api BOOTSTRAP_ADMIN_EMAIL=admin@finrealty.com BOOTSTRAP_ADMIN_PASSWORD=admin123 \
-  bash scripts/bootstrap_admin.sh --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --deactivate-demo-users
+  bash scripts/bootstrap_admin.sh --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas 
 ```
 
 
-### Limpieza de usuarios demo heredados
+### Limpieza de usuarios no utilizados heredados
 
 ```bash
-python scripts/cleanup_demo_users.py --dry-run
-python scripts/cleanup_demo_users.py --apply
 ```
 
 > El script elimina usuarios `@finrealty.com` y garantiza que `encargado.finanzas@quantumgrupo.mx` quede activo/admin.

@@ -26,7 +26,6 @@ MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ['DB_NAME']
 JWT_SECRET = os.environ.get('JWT_SECRET', 'finrealty-secret-key-2024')
 TIMEZONE = pytz.timezone('America/Tijuana')
-SEED_DEMO_USERS = os.environ.get('SEED_DEMO_USERS', 'false').lower() in {'1', 'true', 'yes'}
 
 # MongoDB connection
 client = AsyncIOMotorClient(MONGO_URL)
@@ -199,7 +198,6 @@ class Movement(MovementBase):
     created_by: str
     status: MovementStatus = MovementStatus.POSTED
     authorization_id: Optional[str] = None
-    is_demo: bool = False
     reversal_of_id: Optional[str] = None
 
 class MovementCreate(BaseModel):
@@ -2092,346 +2090,6 @@ async def migrate_movement_status():
     }
 
 # ========================= DEMO DATA =========================
-@api_router.post("/seed-demo-data")
-async def seed_demo_data():
-    """Seed demo data: 3 empresas, 2 proyectos por empresa, catálogo real de partidas"""
-    import random
-    
-    # Clear existing data
-    if SEED_DEMO_USERS:
-        await db.users.delete_many({})
-    else:
-        await db.users.delete_many({"is_demo": True})
-    await db.empresas.delete_many({})
-    await db.projects.delete_many({})
-    await db.catalogo_partidas.delete_many({})
-    await db.partidas.delete_many({})
-    await db.providers.delete_many({})
-    await db.budgets.delete_many({})
-    await db.movements.delete_many({})
-    await db.authorizations.delete_many({})
-    await db.exchange_rates.delete_many({})
-    await db.audit_logs.delete_many({})
-    await db.config.delete_many({})
-    await db.import_export_logs.delete_many({})
-    
-    seeded_users_count = 0
-    if SEED_DEMO_USERS:
-        # Create demo users only when explicitly enabled.
-        users_data = [
-            {"email": "admin@finrealty.com", "name": "Carlos Admin", "role": "admin", "password": "admin123"},
-            {"email": "finanzas@finrealty.com", "name": "María Finanzas", "role": "finanzas", "password": "finanzas123"},
-            {"email": "autorizador@finrealty.com", "name": "Roberto Autorizador", "role": "autorizador", "password": "auth123"},
-            {"email": "lectura@finrealty.com", "name": "Ana Lectura", "role": "solo_lectura", "password": "lectura123"},
-        ]
-
-        for u in users_data:
-            user = User(email=u['email'], name=u['name'], role=UserRole(u['role']))
-            doc = user.model_dump()
-            doc['password_hash'] = hash_password(u['password'])
-            doc['created_at'] = doc['created_at'].isoformat()
-            await db.users.insert_one(doc)
-        seeded_users_count = len(users_data)
-    
-    # Create 3 empresas
-    empresas_data = [
-        {"nombre": "Altitud 3"},
-        {"nombre": "Terraviva Desarrollos"},
-        {"nombre": "Grupo Q"},
-    ]
-    
-    empresa_ids = {}
-    for e in empresas_data:
-        empresa = Empresa(**e)
-        empresa_ids[e['nombre']] = empresa.id
-        doc = empresa.model_dump()
-        doc['created_at'] = doc['created_at'].isoformat()
-        doc['updated_at'] = doc['updated_at'].isoformat()
-        await db.empresas.insert_one(doc)
-    
-    # Create CATÁLOGO REAL DE PARTIDAS (source of truth)
-    def get_grupo(codigo):
-        cod = int(codigo)
-        if 100 <= cod <= 199:
-            return "obra"
-        elif 200 <= cod <= 299:
-            return "gya"
-        elif 300 <= cod <= 399:
-            return "financieros"
-        elif 400 <= cod <= 499:
-            return "ingresos"
-        return "obra"
-    
-    catalogo_partidas_data = [
-        {"codigo": "100", "nombre": "COSTO DIRECTO"},
-        {"codigo": "101", "nombre": "TERRENO"},
-        {"codigo": "102", "nombre": "PROYECTOS"},
-        {"codigo": "103", "nombre": "LICENCIAS Y PERMISOS"},
-        {"codigo": "104", "nombre": "EDIFICACION"},
-        {"codigo": "105", "nombre": "URBANIZACION"},
-        {"codigo": "106", "nombre": "INDIRECTOS DE OBRA"},
-        {"codigo": "107", "nombre": "ACCESO"},
-        {"codigo": "108", "nombre": "AMENIDADES"},
-        {"codigo": "109", "nombre": "OFICINAS DE VENTAS"},
-        {"codigo": "110", "nombre": "IMPREVISTOS"},
-        {"codigo": "111", "nombre": "OBRAS CABECERAS"},
-        {"codigo": "200", "nombre": "GASTOS DE VENTA Y ADMINISTRACION"},
-        {"codigo": "201", "nombre": "GASTOS DE PUBLICIDAD Y PROMOCION"},
-        {"codigo": "202", "nombre": "ACONDICIONAMIENTO DE MUESTRAS"},
-        {"codigo": "203", "nombre": "COMISIONES SOBRE VENTA"},
-        {"codigo": "204", "nombre": "DIRECCION DE PROYECTO"},
-        {"codigo": "205", "nombre": "GASTOS ADMINISTRATIVOS"},
-        {"codigo": "206", "nombre": "DOCUM TECNICA"},
-        {"codigo": "207", "nombre": "GARANTIAS Y POSTVENTA"},
-        {"codigo": "300", "nombre": "GASTOS FINANCIEROS"},
-        {"codigo": "301", "nombre": "COMISIONES BANCARIAS"},
-        {"codigo": "302", "nombre": "INTERESES"},
-        {"codigo": "303", "nombre": "AMORTIZACION"},
-        {"codigo": "400", "nombre": "INGRESOS"},
-        {"codigo": "401", "nombre": "PRESTAMOS SOCIOS"},
-        {"codigo": "402", "nombre": "ENGANCHES"},
-        {"codigo": "403", "nombre": "INDIVIDUALIZACION"},
-        {"codigo": "404", "nombre": "CREDITOS"},
-    ]
-    
-    partida_codigos = []
-    for p in catalogo_partidas_data:
-        partida = CatalogoPartida(
-            codigo=p['codigo'],
-            nombre=p['nombre'],
-            grupo=PartidaGrupo(get_grupo(p['codigo']))
-        )
-        partida_codigos.append(p['codigo'])
-        doc = partida.model_dump()
-        doc['created_at'] = doc['created_at'].isoformat()
-        doc['updated_at'] = doc['updated_at'].isoformat()
-        await db.catalogo_partidas.insert_one(doc)
-    
-    # Create projects (2 per empresa = 6 total, but we'll use 2 for demo)
-    projects_data = [
-        {"code": "TORRE-A", "name": "Torre Altavista", "empresa": "Altitud 3", "description": "Desarrollo residencial premium 25 pisos"},
-        {"code": "PLAZA-M", "name": "Plaza Comercial Marina", "empresa": "Terraviva Desarrollos", "description": "Centro comercial frente al mar"},
-    ]
-    
-    project_ids = {}
-    for p in projects_data:
-        project = Project(
-            code=p['code'],
-            name=p['name'],
-            empresa_id=empresa_ids[p['empresa']],
-            description=p['description']
-        )
-        project_ids[p['code']] = project.id
-        doc = project.model_dump()
-        doc['created_at'] = doc['created_at'].isoformat()
-        await db.projects.insert_one(doc)
-    
-    # Create 15 providers
-    providers_data = [
-        {"code": "CEMEX", "name": "CEMEX SA de CV", "rfc": "CEM123456ABC"},
-        {"code": "ELECT", "name": "Electrificaciones del Norte", "rfc": "EDN789012DEF"},
-        {"code": "HIDRO", "name": "Hidro Instalaciones Plus", "rfc": "HIP345678GHI"},
-        {"code": "ACERO", "name": "Aceros y Derivados SA", "rfc": "AYD901234JKL"},
-        {"code": "PINTA", "name": "Pinturas Premium MX", "rfc": "PPM567890MNO"},
-        {"code": "ELEVA", "name": "Elevadores Schindler", "rfc": "ESM234567PQR"},
-        {"code": "VIDRI", "name": "Vidriería Industrial", "rfc": "VID456789STU"},
-        {"code": "CARPI", "name": "Carpintería Fina", "rfc": "CAR789012VWX"},
-        {"code": "PLOME", "name": "Plomería Total", "rfc": "PLO012345YZA"},
-        {"code": "AIRAC", "name": "Aires Acondicionados Pro", "rfc": "AAP345678BCD"},
-        {"code": "SEGUV", "name": "Seguridad Vigilancia", "rfc": "SEG678901EFG"},
-        {"code": "TRANS", "name": "Transportes Pesados MX", "rfc": "TRA901234HIJ"},
-        {"code": "FERRET", "name": "Ferretería Industrial", "rfc": "FER234567KLM"},
-        {"code": "IMPER", "name": "Impermeabilizantes PRO", "rfc": "IMP567890NOP"},
-        {"code": "CIMEN", "name": "Cimentaciones Especiales", "rfc": "CIM890123QRS"},
-    ]
-    
-    provider_ids = {}
-    provider_codes = []
-    for p in providers_data:
-        provider = Provider(**p)
-        provider_ids[p['code']] = provider.id
-        provider_codes.append(p['code'])
-        doc = provider.model_dump()
-        doc['created_at'] = doc['created_at'].isoformat()
-        await db.providers.insert_one(doc)
-    
-    # Create exchange rates for 3 months (Jan, Feb, Mar 2025)
-    for month in [1, 2, 3]:
-        for day in range(1, 29):
-            date_str = f"2025-{month:02d}-{day:02d}"
-            rate = 17.0 + (month * 0.15) + (day * 0.01) + random.uniform(-0.2, 0.2)
-            exchange = ExchangeRate(date=date_str, rate=round(rate, 4))
-            doc = exchange.model_dump()
-            doc['created_at'] = doc['created_at'].isoformat()
-            await db.exchange_rates.insert_one(doc)
-    
-    # Create budgets using partida_codigo from catalogo
-    admin_user = await db.users.find_one({"role": "admin", "is_active": True}, {"_id": 0})
-    if not admin_user:
-        raise HTTPException(status_code=400, detail="No active admin user found. Set one via bootstrap_admin before seeding demo data.")
-    admin_id = admin_user['id']
-    
-    # Budget amounts by partida codigo (using some key partidas)
-    budget_partidas = ["104", "105", "106", "201", "205", "302"]  # EDIFICACION, URBANIZACION, etc.
-    budget_amounts = {
-        "104": 3000000,  # EDIFICACION
-        "105": 800000,   # URBANIZACION
-        "106": 500000,   # INDIRECTOS
-        "201": 400000,   # PUBLICIDAD
-        "205": 300000,   # GASTOS ADMIN
-        "302": 200000,   # INTERESES
-    }
-    
-    for proj_code, proj_id in project_ids.items():
-        multiplier = 1.2 if proj_code == "TORRE-A" else 0.9
-        for partida_codigo in budget_partidas:
-            for month in [1, 2, 3]:
-                amount = budget_amounts.get(partida_codigo, 500000) * multiplier
-                budget = Budget(
-                    project_id=proj_id,
-                    partida_codigo=partida_codigo,
-                    year=2025,
-                    month=month,
-                    amount_mxn=amount,
-                    created_by=admin_id
-                )
-                doc = budget.model_dump()
-                doc['created_at'] = doc['created_at'].isoformat()
-                await db.budgets.insert_one(doc)
-    
-    finanzas_user = await db.users.find_one({"role": "finanzas", "is_active": True}, {"_id": 0})
-    finanzas_id = finanzas_user['id'] if finanzas_user else admin_id
-    
-    # Partida-Provider mapping for realistic data
-    partida_provider_map = {
-        "104": ["CEMEX", "ACERO", "CIMEN"],  # EDIFICACION
-        "105": ["CEMEX", "TRANS", "FERRET"],  # URBANIZACION
-        "106": ["SEGUV", "TRANS"],  # INDIRECTOS
-        "201": ["PINTA", "VIDRI"],  # PUBLICIDAD
-        "205": ["SEGUV", "TRANS"],  # GASTOS ADMIN
-        "302": ["ELECT", "HIDRO"],  # INTERESES (placeholder)
-    }
-    
-    partida_descriptions_map = {
-        "104": ["Concreto premezclado", "Varilla corrugada", "Cimbra", "Block"],
-        "105": ["Urbanización", "Pavimento", "Banquetas"],
-        "106": ["Indirectos de obra", "Supervisión"],
-        "201": ["Publicidad", "Promoción", "Materiales"],
-        "205": ["Honorarios", "Licencias", "Permisos"],
-        "302": ["Intereses bancarios", "Comisiones"],
-    }
-    
-    # Generate exactly 200 movements
-    movements_count = 0
-    target_movements = 200
-    project_list = list(project_ids.items())
-    
-    while movements_count < target_movements:
-        proj_code, proj_id = random.choice(project_list)
-        partida_codigo = random.choice(budget_partidas)
-        month = random.choice([1, 2, 3])
-        day = random.randint(1, 28)
-        
-        # Select provider
-        available_providers = partida_provider_map.get(partida_codigo, provider_codes[:3])
-        prov_code = random.choice(available_providers)
-        prov_id = provider_ids.get(prov_code, provider_ids[provider_codes[0]])
-        
-        # Currency: 80% MXN, 20% USD
-        currency = "USD" if random.random() < 0.2 else "MXN"
-        
-        if currency == "MXN":
-            amount = random.randint(30000, 400000)
-            exchange_rate = 1.0
-        else:
-            amount = random.randint(2000, 25000)
-            date_str = f"2025-{month:02d}-{day:02d}"
-            rate_doc = await db.exchange_rates.find_one({"date": date_str}, {"_id": 0})
-            exchange_rate = rate_doc['rate'] if rate_doc else 17.5
-        
-        date_str = f"2025-{month:02d}-{day:02d}"
-        description = random.choice(partida_descriptions_map.get(partida_codigo, ["Material"]))
-        
-        movement = Movement(
-            project_id=proj_id,
-            partida_codigo=partida_codigo,
-            provider_id=prov_id,
-            date=parse_date_tijuana(date_str),
-            currency=Currency(currency),
-            amount_original=amount,
-            exchange_rate=exchange_rate,
-            amount_mxn=amount * exchange_rate,
-            reference=f"FAC-{random.randint(1000, 9999)}-{movements_count}",
-            description=description,
-            created_by=finanzas_id
-        )
-        doc = movement.model_dump()
-        doc['date'] = doc['date'].isoformat()
-        doc['created_at'] = doc['created_at'].isoformat()
-        await db.movements.insert_one(doc)
-        movements_count += 1
-    
-    # Create some pending authorizations
-    for i in range(3):
-        auth = Authorization(
-            movement_id=None,
-            reason=f"Exceso de presupuesto en partida 104 EDIFICACION - {100 + i * 5}%",
-            requested_by=finanzas_id
-        )
-        doc = auth.model_dump()
-        doc['created_at'] = doc['created_at'].isoformat()
-        await db.authorizations.insert_one(doc)
-    
-    # Log seed action
-    await db.audit_logs.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": "system",
-        "user_email": "system@finrealty.com",
-        "user_role": "system",
-        "action": "SEED",
-        "entity": "database",
-        "entity_id": "all",
-        "changes": {"empresas": 3, "projects": 2, "catalogo_partidas": 29, "providers": 15, "movements": 200, "months": 3},
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    })
-    
-    # Set default config
-    configs = [
-        {"key": "threshold_yellow", "value": 90},
-        {"key": "threshold_red", "value": 100},
-        {"key": "default_currency", "value": "MXN"},
-        {"key": "timezone", "value": "America/Tijuana"},
-    ]
-    
-    for c in configs:
-        config = ConfigSetting(key=c['key'], value=c['value'], updated_by=admin_id)
-        doc = config.model_dump()
-        doc['updated_at'] = doc['updated_at'].isoformat()
-        await db.config.insert_one(doc)
-
-    demo_collections = [
-        "empresas", "projects", "catalogo_partidas", "partidas", "providers",
-        "budgets", "movements", "authorizations", "exchange_rates", "config", "import_export_logs"
-    ]
-    for name in demo_collections:
-        await db[name].update_many({}, {"$set": {"is_demo": True}})
-    if SEED_DEMO_USERS:
-        await db.users.update_many({}, {"$set": {"is_demo": True}})
-    
-    return {
-        "message": "Demo data seeded successfully",
-        "data": {
-            "users": seeded_users_count,
-            "projects": 2,
-            "partidas": 6,
-            "providers": 15,
-            "movements": 200,
-            "months": "Enero, Febrero, Marzo 2025"
-        },
-        "seed_demo_users": SEED_DEMO_USERS
-    }
-
-
 ADMIN_ENTITY_COLLECTIONS = {
     "empresas": ("empresas", [("nombre", 1)]),
     "proyectos": ("projects", [("name", 1)]),
@@ -2448,9 +2106,6 @@ ADMIN_CATALOGOS_ALIAS = {
     "u": "usuarios",
 }
 
-
-class AdminResetRequest(BaseModel):
-    confirmation_text: str
 
 
 @api_router.get("/admin/catalogs/{entity}")
@@ -2472,6 +2127,60 @@ async def admin_list_entity(
     if sort:
         cursor = cursor.sort(sort)
     return await cursor.to_list(1000)
+
+
+@api_router.get("/admin/users")
+async def admin_find_users(
+    email: Optional[str] = None,
+    username: Optional[str] = None,
+    include_inactive: bool = True,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    if not email and not username:
+        raise HTTPException(status_code=400, detail="Debes enviar email o username")
+
+    filters = []
+    if email:
+        filters.append({"email": email})
+    if username:
+        filters.append({"name": username})
+
+    query = {"$or": filters} if len(filters) > 1 else filters[0]
+    if not include_inactive:
+        query["is_active"] = {"$ne": False}
+
+    users = await db.users.find(query, {"_id": 0, "password_hash": 0}).to_list(50)
+    return users
+
+
+class AdminPasswordUpdate(BaseModel):
+    password: str
+
+
+@api_router.patch("/admin/users/{user_id}/password")
+async def admin_update_user_password(
+    user_id: str,
+    payload: AdminPasswordUpdate,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    user = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {
+            "password_hash": hash_password(payload.password),
+            "is_active": True,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }}
+    )
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    await log_admin_action(request, current_user, "ADMIN_RESET_PASSWORD", "users", user_id, True, after=updated)
+    return {"message": "Contraseña actualizada", "user": updated}
 
 
 @api_router.get("/admin/catalogos/{tipo}")
@@ -2510,7 +2219,6 @@ async def admin_create_entity(
     doc = payload.copy()
     doc["id"] = doc.get("id") or str(uuid.uuid4())
     doc.setdefault("is_active", True)
-    doc.setdefault("is_demo", False)
     doc.setdefault("created_at", now)
     doc.setdefault("updated_at", now)
 
@@ -2717,43 +2425,6 @@ async def admin_reverse_movement(
     await log_admin_action(request, current_user, "ADMIN_REVERSE", "movimientos", reverse_doc["id"], True, before=movement, after=reverse_doc)
     return reverse_doc
 
-
-@api_router.get("/admin/reset-demo/preview")
-async def reset_demo_preview(current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
-    ensure_admin(current_user)
-    collections = ["movements", "budgets", "authorizations", "providers", "catalogo_partidas", "projects", "empresas", "users", "exchange_rates", "config", "import_export_logs"]
-    return {name: await db[name].count_documents({"is_demo": True}) for name in collections}
-
-
-@api_router.post("/admin/reset-demo")
-async def reset_demo_data(
-    payload: AdminResetRequest,
-    request: Request,
-    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
-):
-    ensure_admin(current_user)
-    if payload.confirmation_text != "RESET DEMO":
-        raise HTTPException(status_code=400, detail="Confirmación inválida. Escribe exactamente RESET DEMO")
-
-    order = ["movements", "budgets", "authorizations", "providers", "catalogo_partidas", "projects", "empresas", "exchange_rates", "config", "import_export_logs"]
-    session = await client.start_session()
-    deleted = {}
-    try:
-        async with session.start_transaction():
-            for collection in order:
-                result = await db[collection].delete_many({"is_demo": True}, session=session)
-                deleted[collection] = result.deleted_count
-
-            my_user = await db.users.find_one({"id": current_user["user_id"]}, {"_id": 0}, session=session)
-            users_result = await db.users.delete_many({"is_demo": True, "id": {"$ne": current_user["user_id"]}}, session=session)
-            deleted["users"] = users_result.deleted_count
-            if my_user and my_user.get("is_demo"):
-                await db.users.update_one({"id": my_user["id"]}, {"$set": {"is_demo": False, "is_active": True}}, session=session)
-    finally:
-        await session.end_session()
-
-    await log_admin_action(request, current_user, "ADMIN_RESET_DEMO", "database", "demo", True, after=deleted)
-    return {"message": "Reset DEMO ejecutado", "deleted": deleted}
 
 # Include router
 app.include_router(api_router)
