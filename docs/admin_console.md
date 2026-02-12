@@ -112,3 +112,20 @@ SEED_DEMO_USERS=true
 ```
 
 Por defecto, el seed solo limpia usuarios `is_demo=true` y preserva usuarios reales existentes.
+
+
+## Reset de contraseña admin
+
+Script: `scripts/reset_admin_password.py`
+
+Dry-run:
+
+```bash
+python scripts/reset_admin_password.py --mode api --email encargado.finanzas@quantumgrupo.mx --username MoisesFinanzas --new-password 'NuevaClaveSegura!2026'
+```
+
+Aplicar:
+
+```bash
+QFINANCE_API_BASE_URL=http://52.53.215.40:8088/api BOOTSTRAP_ADMIN_EMAIL=admin@finrealty.com BOOTSTRAP_ADMIN_PASSWORD=admin123 python scripts/reset_admin_password.py --mode api --apply   --email encargado.finanzas@quantumgrupo.mx   --username MoisesFinanzas   --new-password 'NuevaClaveSegura!2026'
+```

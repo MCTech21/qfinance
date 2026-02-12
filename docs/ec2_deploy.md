@@ -219,3 +219,10 @@ Qué hace:
 - valida disco e inodos (`df -h`, `df -i`),
 - aborta si `free_mb < MIN_FREE_MB` o `IUse% > 95`,
 - ejecuta `scripts/deploy_frontend_ec2.sh` y `scripts/verify_ec2_release.sh` en EC2.
+
+
+## Reset contraseña admin desde CloudShell
+
+```bash
+QFINANCE_API_BASE_URL=http://52.53.215.40:8088/api BOOTSTRAP_ADMIN_EMAIL=admin@finrealty.com BOOTSTRAP_ADMIN_PASSWORD=admin123 python scripts/reset_admin_password.py --mode api --apply   --email encargado.finanzas@quantumgrupo.mx   --username MoisesFinanzas   --new-password 'NuevaClaveSegura!2026'
+```

@@ -281,3 +281,16 @@ Puedes forzar un umbral mínimo de espacio libre (MB) antes del sync:
 ```bash
 MIN_FREE_MB=600 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 bash scripts/cloudshell_sync_and_deploy.sh
 ```
+
+
+## Reset rápido de contraseña admin
+
+```bash
+QFINANCE_API_BASE_URL=http://52.53.215.40:8088/api BOOTSTRAP_ADMIN_EMAIL=admin@finrealty.com BOOTSTRAP_ADMIN_PASSWORD=admin123 python scripts/reset_admin_password.py --mode api --apply   --email encargado.finanzas@quantumgrupo.mx   --username MoisesFinanzas   --new-password 'NuevaClaveSegura!2026'
+```
+
+## Comando post-merge para actualizar frontend (CloudShell -> EC2)
+
+```bash
+EC2_HOST=52.53.215.40 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 MIN_FREE_MB=600 bash scripts/cloudshell_sync_and_deploy.sh
+```
