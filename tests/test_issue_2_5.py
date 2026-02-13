@@ -22,23 +22,27 @@ class FakeCollection:
         if unique:
             self.unique_fields.append(tuple(k for k, _ in keys))
 
+    def _matches(self, row, query):
+        for k, v in query.items():
+            if isinstance(v, dict):
+                if "$ne" in v and row.get(k) == v["$ne"]:
+                    return False
+                if "$in" in v and row.get(k) not in v["$in"]:
+                    return False
+            elif row.get(k) != v:
+                return False
+        return True
+
     async def find_one(self, query, projection=None):
         for row in self.rows:
-            if all(row.get(k) == v for k, v in query.items()):
+            if self._matches(row, query):
                 return dict(row)
         return None
 
     def find(self, query, projection=None):
         out = []
         for row in self.rows:
-            ok = True
-            for k, v in query.items():
-                if isinstance(v, dict) and "$ne" in v:
-                    if row.get(k) == v["$ne"]:
-                        ok = False
-                elif row.get(k) != v:
-                    ok = False
-            if ok:
+            if self._matches(row, query):
                 out.append(dict(row))
         return FakeCursor(out)
 
@@ -55,10 +59,18 @@ class FakeCollection:
                 row.update(update.get("$set", {}))
 
     async def delete_one(self, query):
-        self.rows = [r for r in self.rows if not all(r.get(k) == v for k, v in query.items())]
+        self.rows = [r for r in self.rows if not self._matches(r, query)]
+
+    async def delete_many(self, query):
+        self.rows = [r for r in self.rows if not self._matches(r, query)]
+
+    async def update_many(self, query, update):
+        for row in self.rows:
+            if self._matches(row, query):
+                row.update(update.get("$set", {}))
 
     async def count_documents(self, query):
-        return len([r for r in self.rows if all(r.get(k) == v for k, v in query.items())])
+        return len([r for r in self.rows if self._matches(r, query)])
 
 
 class FakeDB:
@@ -331,3 +343,87 @@ def test_login_requires_force_change_flag_and_flow():
     changed = client.post("/api/auth/force-change-password", json={"new_password": "NewPass123"}, headers={"Authorization": f"Bearer {token}"})
     assert changed.status_code == 200
     assert changed.json()["must_change_password"] is False
+
+
+def test_non_admin_cannot_admin_delete_movements():
+    client = client_for_role("finanzas")
+    res = client.delete("/api/movements/m1", json={"reason": "cleanup"})
+    assert res.status_code == 403
+
+
+def test_soft_delete_hidden_from_movements_and_dashboard_and_audited():
+    fake_db = FakeDB()
+    fake_db.movements.rows.append({
+        "id": "m1",
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-01-10T00:00:00+00:00",
+        "currency": "MXN",
+        "amount_original": 1000,
+        "exchange_rate": 1,
+        "amount_mxn": 1000,
+        "reference": "R1",
+        "status": "posted",
+        "is_deleted": False,
+        "is_active": True,
+    })
+    fake_db.budgets.rows.append({"id": "b1", "project_id": "pr1", "partida_codigo": "205", "year": 2026, "month": 1, "amount_mxn": 5000})
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "adm1", "email": "a@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+
+    before_list = client.get("/api/movements")
+    assert before_list.status_code == 200
+    assert len(before_list.json()) == 1
+
+    deleted = client.delete("/api/movements/m1", json={"reason": "bad row"})
+    assert deleted.status_code == 200
+
+    after_list = client.get("/api/movements")
+    assert after_list.status_code == 200
+    assert after_list.json() == []
+
+    dashboard = client.get("/api/dashboard/summary?year=2026&month=1")
+    assert dashboard.status_code == 200
+    assert dashboard.json()["totals"]["real"] == 0
+
+    actions = [a["action"] for a in fake_db.audit_logs.rows]
+    assert "ADMIN_SOFT_DELETE" in actions
+
+
+def test_admin_patch_movement_creates_audit_with_reason():
+    fake_db = FakeDB()
+    fake_db.movements.rows.append({
+        "id": "m1",
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-01-10T00:00:00+00:00",
+        "currency": "MXN",
+        "amount_original": 1000,
+        "exchange_rate": 1,
+        "amount_mxn": 1000,
+        "reference": "R1",
+        "status": "pending_approval",
+        "is_deleted": False,
+    })
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "adm1", "email": "a@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+
+    updated = client.patch("/api/movements/m1", json={"description": "ajuste", "reason": "corrección"})
+    assert updated.status_code == 200
+    assert updated.json()["description"] == "ajuste"
+
+    admin_updates = [a for a in fake_db.audit_logs.rows if a["action"] == "ADMIN_UPDATE" and a["entity_id"] == "m1"]
+    assert len(admin_updates) == 1
+    assert admin_updates[0]["changes"]["message"] == "corrección"
