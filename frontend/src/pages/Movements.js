@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "../components/ui/dialog";
 import { Badge } from "../components/ui/badge";
-import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle } from "lucide-react";
+import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle, Pencil, Trash2 } from "lucide-react";
 import { buildYearOptions } from "../lib/yearRange";
 
 const Movements = () => {
@@ -50,6 +50,17 @@ const Movements = () => {
   const captureAllowedCodes = ["103", "203", "206", "402", "403"];
   const isCaptureUser = user?.role === "captura" || user?.role === "captura_ingresos";
   const isIngresoNoProvider = ["402", "403"].includes(String(formData.partida_codigo || ""));
+  const isAdmin = user?.role === "admin";
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [selectedMovement, setSelectedMovement] = useState(null);
+  const [editFormData, setEditFormData] = useState({});
+  const [editReason, setEditReason] = useState("");
+  const [deleteReason, setDeleteReason] = useState("");
+  const [deleteMode, setDeleteMode] = useState("soft");
+  const [hardDeleteConfirmText, setHardDeleteConfirmText] = useState("");
+  const [isEditSaving, setIsEditSaving] = useState(false);
+  const [isDeleteSaving, setIsDeleteSaving] = useState(false);
 
   const months = [
     { value: 1, label: "Enero" }, { value: 2, label: "Febrero" }, { value: 3, label: "Marzo" },
@@ -214,6 +225,129 @@ const Movements = () => {
     return p ? `${p.codigo} - ${p.nombre}` : codigo;
   };
   const getProviderName = (id) => providers.find(p => p.id === id)?.name || "N/A";
+
+  const handleApiError = (error, fallbackMessage) => {
+    const status = error?.response?.status;
+    const detail = error?.response?.data?.detail;
+    if (status === 403) {
+      toast.error("No autorizado");
+      return;
+    }
+    if (status === 409) {
+      toast.error(typeof detail === "string" ? detail : "Conflicto al procesar la solicitud");
+      return;
+    }
+    if (status === 422) {
+      if (Array.isArray(detail)) {
+        toast.error(detail.map((item) => item?.msg).filter(Boolean).join(" | "));
+      } else {
+        toast.error(typeof detail === "string" ? detail : "Datos inválidos");
+      }
+      return;
+    }
+    toast.error(typeof detail === "string" ? detail : fallbackMessage);
+  };
+
+  const openEditDialog = (movement) => {
+    setSelectedMovement(movement);
+    const dateValue = movement?.date ? new Date(movement.date).toISOString().split("T")[0] : "";
+    setEditFormData({
+      project_id: movement?.project_id || "",
+      partida_codigo: movement?.partida_codigo || "",
+      provider_id: movement?.provider_id || "",
+      customer_name: movement?.customer_name || "",
+      date: dateValue,
+      currency: movement?.currency || "MXN",
+      amount_original: String(movement?.amount_original ?? ""),
+      exchange_rate: String(movement?.exchange_rate ?? "1"),
+      reference: movement?.reference || "",
+      description: movement?.description || "",
+    });
+    setEditReason("");
+    setEditDialogOpen(true);
+  };
+
+  const openDeleteDialog = (movement) => {
+    setSelectedMovement(movement);
+    setDeleteReason("");
+    setDeleteMode("soft");
+    setHardDeleteConfirmText("");
+    setDeleteDialogOpen(true);
+  };
+
+  const isEditIngresoNoProvider = ["402", "403"].includes(String(editFormData.partida_codigo || ""));
+
+  const handleEditMovement = async (e) => {
+    e.preventDefault();
+    if (!editReason.trim()) {
+      toast.error("El motivo es obligatorio");
+      return;
+    }
+
+    const payload = {
+      ...editFormData,
+      amount_original: parseFloat(editFormData.amount_original),
+      exchange_rate: parseFloat(editFormData.exchange_rate),
+      provider_id: isEditIngresoNoProvider ? null : editFormData.provider_id,
+      customer_name: isEditIngresoNoProvider ? String(editFormData.customer_name || "").trim() : undefined,
+      reason: editReason.trim(),
+    };
+
+    if (isEditIngresoNoProvider && !payload.customer_name) {
+      toast.error("Nombre del cliente es obligatorio para partidas 402/403");
+      return;
+    }
+
+    setIsEditSaving(true);
+    try {
+      await api().patch(`/movements/${selectedMovement.id}`, payload);
+      toast.success("Actualizado");
+      setEditDialogOpen(false);
+      setSelectedMovement(null);
+      fetchData();
+    } catch (error) {
+      handleApiError(error, "Error al actualizar movimiento");
+    } finally {
+      setIsEditSaving(false);
+    }
+  };
+
+  const canConfirmHardDelete = hardDeleteConfirmText === "HARD-DELETE-MOVEMENT" && deleteReason.trim().length > 0;
+  const canConfirmSoftDelete = deleteReason.trim().length > 0;
+
+  const handleDeleteMovement = async () => {
+    if (!selectedMovement) return;
+    if (!deleteReason.trim()) {
+      toast.error("El motivo es obligatorio");
+      return;
+    }
+    if (deleteMode === "hard" && !canConfirmHardDelete) {
+      toast.error("Debes confirmar exactamente HARD-DELETE-MOVEMENT");
+      return;
+    }
+
+    setIsDeleteSaving(true);
+    try {
+      if (deleteMode === "hard") {
+        await api().delete(`/movements/${selectedMovement.id}/hard`, {
+          data: { reason: deleteReason.trim() },
+          headers: { "X-Confirm-Hard-Delete": "HARD-DELETE-MOVEMENT" }
+        });
+      } else {
+        await api().delete(`/movements/${selectedMovement.id}`, {
+          data: { reason: deleteReason.trim() }
+        });
+      }
+      toast.success(deleteMode === "hard" ? "Movimiento eliminado (hard delete)" : "Movimiento eliminado");
+      setDeleteDialogOpen(false);
+      setSelectedMovement(null);
+      fetchData();
+    } catch (error) {
+      handleApiError(error, "Error al eliminar movimiento");
+    } finally {
+      setIsDeleteSaving(false);
+    }
+  };
 
   return (
     <div className="space-y-6" data-testid="movements-page">
@@ -468,6 +602,146 @@ const Movements = () => {
               </form>
             </DialogContent>
           </Dialog>
+
+          <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+            <DialogContent className="max-w-xl">
+              <DialogHeader>
+                <DialogTitle>Editar Movimiento</DialogTitle>
+              </DialogHeader>
+              <form onSubmit={handleEditMovement} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Proyecto</Label>
+                    <Select value={editFormData.project_id || ""} onValueChange={(v) => setEditFormData(prev => ({ ...prev, project_id: v }))}>
+                      <SelectTrigger><SelectValue placeholder="Seleccionar..." /></SelectTrigger>
+                      <SelectContent>
+                        {projects.map(p => (<SelectItem key={p.id} value={p.id}>{p.code} - {p.name}</SelectItem>))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Partida (Catálogo)</Label>
+                    <Select value={editFormData.partida_codigo || ""} onValueChange={(v) => setEditFormData(prev => ({ ...prev, partida_codigo: v }))}>
+                      <SelectTrigger><SelectValue placeholder="Seleccionar partida..." /></SelectTrigger>
+                      <SelectContent className="max-h-[300px]">
+                        {catalogoPartidas.map(p => (<SelectItem key={p.codigo} value={p.codigo}>{p.codigo} - {p.nombre}</SelectItem>))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                {isEditIngresoNoProvider ? (
+                  <div className="space-y-2">
+                    <Label>Cliente</Label>
+                    <Input value={editFormData.customer_name || ""} onChange={(e) => setEditFormData(prev => ({ ...prev, customer_name: e.target.value }))} placeholder="Nombre del cliente" required />
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <Label>Proveedor</Label>
+                    <Select value={editFormData.provider_id || ""} onValueChange={(v) => setEditFormData(prev => ({ ...prev, provider_id: v }))}>
+                      <SelectTrigger><SelectValue placeholder="Seleccionar..." /></SelectTrigger>
+                      <SelectContent>
+                        {providers.map(p => (<SelectItem key={p.id} value={p.id}>{p.code} - {p.name}</SelectItem>))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Fecha</Label>
+                    <Input type="date" value={editFormData.date || ""} onChange={(e) => setEditFormData(prev => ({ ...prev, date: e.target.value }))} required />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Referencia</Label>
+                    <Input value={editFormData.reference || ""} onChange={(e) => setEditFormData(prev => ({ ...prev, reference: e.target.value }))} required />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label>Moneda</Label>
+                    <Select value={editFormData.currency || "MXN"} onValueChange={(v) => setEditFormData(prev => ({ ...prev, currency: v, exchange_rate: v === "MXN" ? "1" : prev.exchange_rate }))}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="MXN">MXN</SelectItem>
+                        <SelectItem value="USD">USD</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Monto</Label>
+                    <Input type="number" min="0.01" step="0.01" value={editFormData.amount_original || ""} onChange={(e) => setEditFormData(prev => ({ ...prev, amount_original: e.target.value }))} required />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Tipo Cambio</Label>
+                    <Input type="number" min="0.01" step="0.0001" value={editFormData.exchange_rate || "1"} onChange={(e) => setEditFormData(prev => ({ ...prev, exchange_rate: e.target.value }))} disabled={editFormData.currency === "MXN"} />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Descripción</Label>
+                  <Input value={editFormData.description || ""} onChange={(e) => setEditFormData(prev => ({ ...prev, description: e.target.value }))} placeholder="Descripción del movimiento..." />
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Motivo</Label>
+                  <Input value={editReason} onChange={(e) => setEditReason(e.target.value)} placeholder="Motivo de la edición" required data-testid="movement-edit-reason-input" />
+                </div>
+
+                <DialogFooter>
+                  <Button type="button" variant="outline" onClick={() => setEditDialogOpen(false)} disabled={isEditSaving}>Cancelar</Button>
+                  <Button type="submit" disabled={isEditSaving || !editReason.trim()} data-testid="movement-edit-submit-btn">
+                    {isEditSaving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                    Guardar
+                  </Button>
+                </DialogFooter>
+              </form>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+            <DialogContent className="max-w-lg">
+              <DialogHeader>
+                <DialogTitle>Eliminar Movimiento</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label>Tipo de eliminación</Label>
+                  <div className="flex gap-2">
+                    <Button type="button" variant={deleteMode === "soft" ? "default" : "outline"} onClick={() => setDeleteMode("soft")}>Soft delete (recomendado)</Button>
+                    <Button type="button" variant={deleteMode === "hard" ? "destructive" : "outline"} onClick={() => setDeleteMode("hard")}>Hard delete (peligroso)</Button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Motivo</Label>
+                  <Input value={deleteReason} onChange={(e) => setDeleteReason(e.target.value)} placeholder="Motivo de la eliminación" required data-testid="movement-delete-reason-input" />
+                </div>
+
+                {deleteMode === "hard" && (
+                  <div className="space-y-2">
+                    <Label>Confirmación hard delete</Label>
+                    <Input value={hardDeleteConfirmText} onChange={(e) => setHardDeleteConfirmText(e.target.value)} placeholder="Escribe HARD-DELETE-MOVEMENT" data-testid="movement-hard-delete-confirm-input" />
+                  </div>
+                )}
+
+                <DialogFooter>
+                  <Button type="button" variant="outline" onClick={() => setDeleteDialogOpen(false)} disabled={isDeleteSaving}>Cancelar</Button>
+                  <Button
+                    type="button"
+                    variant={deleteMode === "hard" ? "destructive" : "default"}
+                    onClick={handleDeleteMovement}
+                    disabled={isDeleteSaving || (deleteMode === "hard" ? !canConfirmHardDelete : !canConfirmSoftDelete)}
+                    data-testid="movement-delete-confirm-btn"
+                  >
+                    {isDeleteSaving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                    Confirmar
+                  </Button>
+                </DialogFooter>
+              </div>
+            </DialogContent>
+          </Dialog>
         </div>
       </div>
 
@@ -581,6 +855,7 @@ const Movements = () => {
                     <th className="text-right">Monto Original</th>
                     <th className="text-right">Monto MXN</th>
                     <th>Estado</th>
+                    {isAdmin && <th>Acciones</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -603,6 +878,20 @@ const Movements = () => {
                           {statusLabels[mov.status]?.label || mov.status}
                         </Badge>
                       </td>
+                      {isAdmin && (
+                        <td>
+                          <div className="flex gap-2">
+                            <Button size="sm" variant="outline" onClick={() => openEditDialog(mov)} data-testid={`movement-edit-btn-${mov.id}`}>
+                              <Pencil className="h-3 w-3 mr-1" />
+                              Editar
+                            </Button>
+                            <Button size="sm" variant="destructive" onClick={() => openDeleteDialog(mov)} data-testid={`movement-delete-btn-${mov.id}`}>
+                              <Trash2 className="h-3 w-3 mr-1" />
+                              Eliminar
+                            </Button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
