@@ -5,106 +5,80 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "../components/ui/dialog";
-import { Plus, Pencil, Building, FolderTree, Truck, Loader2 } from "lucide-react";
+import { Plus, Pencil, Truck, Loader2, Upload, Download } from "lucide-react";
 
 const Catalogs = () => {
   const { api } = useAuth();
-  const [activeTab, setActiveTab] = useState("projects");
-  const [projects, setProjects] = useState([]);
-  const [partidas, setPartidas] = useState([]);
   const [providers, setProviders] = useState([]);
+  const [showInactive, setShowInactive] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
-  
-  const [formData, setFormData] = useState({
-    code: "",
-    name: "",
-    description: "",
-    rfc: ""
-  });
+  const [formData, setFormData] = useState({ code: "", name: "", rfc: "" });
 
-  const fetchData = useCallback(async () => {
+  const fetchProviders = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [projectsRes, partidasRes, providersRes] = await Promise.all([
-        api().get("/projects"),
-        api().get("/partidas"),
-        api().get("/providers")
-      ]);
-      setProjects(projectsRes.data);
-      setPartidas(partidasRes.data);
-      setProviders(providersRes.data);
-    } catch (error) {
-      toast.error("Error al cargar catálogos");
+      const res = await api().get("/providers", { params: { include_inactive: showInactive } });
+      setProviders(res.data);
+    } catch {
+      toast.error("Error al cargar proveedores");
     } finally {
       setIsLoading(false);
     }
-  }, [api]);
+  }, [api, showInactive]);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
-
-  const handleOpenDialog = (item = null) => {
-    if (item) {
-      setEditingItem(item);
-      setFormData({
-        code: item.code,
-        name: item.name,
-        description: item.description || "",
-        rfc: item.rfc || ""
-      });
-    } else {
-      setEditingItem(null);
-      setFormData({ code: "", name: "", description: "", rfc: "" });
-    }
-    setDialogOpen(true);
-  };
+  useEffect(() => { fetchProviders(); }, [fetchProviders]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setIsSaving(true);
-    
-    const endpoint = activeTab === "projects" ? "projects" : activeTab === "partidas" ? "partidas" : "providers";
-    
     try {
-      if (editingItem) {
-        await api().put(`/${endpoint}/${editingItem.id}`, formData);
-        toast.success("Registro actualizado");
-      } else {
-        await api().post(`/${endpoint}`, formData);
-        toast.success("Registro creado");
-      }
-      
+      if (editingItem) await api().put(`/providers/${editingItem.id}`, { ...editingItem, ...formData });
+      else await api().post("/providers", { ...formData, is_active: true });
+      toast.success("Proveedor guardado");
       setDialogOpen(false);
-      fetchData();
+      setEditingItem(null);
+      setFormData({ code: "", name: "", rfc: "" });
+      fetchProviders();
     } catch (error) {
-      const message = error.response?.data?.detail || "Error al guardar";
-      toast.error(message);
+      toast.error(error.response?.data?.detail || "Error al guardar proveedor");
+    } finally { setIsSaving(false); }
+  };
+
+  const toggleActive = async (item) => {
+    try {
+      await api().put(`/providers/${item.id}/toggle`);
+      toast.success("Proveedor actualizado");
+      fetchProviders();
+    } catch { toast.error("Error al actualizar estado"); }
+  };
+
+  const exportProviders = async (format) => {
+    const res = await api().get(`/providers/export?format=${format}`, { responseType: "blob" });
+    const url = window.URL.createObjectURL(new Blob([res.data]));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `providers.${format}`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+  };
+
+  const importProviders = async (evt) => {
+    const file = evt.target.files?.[0];
+    if (!file) return;
+    const data = new FormData();
+    data.append("file", file);
+    try {
+      const res = await api().post("/providers/import", data, { headers: { "Content-Type": "multipart/form-data" } });
+      toast.success(`Importación completa: ${res.data.created} creados, ${res.data.updated} actualizados`);
+      fetchProviders();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Error al importar");
     } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const getTabData = () => {
-    switch (activeTab) {
-      case "projects": return projects;
-      case "partidas": return partidas;
-      case "providers": return providers;
-      default: return [];
-    }
-  };
-
-  const getTabTitle = () => {
-    switch (activeTab) {
-      case "projects": return "Proyectos";
-      case "partidas": return "Partidas";
-      case "providers": return "Proveedores";
-      default: return "";
+      evt.target.value = "";
     }
   };
 
@@ -112,157 +86,42 @@ const Catalogs = () => {
     <div className="space-y-6" data-testid="catalogs-page">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
-          <h1 className="font-heading text-3xl font-bold tracking-tight">Catálogos</h1>
-          <p className="text-muted-foreground">Gestión de proyectos, partidas y proveedores</p>
+          <h1 className="font-heading text-3xl font-bold tracking-tight">Proveedores</h1>
+          <p className="text-muted-foreground">Catálogo de proveedores (activar/desactivar)</p>
         </div>
-        
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger asChild>
-            <Button onClick={() => handleOpenDialog()} data-testid="add-catalog-btn">
-              <Plus className="h-4 w-4 mr-2" />
-              Nuevo {getTabTitle().slice(0, -1)}
-            </Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>
-                {editingItem ? `Editar ${getTabTitle().slice(0, -1)}` : `Nuevo ${getTabTitle().slice(0, -1)}`}
-              </DialogTitle>
-            </DialogHeader>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="space-y-2">
-                <Label>Código</Label>
-                <Input
-                  value={formData.code}
-                  onChange={(e) => setFormData(prev => ({ ...prev, code: e.target.value.toUpperCase() }))}
-                  placeholder="ABC-001"
-                  required
-                  data-testid="catalog-code-input"
-                />
-              </div>
-              
-              <div className="space-y-2">
-                <Label>Nombre</Label>
-                <Input
-                  value={formData.name}
-                  onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
-                  placeholder="Nombre del registro"
-                  required
-                  data-testid="catalog-name-input"
-                />
-              </div>
-              
-              <div className="space-y-2">
-                <Label>Descripción</Label>
-                <Input
-                  value={formData.description}
-                  onChange={(e) => setFormData(prev => ({ ...prev, description: e.target.value }))}
-                  placeholder="Descripción opcional"
-                />
-              </div>
-              
-              {activeTab === "providers" && (
-                <div className="space-y-2">
-                  <Label>RFC</Label>
-                  <Input
-                    value={formData.rfc}
-                    onChange={(e) => setFormData(prev => ({ ...prev, rfc: e.target.value.toUpperCase() }))}
-                    placeholder="ABC123456DEF"
-                  />
-                </div>
-              )}
-              
-              <DialogFooter>
-                <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
-                  Cancelar
-                </Button>
-                <Button type="submit" disabled={isSaving} data-testid="catalog-submit-btn">
-                  {isSaving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                  {editingItem ? "Actualizar" : "Crear"}
-                </Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => exportProviders("csv")}><Download className="h-4 w-4 mr-2" />Export CSV</Button>
+          <Button variant="outline" onClick={() => exportProviders("xlsx")}><Download className="h-4 w-4 mr-2" />Export XLSX</Button>
+          <label className="inline-flex items-center">
+            <input type="file" className="hidden" accept=".csv,.xlsx" onChange={importProviders} />
+            <Button variant="outline" asChild><span><Upload className="h-4 w-4 mr-2" />Importar</span></Button>
+          </label>
+          <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+            <DialogTrigger asChild><Button><Plus className="h-4 w-4 mr-2" />Nuevo Proveedor</Button></DialogTrigger>
+            <DialogContent>
+              <DialogHeader><DialogTitle>{editingItem ? "Editar" : "Nuevo"} Proveedor</DialogTitle></DialogHeader>
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div className="space-y-2"><Label>Código</Label><Input value={formData.code} onChange={(e) => setFormData((p) => ({ ...p, code: e.target.value.toUpperCase() }))} required /></div>
+                <div className="space-y-2"><Label>Nombre</Label><Input value={formData.name} onChange={(e) => setFormData((p) => ({ ...p, name: e.target.value }))} required /></div>
+                <div className="space-y-2"><Label>RFC</Label><Input value={formData.rfc} onChange={(e) => setFormData((p) => ({ ...p, rfc: e.target.value.toUpperCase() }))} /></div>
+                <DialogFooter><Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>Cancelar</Button><Button type="submit" disabled={isSaving}>{isSaving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}Guardar</Button></DialogFooter>
+              </form>
+            </DialogContent>
+          </Dialog>
+        </div>
       </div>
 
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid w-full grid-cols-3 max-w-md">
-          <TabsTrigger value="projects" data-testid="tab-projects">
-            <Building className="h-4 w-4 mr-2" />
-            Proyectos
-          </TabsTrigger>
-          <TabsTrigger value="partidas" data-testid="tab-partidas">
-            <FolderTree className="h-4 w-4 mr-2" />
-            Partidas
-          </TabsTrigger>
-          <TabsTrigger value="providers" data-testid="tab-providers">
-            <Truck className="h-4 w-4 mr-2" />
-            Proveedores
-          </TabsTrigger>
-        </TabsList>
-
-        {["projects", "partidas", "providers"].map(tab => (
-          <TabsContent key={tab} value={tab}>
-            <Card>
-              <CardHeader>
-                <CardTitle className="font-heading text-lg">
-                  Lista de {tab === "projects" ? "Proyectos" : tab === "partidas" ? "Partidas" : "Proveedores"}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {isLoading ? (
-                  <div className="flex justify-center py-8">
-                    <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-                  </div>
-                ) : getTabData().length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">
-                    No hay registros
-                  </div>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="data-table" data-testid={`${tab}-table`}>
-                      <thead>
-                        <tr>
-                          <th>Código</th>
-                          <th>Nombre</th>
-                          <th>Descripción</th>
-                          {tab === "providers" && <th>RFC</th>}
-                          <th className="text-right">Acciones</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {getTabData().map(item => (
-                          <tr key={item.id}>
-                            <td className="font-mono text-sm">{item.code}</td>
-                            <td>{item.name}</td>
-                            <td className="text-muted-foreground text-sm max-w-[200px] truncate">
-                              {item.description || "-"}
-                            </td>
-                            {tab === "providers" && (
-                              <td className="font-mono text-sm">{item.rfc || "-"}</td>
-                            )}
-                            <td className="text-right">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleOpenDialog(item)}
-                                data-testid={`edit-${item.id}`}
-                              >
-                                <Pencil className="h-4 w-4" />
-                              </Button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </TabsContent>
-        ))}
-      </Tabs>
+      <Card>
+        <CardHeader><CardTitle className="font-heading text-lg"><Truck className="h-4 w-4 inline mr-2" />Lista de Proveedores</CardTitle></CardHeader>
+        <CardContent>
+          <label className="text-sm flex items-center gap-2 mb-4"><input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />ver inactivos</label>
+          {isLoading ? <div className="flex justify-center py-8"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div> : (
+            <table className="data-table" data-testid="providers-table"><thead><tr><th>Código</th><th>Nombre</th><th>RFC</th><th>Estatus</th><th>Acciones</th></tr></thead><tbody>
+              {providers.map((item) => (<tr key={item.id}><td>{item.code}</td><td>{item.name}</td><td>{item.rfc || "-"}</td><td>{item.is_active === false ? "Inactivo" : "Activo"}</td><td className="space-x-1"><Button variant="ghost" size="icon" onClick={() => { setEditingItem(item); setFormData({ code: item.code, name: item.name, rfc: item.rfc || "" }); setDialogOpen(true); }}><Pencil className="h-4 w-4" /></Button><Button variant="outline" size="sm" onClick={() => toggleActive(item)}>{item.is_active === false ? "Activar" : "Desactivar"}</Button></td></tr>))}
+            </tbody></table>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 };

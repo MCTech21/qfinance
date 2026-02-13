@@ -299,3 +299,10 @@ QFINANCE_API_BASE_URL=http://52.53.215.40:8088/api BOOTSTRAP_ADMIN_EMAIL=admin@f
 ```bash
 EC2_HOST=52.53.215.40 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 MIN_FREE_MB=600 bash scripts/cloudshell_sync_and_deploy.sh
 ```
+
+
+## Seguridad de cuenta (first login)
+
+- Existe flujo de cambio de contraseña desde **Mi Cuenta / Configuración**.
+- Si un usuario tiene `must_change_password=true` (por ejemplo tras reset a contraseña temporal), el sistema obliga el flujo `/force-change-password` antes de permitir acceso al resto de módulos.
+

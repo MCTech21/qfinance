@@ -21,6 +21,7 @@ const AdminConsole = () => {
   const [form, setForm] = useState({});
   const [editingId, setEditingId] = useState(null);
   const [postedMovements, setPostedMovements] = useState([]);
+  const [empresasCatalog, setEmpresasCatalog] = useState([]);
 
   const loadRows = useCallback(async () => {
     const response = await api().get(`/admin/catalogs/${tab}`, { params: { include_inactive: includeInactive } });
@@ -30,6 +31,12 @@ const AdminConsole = () => {
   useEffect(() => {
     loadRows().catch(() => toast.error("No se pudo cargar admin"));
   }, [loadRows]);
+
+  useEffect(() => {
+    if (tab === "proyectos") {
+      api().get("/admin/catalogs/empresas", { params: { include_inactive: true } }).then((r) => setEmpresasCatalog(r.data || [])).catch(() => setEmpresasCatalog([]));
+    }
+  }, [api, tab]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return rows;
@@ -106,12 +113,25 @@ const AdminConsole = () => {
         <h3 className="font-semibold">{editingId ? "Editar" : "Crear"} {entityConfig[tab].label}</h3>
         <form onSubmit={submit} className="space-y-2">
           {columns.map((field) => (
-            <Input
-              key={field}
-              placeholder={field}
-              value={form[field] ?? ""}
-              onChange={(e) => setForm((prev) => ({ ...prev, [field]: e.target.value }))}
-            />
+            tab === "proyectos" && field === "empresa_id" ? (
+              <select
+                key={field}
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={form[field] ?? ""}
+                onChange={(e) => setForm((prev) => ({ ...prev, [field]: e.target.value }))}
+                required
+              >
+                <option value="">Selecciona empresa...</option>
+                {empresasCatalog.map((e) => <option key={e.id} value={e.id}>{e.nombre}</option>)}
+              </select>
+            ) : (
+              <Input
+                key={field}
+                placeholder={field}
+                value={form[field] ?? ""}
+                onChange={(e) => setForm((prev) => ({ ...prev, [field]: e.target.value }))}
+              />
+            )
           ))}
           {tab === "usuarios" && !editingId && (
             <Input placeholder="password" type="password" value={form.password ?? ""} onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value }))} />
