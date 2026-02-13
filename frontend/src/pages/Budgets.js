@@ -22,6 +22,7 @@ const Budgets = () => {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingBudget, setEditingBudget] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isResolving, setIsResolving] = useState(false);
   
   const [filters, setFilters] = useState({
     empresa_id: "all",
@@ -141,6 +142,19 @@ const Budgets = () => {
       fetchData();
     } catch (error) {
       toast.error("Error al eliminar presupuesto");
+    }
+  };
+
+  const handleResolveRequest = async (requestId, status) => {
+    setIsResolving(true);
+    try {
+      await api().put(`/budget-requests/${requestId}/resolve`, { status, notes: status === "approved" ? "Aprobado desde Presupuestos" : "Rechazado desde Presupuestos" });
+      toast.success(status === "approved" ? "Solicitud aprobada" : "Solicitud rechazada");
+      await fetchData();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Error al resolver solicitud");
+    } finally {
+      setIsResolving(false);
     }
   };
 
@@ -429,6 +443,32 @@ const Budgets = () => {
                   <li key={r.id}>{r.partida_codigo} / {r.year}-{String(r.month).padStart(2, "0")} - ${r.amount_mxn} <span className="text-muted-foreground">({r.status})</span></li>
                 ))}
               </ul>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {user?.role === "admin" && (
+        <Card>
+          <CardHeader><CardTitle className="font-heading text-lg">Solicitudes pendientes</CardTitle></CardHeader>
+          <CardContent>
+            {(budgetRequests || []).filter((r) => r.status === "pending").length === 0 ? (
+              <div className="text-sm text-muted-foreground">Sin solicitudes pendientes</div>
+            ) : (
+              <div className="space-y-3">
+                {(budgetRequests || []).filter((r) => r.status === "pending").map((r) => (
+                  <div key={r.id} className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 border border-border rounded-md p-3">
+                    <div className="text-sm">
+                      <div><span className="font-mono">{r.partida_codigo}</span> / {r.year}-{String(r.month).padStart(2, "0")}</div>
+                      <div className="text-muted-foreground">Monto: {formatCurrency(r.amount_mxn)}</div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" disabled={isResolving} onClick={() => handleResolveRequest(r.id, "approved")}>Aprobar</Button>
+                      <Button size="sm" variant="destructive" disabled={isResolving} onClick={() => handleResolveRequest(r.id, "rejected")}>Rechazar</Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             )}
           </CardContent>
         </Card>

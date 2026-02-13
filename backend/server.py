@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import DuplicateKeyError
+from pymongo import ASCENDING
 import os
 import logging
 from pathlib import Path
@@ -63,6 +64,7 @@ class UserRole(str, Enum):
     FINANZAS = "finanzas"
     AUTORIZADOR = "autorizador"
     SOLO_LECTURA = "solo_lectura"
+    CAPTURA = "captura"
     CAPTURA_INGRESOS = "captura_ingresos"
 
 class Currency(str, Enum):
@@ -207,7 +209,8 @@ class BudgetRequest(BudgetRequestBase):
 class MovementBase(BaseModel):
     project_id: str
     partida_codigo: str  # Código del catálogo (100, 101, etc.)
-    provider_id: str
+    provider_id: Optional[str] = None
+    customer_name: Optional[str] = None
     date: datetime
     currency: Currency
     amount_original: float
@@ -228,7 +231,8 @@ class Movement(MovementBase):
 class MovementCreate(BaseModel):
     project_id: str
     partida_codigo: str  # Código del catálogo
-    provider_id: str
+    provider_id: Optional[str] = None
+    customer_name: Optional[str] = None
     date: str
     currency: Currency
     amount_original: float
@@ -420,6 +424,15 @@ ROLE_PERMISSIONS = {
         Permission.VIEW_BUDGETS.value,
     ],
 
+    UserRole.CAPTURA.value: [
+        Permission.VIEW_DASHBOARD.value,
+        Permission.VIEW_REPORTS.value,
+        Permission.CREATE_MOVEMENT.value,
+        Permission.VIEW_MOVEMENTS.value,
+        Permission.VIEW_CATALOGS.value,
+        Permission.VIEW_BUDGETS.value,
+    ],
+
     UserRole.SOLO_LECTURA.value: [
         Permission.VIEW_DASHBOARD.value,
         Permission.VIEW_REPORTS.value,
@@ -454,7 +467,7 @@ async def log_audit(user: dict, action: str, entity_type: str, entity_id: str, c
         "action": action,
         "entity_type": entity_type,
         "entity_id": entity_id,
-        "changes": changes,
+        "changes": to_json_safe(changes),
         "ip_address": ip_address,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
@@ -548,19 +561,95 @@ def validate_date_in_range(dt: datetime):
 def is_ingresos_partida(codigo: str) -> bool:
     return str(codigo).startswith("4")
 
+
+CAPTURA_ALLOWED_BUDGET_CODES = {"103", "203", "206", "402", "403"}
+NO_PROVIDER_BUDGET_CODES = {"402", "403"}
+
+
+def sanitize_mongo_document(doc: dict) -> dict:
+    if not doc:
+        return doc
+    clean = dict(doc)
+    mongo_id = clean.pop("_id", None)
+    if mongo_id is not None and not clean.get("id"):
+        clean["id"] = str(mongo_id)
+    return clean
+
+
+def to_json_safe(value: Any):
+    if isinstance(value, dict):
+        return {k: to_json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [to_json_safe(v) for v in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def normalize_role_input(role: Optional[str]) -> Optional[str]:
+    if role is None:
+        return None
+    role_normalized = str(role).strip().lower()
+    if role_normalized == UserRole.CAPTURA.value:
+        return UserRole.CAPTURA_INGRESOS.value
+    return role_normalized
+
+
+def is_capture_role(role: Optional[str]) -> bool:
+    return role in {"captura", UserRole.CAPTURA_INGRESOS.value}
+
+
+def enforce_capture_budget_scope(current_user: dict, budget_code: str):
+    normalized = str(budget_code)
+    if is_capture_role(current_user.get("role")) and normalized not in CAPTURA_ALLOWED_BUDGET_CODES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Rol captura solo puede operar partidas: {', '.join(sorted(CAPTURA_ALLOWED_BUDGET_CODES))}",
+        )
+
+
+def requires_budget(budget_code: str) -> bool:
+    try:
+        code = int(str(budget_code))
+    except (TypeError, ValueError):
+        return False
+    return (100 <= code <= 199) or (200 <= code <= 299)
+
+
+def normalize_customer_name(name: Optional[str]) -> Optional[str]:
+    if name is None:
+        return None
+    normalized = name.strip()
+    return normalized or None
+
 # ========================= AUTH ROUTES =========================
 @api_router.post("/auth/register", response_model=User)
 async def register(user_data: UserCreate, current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
     existing = await db.users.find_one({"email": user_data.email}, {"_id": 0})
     if existing:
-        raise HTTPException(status_code=400, detail="Email ya registrado")
+        raise HTTPException(status_code=409, detail="Email ya registrado")
+    existing_name = await db.users.find_one({"name": user_data.name}, {"_id": 0})
+    if existing_name:
+        raise HTTPException(status_code=409, detail="Nombre de usuario ya registrado")
     
     user = User(**user_data.model_dump(exclude={"password"}))
     doc = user.model_dump()
     doc['password_hash'] = hash_password(user_data.password)
     doc['must_change_password'] = False
     doc['created_at'] = doc['created_at'].isoformat()
-    await db.users.insert_one(doc)
+    try:
+        await db.users.insert_one(doc)
+    except DuplicateKeyError as exc:
+        msg = str(exc)
+        if "email" in msg:
+            raise HTTPException(status_code=409, detail="Email ya registrado")
+        if "name" in msg or "username" in msg:
+            raise HTTPException(status_code=409, detail="Nombre de usuario ya registrado")
+        raise HTTPException(status_code=409, detail="Usuario duplicado")
     return user
 
 @api_router.post("/auth/login", response_model=TokenResponse)
@@ -664,24 +753,11 @@ async def get_my_permissions(current_user: dict = Depends(get_current_user)):
 # ========================= USER ROUTES =========================
 @api_router.get("/users", response_model=List[User])
 async def get_users(current_user: dict = Depends(require_permission(Permission.VIEW_USERS, Permission.MANAGE_USERS))):
-    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
-    return [User(**u) for u in users]
+    raise HTTPException(status_code=404, detail="La gestión de usuarios se movió a /api/admin/users")
 
 @api_router.put("/users/{user_id}")
 async def update_user(user_id: str, updates: dict, current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
-    old_doc = await db.users.find_one({"id": user_id}, {"_id": 0})
-    if not old_doc:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    allowed_fields = ["name", "role", "is_active"]
-    update_data = {k: v for k, v in updates.items() if k in allowed_fields}
-    
-    await db.users.update_one({"id": user_id}, {"$set": update_data})
-    await log_audit(current_user, "UPDATE", "users", user_id, {
-        "before": {k: old_doc.get(k) for k in allowed_fields},
-        "after": update_data
-    })
-    return {"message": "Usuario actualizado"}
+    raise HTTPException(status_code=404, detail="La gestión de usuarios se movió a /api/admin/users")
 
 # ========================= EMPRESA ROUTES =========================
 @api_router.get("/empresas")
@@ -932,13 +1008,14 @@ async def get_budgets(
     budgets = await db.budgets.find(query, {"_id": 0}).to_list(1000)
     return budgets
 
-@api_router.post("/budgets")
+@api_router.post("/budgets", status_code=201)
 async def create_budget(budget_data: BudgetBase, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
     validate_year_in_range(budget_data.year)
     if current_user.get("role") != UserRole.ADMIN.value:
         raise HTTPException(status_code=403, detail="Solo admin puede crear presupuestos directamente")
     # VALIDACIÓN BLOQUEANTE: partida debe existir en catálogo
     await validate_partida(budget_data.partida_codigo)
+    enforce_capture_budget_scope(current_user, budget_data.partida_codigo)
     
     # Validar proyecto existe
     project = await db.projects.find_one({"id": budget_data.project_id}, {"_id": 0})
@@ -968,14 +1045,14 @@ async def create_budget(budget_data: BudgetBase, current_user: dict = Depends(re
             "amount_mxn": doc['amount_mxn']
         }
     })
-    doc.pop('_id', None)
-    return doc
+    return sanitize_mongo_document(doc)
 
 @api_router.put("/budgets/{budget_id}")
 async def update_budget(budget_id: str, updates: BudgetBase, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
     validate_year_in_range(updates.year)
     # VALIDACIÓN BLOQUEANTE: partida debe existir
     await validate_partida(updates.partida_codigo)
+    enforce_capture_budget_scope(current_user, updates.partida_codigo)
     
     old_doc = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
     if not old_doc:
@@ -989,7 +1066,7 @@ async def update_budget(budget_id: str, updates: BudgetBase, current_user: dict 
     })
     
     updated = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
-    return updated
+    return sanitize_mongo_document(updated)
 
 @api_router.delete("/budgets/{budget_id}")
 async def delete_budget(budget_id: str, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
@@ -1014,19 +1091,21 @@ async def get_budget_requests(status: Optional[str] = None, current_user: dict =
         query["status"] = status
     if current_user.get("role") == UserRole.FINANZAS.value:
         query["requested_by"] = current_user["user_id"]
-    return await db.budget_requests.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    rows = await db.budget_requests.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return [sanitize_mongo_document(r) for r in rows]
 
-@api_router.post("/budget-requests")
+@api_router.post("/budget-requests", status_code=201)
 async def create_budget_request(payload: BudgetRequestBase, current_user: dict = Depends(require_permission(Permission.REQUEST_BUDGETS, Permission.MANAGE_BUDGETS))):
     validate_year_in_range(payload.year)
     await validate_partida(payload.partida_codigo)
+    enforce_capture_budget_scope(current_user, payload.partida_codigo)
     if current_user.get("role") not in [UserRole.FINANZAS.value, UserRole.ADMIN.value]:
         raise HTTPException(status_code=403, detail="Rol sin permisos para solicitar presupuesto")
     req = BudgetRequest(**payload.model_dump(), requested_by=current_user["user_id"])
     doc = req.model_dump(); doc["created_at"] = doc["created_at"].isoformat()
     await db.budget_requests.insert_one(doc)
     await log_audit(current_user, "CREATE", "budget_requests", req.id, {"data": payload.model_dump()})
-    return doc
+    return sanitize_mongo_document(doc)
 
 @api_router.put("/budget-requests/{request_id}/resolve")
 async def resolve_budget_request(request_id: str, resolution: AuthorizationResolve, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
@@ -1109,15 +1188,26 @@ async def get_movements(
 async def create_movement(movement_data: MovementCreate, current_user: dict = Depends(require_permission(Permission.CREATE_MOVEMENT))):
     # VALIDACIÓN BLOQUEANTE: partida debe existir en catálogo
     await validate_partida(movement_data.partida_codigo)
+    enforce_capture_budget_scope(current_user, movement_data.partida_codigo)
+
+    customer_name = normalize_customer_name(movement_data.customer_name)
+    no_provider_flow = str(movement_data.partida_codigo) in NO_PROVIDER_BUDGET_CODES
     
     # Validate references
     project = await db.projects.find_one({"id": movement_data.project_id}, {"_id": 0})
     if not project:
         raise HTTPException(status_code=400, detail="Proyecto no válido")
     
-    provider = await db.providers.find_one({"id": movement_data.provider_id}, {"_id": 0})
-    if not provider:
-        raise HTTPException(status_code=400, detail="Proveedor no válido")
+    if no_provider_flow:
+        if movement_data.provider_id:
+            raise HTTPException(status_code=422, detail="Las partidas 402/403 no aceptan proveedor")
+        if not customer_name or len(customer_name) < 3:
+            raise HTTPException(status_code=422, detail="customer_name es obligatorio para partidas 402/403 (mínimo 3 caracteres)")
+        provider = None
+    else:
+        provider = await db.providers.find_one({"id": movement_data.provider_id}, {"_id": 0})
+        if not provider:
+            raise HTTPException(status_code=400, detail="Proveedor no válido")
     
     if movement_data.amount_original <= 0:
         raise HTTPException(status_code=400, detail="Monto debe ser mayor a 0")
@@ -1125,14 +1215,12 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     # Parse date
     parsed_date = parse_date_tijuana(movement_data.date)
     validate_date_in_range(parsed_date)
-    if current_user.get("role") == UserRole.CAPTURA_INGRESOS.value and not is_ingresos_partida(movement_data.partida_codigo):
-        raise HTTPException(status_code=403, detail="captura_ingresos solo puede registrar partidas 4xx")
     amount_mxn = movement_data.amount_original * movement_data.exchange_rate
     
     # Check for duplicates
     dup_check = await db.movements.find_one({
         "date": parsed_date.isoformat(),
-        "provider_id": movement_data.provider_id,
+        "provider_id": movement_data.provider_id if not no_provider_flow else None,
         "amount_original": movement_data.amount_original,
         "reference": movement_data.reference
     }, {"_id": 0})
@@ -1144,44 +1232,47 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     year = parsed_date.year
     month = parsed_date.month
     
-    budget = await db.budgets.find_one({
-        "project_id": movement_data.project_id,
-        "partida_codigo": movement_data.partida_codigo,
-        "year": year,
-        "month": month
-    }, {"_id": 0})
-    
-    # Calculate current spent - SOLO movimientos posted
-    current_movements = await db.movements.find({
-        "project_id": movement_data.project_id,
-        "partida_codigo": movement_data.partida_codigo,
-        "status": MovementStatus.POSTED.value
-    }, {"_id": 0}).to_list(5000)
-    
-    current_spent = sum(
-        m['amount_mxn'] for m in current_movements
-        if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
-    )
-    
-    budget_amount = budget['amount_mxn'] if budget else 0
-    new_total = current_spent + amount_mxn
-    
-    # Determine if authorization required: >100% OR presupuesto $0
+    budget_enforced = requires_budget(movement_data.partida_codigo)
+    budget = None
+    current_spent = 0
+    budget_amount = 0
+    new_total = amount_mxn
     requires_auth = False
     auth_reason = ""
-    percentage_if_posted = (new_total / budget_amount * 100) if budget_amount > 0 else 0
-    
-    if budget_amount == 0:
-        requires_auth = True
-        auth_reason = "Presupuesto no definido ($0) - requiere autorización"
-    elif percentage_if_posted > 100:
-        requires_auth = True
-        auth_reason = f"Exceso de presupuesto: {percentage_if_posted:.1f}% (>100%)"
+    percentage_if_posted = 0
+    if budget_enforced:
+        budget = await db.budgets.find_one({
+            "project_id": movement_data.project_id,
+            "partida_codigo": movement_data.partida_codigo,
+            "year": year,
+            "month": month
+        }, {"_id": 0})
+
+        current_movements = await db.movements.find({
+            "project_id": movement_data.project_id,
+            "partida_codigo": movement_data.partida_codigo,
+            "status": MovementStatus.POSTED.value
+        }, {"_id": 0}).to_list(5000)
+
+        current_spent = sum(
+            m['amount_mxn'] for m in current_movements
+            if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
+        )
+
+        budget_amount = budget['amount_mxn'] if budget else 0
+        new_total = current_spent + amount_mxn
+        percentage_if_posted = (new_total / budget_amount * 100) if budget_amount > 0 else 0
+
+        if budget_amount == 0:
+            raise HTTPException(status_code=422, detail="Presupuesto requerido no definido para la partida y periodo")
+        if new_total > budget_amount:
+            raise HTTPException(status_code=422, detail="Saldo de presupuesto insuficiente para la partida y periodo")
     
     movement = Movement(
         project_id=movement_data.project_id,
         partida_codigo=movement_data.partida_codigo,
-        provider_id=movement_data.provider_id,
+        provider_id=movement_data.provider_id if not no_provider_flow else None,
+        customer_name=customer_name,
         date=parsed_date,
         currency=movement_data.currency,
         amount_original=movement_data.amount_original,
@@ -1225,7 +1316,7 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     
     await log_audit(current_user, "CREATE", "movements", movement.id, {"data": doc, "requires_auth": requires_auth})
     
-    return {"movement": doc, "requires_authorization": requires_auth, "reason": auth_reason if requires_auth else None}
+    return {"movement": sanitize_mongo_document(doc), "requires_authorization": requires_auth, "reason": auth_reason if requires_auth else None}
 
 @api_router.post("/movements/import-csv")
 async def import_movements_csv(file: UploadFile = File(...), current_user: dict = Depends(require_permission(Permission.IMPORT_MOVEMENTS))):
@@ -1412,38 +1503,44 @@ async def import_movements_csv(file: UploadFile = File(...), current_user: dict 
         # CHECK BUDGET para determinar si requiere autorización
         year = parsed_date.year
         month = parsed_date.month
-        
-        budget = await db.budgets.find_one({
-            "project_id": project['id'],
-            "partida_codigo": partida['codigo'],
-            "year": year,
-            "month": month
-        }, {"_id": 0})
-        
-        current_movements = await db.movements.find({
-            "project_id": project['id'],
-            "partida_codigo": partida['codigo'],
-            "status": MovementStatus.POSTED.value
-        }, {"_id": 0}).to_list(5000)
-        
-        current_spent = sum(
-            m['amount_mxn'] for m in current_movements
-            if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
-        )
-        
-        budget_amount = budget['amount_mxn'] if budget else 0
-        new_total = current_spent + monto_mxn
-        
+        budget_enforced = requires_budget(partida['codigo'])
+        current_spent = 0
+        budget_amount = 0
         requires_auth = False
         auth_reason = ""
-        percentage_if_posted = (new_total / budget_amount * 100) if budget_amount > 0 else 0
-        
-        if budget_amount == 0:
-            requires_auth = True
-            auth_reason = "Presupuesto no definido ($0) - requiere autorización"
-        elif percentage_if_posted > 100:
-            requires_auth = True
-            auth_reason = f"Exceso de presupuesto: {percentage_if_posted:.1f}% (>100%)"
+        percentage_if_posted = 0
+        if budget_enforced:
+            budget = await db.budgets.find_one({
+                "project_id": project['id'],
+                "partida_codigo": partida['codigo'],
+                "year": year,
+                "month": month
+            }, {"_id": 0})
+
+            current_movements = await db.movements.find({
+                "project_id": project['id'],
+                "partida_codigo": partida['codigo'],
+                "status": MovementStatus.POSTED.value
+            }, {"_id": 0}).to_list(5000)
+
+            current_spent = sum(
+                m['amount_mxn'] for m in current_movements
+                if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
+            )
+
+            budget_amount = budget['amount_mxn'] if budget else 0
+            new_total = current_spent + monto_mxn
+            percentage_if_posted = (new_total / budget_amount * 100) if budget_amount > 0 else 0
+
+            if budget_amount == 0:
+                errors.append({"columna": "presupuesto", "motivo": "Presupuesto requerido no definido para la partida y periodo"})
+            elif new_total > budget_amount:
+                errors.append({"columna": "presupuesto", "motivo": "Saldo de presupuesto insuficiente para la partida y periodo"})
+
+        if errors:
+            results.errores.append({"fila": row_num, "errores": errors})
+            results.rechazadas += 1
+            continue
         
         # CREATE MOVEMENT
         descripcion = row.get('descripcion', '').strip() if row.get('descripcion') else None
@@ -2168,7 +2265,7 @@ async def get_audit_logs(
             query["timestamp"]["$lte"] = date_to + "T23:59:59"
     
     logs = await db.audit_logs.find(query, {"_id": 0}).sort("timestamp", -1).to_list(limit)
-    return logs
+    return [to_json_safe(sanitize_mongo_document(log)) for log in logs]
 
 @api_router.get("/audit-logs/export-csv")
 async def export_audit_logs_csv(
@@ -2196,6 +2293,7 @@ async def export_audit_logs_csv(
             query["timestamp"]["$lte"] = date_to + "T23:59:59"
     
     logs = await db.audit_logs.find(query, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+    logs = [to_json_safe(sanitize_mongo_document(log)) for log in logs]
     
     # Build CSV
     output = io.StringIO()
@@ -2242,6 +2340,7 @@ async def get_audit_summary(
             query["timestamp"]["$lte"] = date_to + "T23:59:59"
     
     logs = await db.audit_logs.find(query, {"_id": 0}).to_list(5000)
+    logs = [to_json_safe(sanitize_mongo_document(log)) for log in logs]
     
     # Count by action
     by_action = {}
@@ -2366,32 +2465,76 @@ async def admin_list_entity(
     cursor = db[collection].find(query, projection)
     if sort:
         cursor = cursor.sort(sort)
-    return await cursor.to_list(1000)
+    rows = await cursor.to_list(1000)
+    return [sanitize_mongo_document(row) for row in rows]
 
 
 @api_router.get("/admin/users")
-async def admin_find_users(
-    email: Optional[str] = None,
-    username: Optional[str] = None,
+async def admin_list_users(
     include_inactive: bool = True,
     current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     ensure_admin(current_user)
-    if not email and not username:
-        raise HTTPException(status_code=400, detail="Debes enviar email o username")
+    query = {} if include_inactive else {"is_active": {"$ne": False}}
+    users = await db.users.find(query, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(1000)
+    return [sanitize_mongo_document(u) for u in users]
 
-    filters = []
-    if email:
-        filters.append({"email": email})
-    if username:
-        filters.append({"name": username})
 
-    query = {"$or": filters} if len(filters) > 1 else filters[0]
-    if not include_inactive:
-        query["is_active"] = {"$ne": False}
+class AdminUserRoleUpdate(BaseModel):
+    role: UserRole
 
-    users = await db.users.find(query, {"_id": 0, "password_hash": 0}).to_list(50)
-    return users
+
+@api_router.patch("/admin/users/{user_id}/role")
+async def admin_update_user_role(
+    user_id: str,
+    payload: AdminUserRoleUpdate,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    if user_id == current_user.get("user_id") and payload.role != UserRole.ADMIN:
+        raise HTTPException(status_code=409, detail="No puedes quitarte rol admin a ti mismo")
+
+    if user.get("role") == UserRole.ADMIN.value and payload.role != UserRole.ADMIN:
+        admins = await db.users.count_documents({"role": UserRole.ADMIN.value, "is_active": {"$ne": False}})
+        if admins <= 1:
+            raise HTTPException(status_code=409, detail="No puedes quitar el último admin")
+
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"role": payload.role.value, "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    await log_admin_action(request, current_user, "ADMIN_UPDATE_ROLE", "users", user_id, True, before=user, after=updated)
+    return sanitize_mongo_document(updated)
+
+
+@api_router.delete("/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: str,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    if user_id == current_user.get("user_id"):
+        raise HTTPException(status_code=409, detail="No puedes eliminar tu propio usuario")
+
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    if user.get("role") == UserRole.ADMIN.value:
+        admins = await db.users.count_documents({"role": UserRole.ADMIN.value, "is_active": {"$ne": False}})
+        if admins <= 1:
+            raise HTTPException(status_code=409, detail="No puedes eliminar el último admin")
+
+    await db.users.delete_one({"id": user_id})
+    await log_admin_action(request, current_user, "ADMIN_DELETE_USER", "users", user_id, True, before=user)
+    return {"message": "Usuario eliminado"}
 
 
 class AdminPasswordUpdate(BaseModel):
@@ -2444,7 +2587,7 @@ async def admin_catalogos_legacy_path(
     return await admin_list_entity(mapped_entity, include_inactive=de_inactive, current_user=current_user)
 
 
-@api_router.post("/admin/catalogs/{entity}")
+@api_router.post("/admin/catalogs/{entity}", status_code=201)
 async def admin_create_entity(
     entity: str,
     payload: dict,
@@ -2493,15 +2636,22 @@ async def admin_create_entity(
         doc["password_hash"] = hash_password(password)
         doc["must_change_password"] = True
 
+        existing_email = await db.users.find_one({"email": doc.get("email")}, {"_id": 0})
+        if existing_email:
+            raise HTTPException(status_code=409, detail="Ya existe un usuario con ese email")
+        existing_name = await db.users.find_one({"name": doc.get("name")}, {"_id": 0})
+        if existing_name:
+            raise HTTPException(status_code=409, detail="Ya existe un usuario con ese username")
+
     try:
         await db[collection].insert_one(doc)
     except DuplicateKeyError:
         if collection == "users":
-            raise HTTPException(status_code=409, detail="Ya existe un usuario con ese email")
+            raise HTTPException(status_code=409, detail="Usuario duplicado (email o username)")
         raise HTTPException(status_code=409, detail="Registro duplicado")
     await log_admin_action(request, current_user, "ADMIN_CREATE", entity, doc["id"], True, after={k: v for k, v in doc.items() if k != "password_hash"})
     doc.pop("password_hash", None)
-    return doc
+    return sanitize_mongo_document(doc)
 
 
 @api_router.put("/admin/catalogs/{entity}/{entity_id}")
@@ -2569,7 +2719,7 @@ async def admin_update_entity(
         after={k: v for k, v in updated.items() if k != "password_hash"},
     )
     updated.pop("password_hash", None)
-    return updated
+    return sanitize_mongo_document(updated)
 
 
 @api_router.delete("/admin/catalogs/{entity}/{entity_id}")
@@ -2595,6 +2745,14 @@ async def admin_delete_entity(
     old_doc = await db[collection].find_one({"id": entity_id}, {"_id": 0})
     if not old_doc:
         raise HTTPException(status_code=404, detail="Registro no encontrado")
+
+    if collection == "users":
+        if entity_id == current_user.get("user_id"):
+            raise HTTPException(status_code=409, detail="No puedes eliminar tu propio usuario")
+        if old_doc.get("role") == UserRole.ADMIN.value:
+            admins = await db.users.count_documents({"role": UserRole.ADMIN.value, "is_active": {"$ne": False}})
+            if admins <= 1:
+                raise HTTPException(status_code=409, detail="No puedes eliminar el último admin")
 
     if hard_delete:
         await assert_no_references(entity, entity_id)
@@ -2733,6 +2891,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def setup_indexes():
+    await db.users.create_index([("email", ASCENDING)], unique=True)
+    await db.users.create_index([("name", ASCENDING)], unique=True)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

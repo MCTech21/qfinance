@@ -16,6 +16,11 @@ class FakeCursor:
 class FakeCollection:
     def __init__(self, rows=None):
         self.rows = rows or []
+        self.unique_fields = []
+
+    async def create_index(self, keys, unique=False):
+        if unique:
+            self.unique_fields.append(tuple(k for k, _ in keys))
 
     async def find_one(self, query, projection=None):
         for row in self.rows:
@@ -38,6 +43,10 @@ class FakeCollection:
         return FakeCursor(out)
 
     async def insert_one(self, doc):
+        for unique_group in self.unique_fields:
+            for row in self.rows:
+                if all(row.get(field) == doc.get(field) for field in unique_group):
+                    raise server.DuplicateKeyError("duplicate key")
         self.rows.append(dict(doc))
 
     async def update_one(self, query, update):
@@ -78,6 +87,9 @@ class FakeDB:
         self.audit_logs = FakeCollection([])
         self.budget_requests = FakeCollection([])
 
+    def __getitem__(self, name):
+        return getattr(self, name)
+
 
 def client_for_role(role: str):
     server.db = FakeDB()
@@ -87,6 +99,21 @@ def client_for_role(role: str):
 
     server.app.dependency_overrides[server.get_current_user] = fake_user
     return TestClient(server.app)
+
+
+def movement_payload(partida_codigo: str, provider_id: str | None = "pv1", **extra):
+    payload = {
+        "project_id": "pr1",
+        "partida_codigo": partida_codigo,
+        "provider_id": provider_id,
+        "date": "2026-01-10",
+        "currency": "MXN",
+        "amount_original": 1000,
+        "exchange_rate": 1,
+        "reference": f"REF-{partida_codigo}",
+    }
+    payload.update(extra)
+    return payload
 
 
 def test_finanzas_cannot_post_budgets():
@@ -108,6 +135,155 @@ def test_captura_ingresos_only_4xx():
     denied = client.post("/api/movements", json=bad)
     assert ok.status_code == 200
     assert denied.status_code == 403
+
+
+def test_captura_role_restricted_to_specific_budget_codes():
+    client = client_for_role("captura")
+    allowed = client.post("/api/movements", json=movement_payload("402", provider_id=None, customer_name="Cliente Uno"))
+    forbidden = client.post("/api/movements", json=movement_payload("401"))
+    assert allowed.status_code == 200
+    assert forbidden.status_code == 403
+
+
+def test_requires_budget_ranges_only_100_199_and_200_299():
+    client = client_for_role("admin")
+    no_budget_4xx = client.post("/api/movements", json=movement_payload("402", provider_id=None, customer_name="Cliente Libre"))
+    no_budget_3xx = client.post("/api/movements", json=movement_payload("301"))
+    needs_budget_1xx = client.post("/api/movements", json=movement_payload("103"))
+    assert no_budget_4xx.status_code == 200
+    assert no_budget_3xx.status_code == 200
+    assert needs_budget_1xx.status_code == 422
+
+
+def test_402_403_require_customer_name_and_no_provider():
+    client = client_for_role("admin")
+    bad_provider = client.post("/api/movements", json=movement_payload("402", provider_id="pv1", customer_name="Cliente X"))
+    bad_customer = client.post("/api/movements", json=movement_payload("403", provider_id=None, customer_name="  "))
+    ok = client.post("/api/movements", json=movement_payload("403", provider_id=None, customer_name="Cliente Y"))
+    assert bad_provider.status_code == 422
+    assert bad_customer.status_code == 422
+    assert ok.status_code == 200
+    assert ok.json()["movement"]["provider_id"] is None
+    assert ok.json()["movement"]["customer_name"] == "Cliente Y"
+
+
+def test_finanzas_pending_budget_request_visible_to_admin_and_approvable():
+    fake_db = FakeDB()
+    server.db = fake_db
+
+    async def finanzas_user():
+        return {"user_id": "fin1", "email": "f@test.com", "role": "finanzas", "must_change_password": False}
+
+    async def admin_user():
+        return {"user_id": "adm1", "email": "a@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = finanzas_user
+    fin_client = TestClient(server.app)
+
+    req_payload = {"project_id": "pr1", "partida_codigo": "205", "year": 2026, "month": 1, "amount_mxn": 5000, "notes": "n"}
+    created = fin_client.post("/api/budget-requests", json=req_payload)
+    assert created.status_code == 201
+    request_id = created.json()["id"]
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    admin_client = TestClient(server.app)
+    pending = admin_client.get("/api/budget-requests?status=pending")
+    assert pending.status_code == 200
+    pending_ids = [r["id"] for r in pending.json()]
+    assert request_id in pending_ids
+
+    resolved = admin_client.put(f"/api/budget-requests/{request_id}/resolve", json={"status": "approved", "notes": "ok"})
+    assert resolved.status_code == 200
+
+    pending_after = admin_client.get("/api/budget-requests?status=pending")
+    assert pending_after.status_code == 200
+    pending_after_ids = [r["id"] for r in pending_after.json()]
+    assert request_id not in pending_after_ids
+
+
+def test_admin_create_user_returns_201_and_duplicate_409():
+    fake_db = FakeDB()
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "adm1", "email": "a@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+    payload = {"email": "nuevo@test.com", "name": "nuevo", "role": "finanzas", "password": "Pass1234", "is_active": True}
+
+    created = client.post("/api/admin/catalogs/usuarios", json=payload)
+    assert created.status_code == 201
+    assert created.json()["email"] == "nuevo@test.com"
+
+    duplicate = client.post("/api/admin/catalogs/usuarios", json=payload)
+    assert duplicate.status_code == 409
+
+
+def test_general_users_endpoints_disabled():
+    client = client_for_role("admin")
+    res_get = client.get("/api/users")
+    res_put = client.put("/api/users/u1", json={"role": "finanzas"})
+    assert res_get.status_code == 404
+    assert res_put.status_code == 404
+
+
+def test_admin_users_list_role_patch_and_delete_safety():
+    fake_db = FakeDB()
+    fake_db.users.rows.append({
+        "id": "u2",
+        "email": "x@test.com",
+        "name": "X",
+        "role": "finanzas",
+        "is_active": True,
+        "password_hash": server.hash_password("Pass1234"),
+    })
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "u1", "email": "u@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+
+    listed = client.get("/api/admin/users")
+    assert listed.status_code == 200
+    assert len(listed.json()) >= 2
+
+    changed = client.patch("/api/admin/users/u2/role", json={"role": "autorizador"})
+    assert changed.status_code == 200
+    assert changed.json()["role"] == "autorizador"
+
+    self_delete = client.delete("/api/admin/users/u1")
+    assert self_delete.status_code == 409
+
+    removed = client.delete("/api/admin/users/u2")
+    assert removed.status_code == 200
+
+
+def test_audit_logs_endpoint_does_not_500_with_non_json_changes():
+    fake_db = FakeDB()
+    fake_db.audit_logs.rows.append({
+        "id": "a1",
+        "user_id": "u1",
+        "user_email": "u@test.com",
+        "user_role": "admin",
+        "action": "TEST",
+        "entity_type": "users",
+        "entity_id": "u1",
+        "changes": {"before": {"created_at": server.datetime.now(server.timezone.utc)}},
+        "timestamp": server.datetime.now(server.timezone.utc),
+    })
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "adm1", "email": "a@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+    res = client.get("/api/audit-logs")
+    assert res.status_code == 200
+    assert isinstance(res.json(), list)
 
 
 def test_readonly_roles_cannot_mutate_providers_or_budgets():

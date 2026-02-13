@@ -8,7 +8,6 @@ import Movements from "./pages/Movements";
 import Authorizations from "./pages/Authorizations";
 import Reports from "./pages/Reports";
 import Catalogs from "./pages/Catalogs";
-import Users from "./pages/Users";
 import AuditLog from "./pages/AuditLog";
 import Settings from "./pages/Settings";
 import AdminConsole from "./pages/AdminConsole";
@@ -109,10 +108,8 @@ function App() {
           } />
           
           <Route path="/users" element={
-            <ProtectedRoute allowedRoles={["admin"]}>
-              <DashboardLayout>
-                <Users />
-              </DashboardLayout>
+            <ProtectedRoute>
+              <Navigate to="/admin" replace />
             </ProtectedRoute>
           } />
           
