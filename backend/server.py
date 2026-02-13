@@ -240,6 +240,34 @@ class MovementCreate(BaseModel):
     reference: str
     description: Optional[str] = None
 
+
+class MovementAdminUpdate(BaseModel):
+    project_id: Optional[str] = None
+    partida_codigo: Optional[str] = None
+    provider_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    date: Optional[str] = None
+    currency: Optional[Currency] = None
+    amount_original: Optional[float] = None
+    exchange_rate: Optional[float] = None
+    reference: Optional[str] = None
+    description: Optional[str] = None
+    reason: str
+
+
+class MovementAdminAction(BaseModel):
+    reason: str
+
+
+class MovementPurgeRequest(BaseModel):
+    reason: str
+    dry_run: bool = False
+    force: bool = False
+    hard: bool = False
+    project_id: Optional[str] = None
+    year: Optional[int] = None
+    month: Optional[int] = None
+
 class AuthorizationBase(BaseModel):
     movement_id: Optional[str] = None
     reason: str
@@ -504,6 +532,13 @@ def active_query(include_inactive: bool = False, extra: Optional[dict] = None) -
     query = extra.copy() if extra else {}
     if not include_inactive:
         query["is_active"] = {"$ne": False}
+    return query
+
+
+def movement_active_query(include_deleted: bool = False, extra: Optional[dict] = None) -> dict:
+    query = extra.copy() if extra else {}
+    if not include_deleted:
+        query["is_deleted"] = {"$ne": True}
     return query
 
 
@@ -1168,7 +1203,7 @@ async def get_movements(
     if status:
         query["status"] = status
     
-    movements = await db.movements.find(query, {"_id": 0}).to_list(5000)
+    movements = await db.movements.find(movement_active_query(extra=query), {"_id": 0}).to_list(5000)
     if year:
         validate_year_in_range(year)
     if year or month:
@@ -1726,7 +1761,7 @@ async def get_pending_summary(
     
     # Get pending movements
     pending_query = {"status": MovementStatus.PENDING_APPROVAL.value}
-    pending_movements = await db.movements.find(pending_query, {"_id": 0}).to_list(5000)
+    pending_movements = await db.movements.find(movement_active_query(extra=pending_query), {"_id": 0}).to_list(5000)
     
     # Filter by empresa/project/date
     project_docs = await db.projects.find({}, {"_id": 0}).to_list(1000)
@@ -1847,7 +1882,7 @@ async def get_dashboard(
     elif empresa_id:
         movement_query["project_id"] = {"$in": project_ids}
     
-    all_movements = await db.movements.find(movement_query, {"_id": 0}).to_list(5000)
+    all_movements = await db.movements.find(movement_active_query(extra=movement_query), {"_id": 0}).to_list(5000)
     
     # Filter by date
     movements = [
@@ -1862,7 +1897,7 @@ async def get_dashboard(
     elif empresa_id:
         pending_query["project_id"] = {"$in": project_ids}
     
-    all_pending = await db.movements.find(pending_query, {"_id": 0}).to_list(5000)
+    all_pending = await db.movements.find(movement_active_query(extra=pending_query), {"_id": 0}).to_list(5000)
     pending_movements = [
         m for m in all_pending
         if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
@@ -2007,7 +2042,7 @@ async def get_partida_detail(
     elif project_ids:
         movement_query["project_id"] = {"$in": project_ids}
     
-    all_movements = await db.movements.find(movement_query, {"_id": 0}).to_list(5000)
+    all_movements = await db.movements.find(movement_active_query(extra=movement_query), {"_id": 0}).to_list(5000)
     movements = [
         m for m in all_movements
         if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
@@ -2091,7 +2126,7 @@ async def get_export_data(
     elif empresa_id:
         movement_query["project_id"] = {"$in": project_ids}
     
-    all_movements = await db.movements.find(movement_query, {"_id": 0}).to_list(5000)
+    all_movements = await db.movements.find(movement_active_query(extra=movement_query), {"_id": 0}).to_list(5000)
     
     # Filter by date
     movements = [
@@ -2801,46 +2836,221 @@ async def admin_get_movimientos(
     current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     ensure_admin(current_user)
-    return await db.movements.find(active_query(include_inactive), {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return await db.movements.find(movement_active_query(include_deleted=include_inactive), {"_id": 0}).sort("created_at", -1).to_list(1000)
 
 
+@api_router.patch("/movements/{movement_id}")
 @api_router.put("/admin/movimientos/{movement_id}")
 async def admin_update_movimiento(
     movement_id: str,
-    payload: dict,
+    payload: MovementAdminUpdate,
     request: Request,
     current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     ensure_admin(current_user)
     old_doc = await db.movements.find_one({"id": movement_id}, {"_id": 0})
-    if not old_doc:
+    if not old_doc or old_doc.get("is_deleted") is True:
         raise HTTPException(status_code=404, detail="Movimiento no encontrado")
-    if old_doc.get("status") == MovementStatus.POSTED.value:
-        raise HTTPException(status_code=409, detail="Movimiento posted no se puede editar")
 
-    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-    await db.movements.update_one({"id": movement_id}, {"$set": payload})
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason es obligatorio")
+
+    updates = payload.model_dump(exclude_unset=True)
+    updates.pop("reason", None)
+
+    if "partida_codigo" in updates:
+        await validate_partida(updates["partida_codigo"])
+        enforce_capture_budget_scope(current_user, updates["partida_codigo"])
+
+    no_provider_flow = str(updates.get("partida_codigo", old_doc.get("partida_codigo"))) in NO_PROVIDER_BUDGET_CODES
+    if "project_id" in updates:
+        project = await db.projects.find_one({"id": updates["project_id"]}, {"_id": 0})
+        if not project:
+            raise HTTPException(status_code=400, detail="Proyecto no válido")
+
+    if no_provider_flow:
+        provider_id = updates.get("provider_id", old_doc.get("provider_id"))
+        customer_name = normalize_customer_name(updates.get("customer_name", old_doc.get("customer_name")))
+        if provider_id:
+            raise HTTPException(status_code=422, detail="Las partidas 402/403 no aceptan proveedor")
+        if not customer_name or len(customer_name) < 3:
+            raise HTTPException(status_code=422, detail="customer_name es obligatorio para partidas 402/403 (mínimo 3 caracteres)")
+        updates["provider_id"] = None
+        updates["customer_name"] = customer_name
+    elif "provider_id" in updates:
+        provider = await db.providers.find_one({"id": updates["provider_id"]}, {"_id": 0})
+        if not provider:
+            raise HTTPException(status_code=400, detail="Proveedor no válido")
+
+    if "amount_original" in updates and updates["amount_original"] <= 0:
+        raise HTTPException(status_code=400, detail="Monto debe ser mayor a 0")
+    if "exchange_rate" in updates and updates["exchange_rate"] <= 0:
+        raise HTTPException(status_code=400, detail="Tipo de cambio debe ser mayor a 0")
+
+    if "date" in updates:
+        parsed_date = parse_date_tijuana(updates["date"])
+        validate_date_in_range(parsed_date)
+        updates["date"] = parsed_date.isoformat()
+
+    final_amount_original = updates.get("amount_original", old_doc.get("amount_original"))
+    final_exchange_rate = updates.get("exchange_rate", old_doc.get("exchange_rate"))
+    if "amount_original" in updates or "exchange_rate" in updates:
+        updates["amount_mxn"] = final_amount_original * final_exchange_rate
+
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.movements.update_one({"id": movement_id}, {"$set": updates})
     updated = await db.movements.find_one({"id": movement_id}, {"_id": 0})
-    await log_admin_action(request, current_user, "ADMIN_UPDATE", "movimientos", movement_id, True, before=old_doc, after=updated)
+    await log_admin_action(
+        request,
+        current_user,
+        "ADMIN_UPDATE",
+        "movimientos",
+        movement_id,
+        True,
+        before=old_doc,
+        after=updated,
+        message=reason,
+    )
     return updated
 
 
+@api_router.delete("/movements/{movement_id}")
 @api_router.delete("/admin/movimientos/{movement_id}")
 async def admin_delete_movimiento(
     movement_id: str,
+    payload: MovementAdminAction,
     request: Request,
     current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     ensure_admin(current_user)
     mov = await db.movements.find_one({"id": movement_id}, {"_id": 0})
+    if not mov or mov.get("is_deleted") is True:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason es obligatorio")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    after = {
+        "is_deleted": True,
+        "deleted_at": now_iso,
+        "deleted_by": current_user["user_id"],
+        "delete_reason": reason,
+        "updated_at": now_iso,
+    }
+    await db.movements.update_one({"id": movement_id}, {"$set": after})
+    await log_admin_action(request, current_user, "ADMIN_SOFT_DELETE", "movimientos", movement_id, True, before=mov, after=after, message=reason)
+    return {"message": "Movimiento eliminado"}
+
+
+@api_router.delete("/movements/{movement_id}/hard", status_code=204)
+@api_router.delete("/admin/movimientos/{movement_id}/hard", status_code=204)
+async def admin_hard_delete_movimiento(
+    movement_id: str,
+    payload: MovementAdminAction,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason es obligatorio")
+    if request.headers.get("X-Confirm-Hard-Delete") != "HARD-DELETE-MOVEMENT":
+        raise HTTPException(status_code=422, detail="Falta confirmación fuerte de hard delete")
+
+    mov = await db.movements.find_one({"id": movement_id}, {"_id": 0})
     if not mov:
         raise HTTPException(status_code=404, detail="Movimiento no encontrado")
-    if mov.get("status") == MovementStatus.POSTED.value:
-        raise HTTPException(status_code=409, detail="Movimiento posted no se puede borrar")
 
-    await db.movements.update_one({"id": movement_id}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc).isoformat()}})
-    await log_admin_action(request, current_user, "ADMIN_SOFT_DELETE", "movimientos", movement_id, True, before=mov, after={"is_active": False})
-    return {"message": "Movimiento desactivado"}
+    await db.movements.delete_one({"id": movement_id})
+    await log_admin_action(request, current_user, "ADMIN_HARD_DELETE", "movimientos", movement_id, True, before=mov, after=None, message=reason)
+    return None
+
+
+@api_router.post("/admin/movements/purge")
+async def admin_purge_movements(
+    payload: MovementPurgeRequest,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason es obligatorio")
+    if request.headers.get("X-Confirm-Purge") != "PURGE-MOVEMENTS":
+        raise HTTPException(status_code=422, detail="Falta confirmación de purga")
+
+    if payload.hard and request.headers.get("X-Confirm-Hard-Purge") != "HARD-PURGE-MOVEMENTS":
+        raise HTTPException(status_code=422, detail="Falta confirmación fuerte de hard purge")
+
+    query = movement_active_query(extra={})
+    if payload.project_id:
+        query["project_id"] = payload.project_id
+
+    candidates = await db.movements.find(query, {"_id": 0}).to_list(5000)
+    if payload.year:
+        validate_year_in_range(payload.year)
+    if payload.year or payload.month:
+        filtered = []
+        for m in candidates:
+            mov_date = date_parser.parse(m['date']) if isinstance(m['date'], str) else m['date']
+            if payload.year and mov_date.year != payload.year:
+                continue
+            if payload.month and mov_date.month != payload.month:
+                continue
+            filtered.append(m)
+        candidates = filtered
+
+    if not payload.force and not payload.project_id and not payload.year and not payload.month:
+        raise HTTPException(status_code=422, detail="Sin filtros: requiere force=true")
+
+    movement_ids = [m.get("id") for m in candidates if m.get("id")]
+    count = len(movement_ids)
+
+    if payload.dry_run:
+        await log_admin_action(
+            request,
+            current_user,
+            "ADMIN_PURGE_DRY_RUN",
+            "movimientos",
+            "batch",
+            True,
+            message=reason,
+            after={"filters": payload.model_dump(exclude={"reason"}), "count": count},
+        )
+        return {"dry_run": True, "count": count}
+
+    if payload.hard:
+        if movement_ids:
+            await db.movements.delete_many({"id": {"$in": movement_ids}})
+    else:
+        if movement_ids:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            await db.movements.update_many(
+                {"id": {"$in": movement_ids}},
+                {"$set": {
+                    "is_deleted": True,
+                    "deleted_at": now_iso,
+                    "deleted_by": current_user["user_id"],
+                    "delete_reason": reason,
+                    "updated_at": now_iso,
+                }},
+            )
+
+    await log_admin_action(
+        request,
+        current_user,
+        "ADMIN_PURGE_HARD" if payload.hard else "ADMIN_PURGE_SOFT",
+        "movimientos",
+        "batch",
+        True,
+        message=reason,
+        after={"filters": payload.model_dump(exclude={"reason"}), "count": count},
+    )
+    return {"dry_run": False, "hard": payload.hard, "count": count}
 
 
 @api_router.post("/admin/movimientos/{movement_id}/reverse")
