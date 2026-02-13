@@ -29,21 +29,27 @@ shell_escape() {
   printf '%q' "$1"
 }
 
+to_b64() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
+
 build_remote_payload() {
-  local q_work_dir q_repo_url q_branch q_web_url q_backend_url q_enable_swap q_min_free_mb
-  local q_restart_backend q_backend_service_candidates q_backend_restart_command q_backend_verify_path
+  local q_work_dir q_repo_url q_branch
+  local web_url_b64 backend_url_b64 enable_swap_b64 min_free_mb_b64 restart_backend_b64
+  local backend_service_candidates_b64 backend_restart_command_b64 backend_verify_path_b64
 
   q_work_dir=$(shell_escape "${EC2_WORK_DIR}")
   q_repo_url=$(shell_escape "${REPO_URL}")
   q_branch=$(shell_escape "${BRANCH}")
-  q_web_url=$(shell_escape "${WEB_URL}")
-  q_backend_url=$(shell_escape "${BACKEND_URL}")
-  q_enable_swap=$(shell_escape "${ENABLE_SWAP}")
-  q_min_free_mb=$(shell_escape "${MIN_FREE_MB}")
-  q_restart_backend=$(shell_escape "${RESTART_BACKEND}")
-  q_backend_service_candidates=$(shell_escape "${BACKEND_SERVICE_CANDIDATES}")
-  q_backend_restart_command=$(shell_escape "${BACKEND_RESTART_COMMAND}")
-  q_backend_verify_path=$(shell_escape "${BACKEND_VERIFY_PATH}")
+
+  web_url_b64=$(to_b64 "${WEB_URL}")
+  backend_url_b64=$(to_b64 "${BACKEND_URL}")
+  enable_swap_b64=$(to_b64 "${ENABLE_SWAP}")
+  min_free_mb_b64=$(to_b64 "${MIN_FREE_MB}")
+  restart_backend_b64=$(to_b64 "${RESTART_BACKEND}")
+  backend_service_candidates_b64=$(to_b64 "${BACKEND_SERVICE_CANDIDATES}")
+  backend_restart_command_b64=$(to_b64 "${BACKEND_RESTART_COMMAND}")
+  backend_verify_path_b64=$(to_b64 "${BACKEND_VERIFY_PATH}")
 
   cat <<REMOTE
 set -euo pipefail
@@ -56,7 +62,25 @@ else
   git -C ${q_work_dir} reset --hard origin/${q_branch}
   git -C ${q_work_dir} clean -fd
 fi
-WEB_URL=${q_web_url} BACKEND_URL=${q_backend_url} ENABLE_SWAP=${q_enable_swap} MIN_FREE_MB=${q_min_free_mb} BRANCH=${q_branch} EC2_WORK_DIR=${q_work_dir} REPO_URL=${q_repo_url} RESTART_BACKEND=${q_restart_backend} BACKEND_SERVICE_CANDIDATES=${q_backend_service_candidates} BACKEND_RESTART_COMMAND=${q_backend_restart_command} BACKEND_VERIFY_PATH=${q_backend_verify_path} bash ${q_work_dir}/scripts/ec2_sync_and_deploy.sh
+
+decode_b64() { printf '%s' "\$1" | base64 -d; }
+WEB_URL="\$(decode_b64 '${web_url_b64}')"
+BACKEND_URL="\$(decode_b64 '${backend_url_b64}')"
+ENABLE_SWAP="\$(decode_b64 '${enable_swap_b64}')"
+MIN_FREE_MB="\$(decode_b64 '${min_free_mb_b64}')"
+RESTART_BACKEND="\$(decode_b64 '${restart_backend_b64}')"
+BACKEND_SERVICE_CANDIDATES="\$(decode_b64 '${backend_service_candidates_b64}')"
+BACKEND_RESTART_COMMAND="\$(decode_b64 '${backend_restart_command_b64}')"
+BACKEND_VERIFY_PATH="\$(decode_b64 '${backend_verify_path_b64}')"
+
+echo "[INFO] CloudShell->EC2 vars: BACKEND_URL=\${BACKEND_URL} BACKEND_VERIFY_PATH=\${BACKEND_VERIFY_PATH} RESTART_BACKEND=\${RESTART_BACKEND}"
+if [[ -n "\${BACKEND_RESTART_COMMAND}" ]]; then
+  echo "[INFO] CloudShell->EC2 restart command recibido."
+else
+  echo "[WARN] CloudShell->EC2 restart command vacío."
+fi
+
+WEB_URL="\${WEB_URL}" BACKEND_URL="\${BACKEND_URL}" ENABLE_SWAP="\${ENABLE_SWAP}" MIN_FREE_MB="\${MIN_FREE_MB}" BRANCH=${q_branch} EC2_WORK_DIR=${q_work_dir} REPO_URL=${q_repo_url} RESTART_BACKEND="\${RESTART_BACKEND}" BACKEND_SERVICE_CANDIDATES="\${BACKEND_SERVICE_CANDIDATES}" BACKEND_RESTART_COMMAND="\${BACKEND_RESTART_COMMAND}" BACKEND_VERIFY_PATH="\${BACKEND_VERIFY_PATH}" bash ${q_work_dir}/scripts/ec2_sync_and_deploy.sh
 REMOTE
 }
 

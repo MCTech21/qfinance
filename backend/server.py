@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 import os
 import logging
 from pathlib import Path
@@ -2466,10 +2467,38 @@ async def admin_create_entity(
         password = doc.pop("password", None)
         if not password:
             raise HTTPException(status_code=400, detail="password es requerido")
+        if not doc.get("email"):
+            raise HTTPException(status_code=400, detail="email es requerido")
+        if not doc.get("name"):
+            raise HTTPException(status_code=400, detail="name es requerido")
+        role = doc.get("role")
+        try:
+            doc["role"] = UserRole(role).value
+        except Exception:
+            allowed = ", ".join([r.value for r in UserRole])
+            raise HTTPException(status_code=400, detail=f"role inválido. Valores permitidos: {allowed}")
+
+        is_active_raw = doc.get("is_active", True)
+        if isinstance(is_active_raw, str):
+            lower = is_active_raw.strip().lower()
+            if lower in {"true", "1", "yes", "si", "sí"}:
+                doc["is_active"] = True
+            elif lower in {"false", "0", "no"}:
+                doc["is_active"] = False
+            else:
+                raise HTTPException(status_code=400, detail="is_active debe ser booleano (true/false)")
+        else:
+            doc["is_active"] = bool(is_active_raw)
+
         doc["password_hash"] = hash_password(password)
         doc["must_change_password"] = True
 
-    await db[collection].insert_one(doc)
+    try:
+        await db[collection].insert_one(doc)
+    except DuplicateKeyError:
+        if collection == "users":
+            raise HTTPException(status_code=409, detail="Ya existe un usuario con ese email")
+        raise HTTPException(status_code=409, detail="Registro duplicado")
     await log_admin_action(request, current_user, "ADMIN_CREATE", entity, doc["id"], True, after={k: v for k, v in doc.items() if k != "password_hash"})
     doc.pop("password_hash", None)
     return doc
@@ -2501,11 +2530,32 @@ async def admin_update_entity(
         payload["password_hash"] = hash_password(payload.pop("password"))
         payload["must_change_password"] = True
 
+    if collection == "users" and "role" in payload:
+        try:
+            payload["role"] = UserRole(payload.get("role")).value
+        except Exception:
+            allowed = ", ".join([r.value for r in UserRole])
+            raise HTTPException(status_code=400, detail=f"role inválido. Valores permitidos: {allowed}")
+
+    if collection == "users" and "is_active" in payload and isinstance(payload.get("is_active"), str):
+        lower = payload.get("is_active").strip().lower()
+        if lower in {"true", "1", "yes", "si", "sí"}:
+            payload["is_active"] = True
+        elif lower in {"false", "0", "no"}:
+            payload["is_active"] = False
+        else:
+            raise HTTPException(status_code=400, detail="is_active debe ser booleano (true/false)")
+
     if entity == "catalogo_partidas" and old_doc.get("codigo") != payload.get("codigo", old_doc.get("codigo")):
         raise HTTPException(status_code=400, detail="No se permite cambiar código de partida")
 
     payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-    await db[collection].update_one({"id": entity_id}, {"$set": payload})
+    try:
+        await db[collection].update_one({"id": entity_id}, {"$set": payload})
+    except DuplicateKeyError:
+        if collection == "users":
+            raise HTTPException(status_code=409, detail="Ya existe un usuario con ese email")
+        raise HTTPException(status_code=409, detail="Registro duplicado")
     updated = await db[collection].find_one({"id": entity_id}, {"_id": 0})
 
     await log_admin_action(
