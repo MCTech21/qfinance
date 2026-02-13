@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "./components/ui/sonner";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import Login from "./pages/Login";
@@ -13,9 +13,11 @@ import AuditLog from "./pages/AuditLog";
 import Settings from "./pages/Settings";
 import AdminConsole from "./pages/AdminConsole";
 import DashboardLayout from "./components/DashboardLayout";
+import ForceChangePassword from "./pages/ForceChangePassword";
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user, isLoading } = useAuth();
+  const location = useLocation();
   
   if (isLoading) {
     return (
@@ -28,7 +30,15 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
   if (!user) {
     return <Navigate to="/login" replace />;
   }
-  
+
+  if (user.must_change_password && location.pathname !== "/force-change-password") {
+    return <Navigate to="/force-change-password" replace />;
+  }
+
+  if (!user.must_change_password && location.pathname === "/force-change-password") {
+    return <Navigate to="/dashboard" replace />;
+  }
+
   if (allowedRoles && !allowedRoles.includes(user.role)) {
     return <Navigate to="/dashboard" replace />;
   }
@@ -44,6 +54,12 @@ function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           
+          <Route path="/force-change-password" element={
+            <ProtectedRoute>
+              <ForceChangePassword />
+            </ProtectedRoute>
+          } />
+
           <Route path="/dashboard" element={
             <ProtectedRoute>
               <DashboardLayout>
@@ -117,7 +133,7 @@ function App() {
           } />
           
           <Route path="/settings" element={
-            <ProtectedRoute allowedRoles={["admin"]}>
+            <ProtectedRoute>
               <DashboardLayout>
                 <Settings />
               </DashboardLayout>

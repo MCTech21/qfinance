@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { createApiClient } from "../lib/http";
+
 const AuthContext = createContext(null);
 
 export const AuthProvider = ({ children }) => {
@@ -33,7 +34,25 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem("token", access_token);
     setToken(access_token);
     setUser(userData);
-    return userData;
+    return response.data;
+  };
+
+  const changePassword = async (current_password, new_password) => {
+    const response = await api().post("/auth/change-password", { current_password, new_password });
+    const { access_token, user: userData } = response.data;
+    localStorage.setItem("token", access_token);
+    setToken(access_token);
+    setUser(userData);
+    return response.data;
+  };
+
+  const forceChangePassword = async (new_password) => {
+    const response = await api().post("/auth/force-change-password", { new_password });
+    const { access_token, user: userData } = response.data;
+    localStorage.setItem("token", access_token);
+    setToken(access_token);
+    setUser(userData);
+    return response.data;
   };
 
   const logout = () => {
@@ -42,9 +61,7 @@ export const AuthProvider = ({ children }) => {
     setUser(null);
   };
 
-  const hasRole = (...roles) => {
-    return user && roles.includes(user.role);
-  };
+  const hasRole = (...roles) => user && roles.includes(user.role);
 
   const canEdit = () => hasRole("admin", "finanzas");
   const canAuthorize = () => hasRole("admin", "autorizador");
@@ -61,7 +78,9 @@ export const AuthProvider = ({ children }) => {
       hasRole,
       canEdit,
       canAuthorize,
-      canManage
+      canManage,
+      changePassword,
+      forceChangePassword,
     }}>
       {children}
     </AuthContext.Provider>

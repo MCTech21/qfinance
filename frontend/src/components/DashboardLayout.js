@@ -57,7 +57,7 @@ const DashboardLayout = ({ children }) => {
     { path: "/users", icon: Users, label: "Usuarios", roles: ["admin"] },
     { path: "/audit", icon: ScrollText, label: "Bitácora", roles: ["admin", "autorizador"] },
     { path: "/admin", icon: Shield, label: "Admin Console", roles: ["admin"] },
-    { path: "/settings", icon: Settings, label: "Configuración", roles: ["admin"] },
+    { path: "/settings", icon: Settings, label: "Mi Cuenta", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos"] },
   ];
 
   const filteredNav = navItems.filter(item => 

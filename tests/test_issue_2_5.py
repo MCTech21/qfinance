@@ -48,6 +48,9 @@ class FakeCollection:
     async def delete_one(self, query):
         self.rows = [r for r in self.rows if not all(r.get(k) == v for k, v in query.items())]
 
+    async def count_documents(self, query):
+        return len([r for r in self.rows if all(r.get(k) == v for k, v in query.items())])
+
 
 class FakeDB:
     def __init__(self):
@@ -57,6 +60,18 @@ class FakeDB:
         ])
         self.projects = FakeCollection([{"id": "pr1", "code": "P1", "name": "Proyecto", "empresa_id": "e1", "is_active": True}])
         self.providers = FakeCollection([{"id": "pv1", "code": "PV", "name": "Proveedor", "is_active": True}])
+        self.users = FakeCollection([
+            {
+                "id": "u1",
+                "email": "u@test.com",
+                "name": "User",
+                "role": "admin",
+                "is_active": True,
+                "must_change_password": True,
+                "password_hash": server.hash_password("OldPass123"),
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        ])
         self.budgets = FakeCollection([])
         self.movements = FakeCollection([])
         self.authorizations = FakeCollection([])
@@ -66,8 +81,10 @@ class FakeDB:
 
 def client_for_role(role: str):
     server.db = FakeDB()
+
     async def fake_user():
-        return {"user_id": "u1", "email": "u@test.com", "role": role}
+        return {"user_id": "u1", "email": "u@test.com", "role": role, "must_change_password": False}
+
     server.app.dependency_overrides[server.get_current_user] = fake_user
     return TestClient(server.app)
 
@@ -119,3 +136,22 @@ def test_provider_export_and_import_upsert_and_duplicates():
     assert body["updated"] >= 1
     assert body["created"] >= 1
     assert len(body["duplicates"]) == 1
+
+
+def test_login_requires_force_change_flag_and_flow():
+    server.db = FakeDB()
+    server.app.dependency_overrides = {}
+    client = TestClient(server.app)
+
+    login = client.post("/api/auth/login", json={"email": "u@test.com", "password": "OldPass123"})
+    assert login.status_code == 200
+    assert login.json()["must_change_password"] is True
+
+    token = login.json()["access_token"]
+    # protected endpoint blocked until force change
+    blocked = client.get("/api/projects", headers={"Authorization": f"Bearer {token}"})
+    assert blocked.status_code == 403
+
+    changed = client.post("/api/auth/force-change-password", json={"new_password": "NewPass123"}, headers={"Authorization": f"Bearer {token}"})
+    assert changed.status_code == 200
+    assert changed.json()["must_change_password"] is False

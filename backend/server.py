@@ -110,15 +110,24 @@ class User(UserBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_active: bool = True
+    must_change_password: bool = False
 
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+class ForceChangePasswordRequest(BaseModel):
+    new_password: str
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: User
+    must_change_password: bool = False
 
 class ProjectBase(BaseModel):
     code: str
@@ -299,18 +308,31 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
-def create_token(user_id: str, email: str, role: str) -> str:
+def validate_password_policy(password: str):
+    if len(password) < 8:
+        raise HTTPException(status_code=422, detail="La nueva contraseña debe tener al menos 8 caracteres")
+    if not any(ch.isalpha() for ch in password) or not any(ch.isdigit() for ch in password):
+        raise HTTPException(status_code=422, detail="La nueva contraseña debe contener letras y números")
+
+
+def create_token(user_id: str, email: str, role: str, must_change_password: bool = False) -> str:
     payload = {
         "user_id": user_id,
         "email": email,
         "role": role,
+        "must_change_password": must_change_password,
         "exp": datetime.now(timezone.utc).timestamp() + 86400 * 7
     }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+
+async def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=["HS256"])
+        if payload.get("must_change_password"):
+            allowed_paths = {"/api/auth/force-change-password", "/api/auth/logout", "/api/auth/me", "/api/auth/permissions"}
+            if request.url.path not in allowed_paths:
+                raise HTTPException(status_code=403, detail="Debes cambiar tu contraseña para continuar")
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expirado")
@@ -535,6 +557,7 @@ async def register(user_data: UserCreate, current_user: dict = Depends(require_p
     user = User(**user_data.model_dump(exclude={"password"}))
     doc = user.model_dump()
     doc['password_hash'] = hash_password(user_data.password)
+    doc['must_change_password'] = False
     doc['created_at'] = doc['created_at'].isoformat()
     await db.users.insert_one(doc)
     return user
@@ -554,7 +577,8 @@ async def login(credentials: UserLogin):
         logger.info("Login failed: inactive user id=%s", user_doc.get('id'))
         raise HTTPException(status_code=401, detail="Usuario desactivado")
     
-    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'])
+    must_change_password = bool(user_doc.get('must_change_password', False))
+    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'], must_change_password=must_change_password)
     user = User(**{k: v for k, v in user_doc.items() if k != 'password_hash'})
     
     # Log successful login
@@ -566,13 +590,58 @@ async def login(credentials: UserLogin):
         {"status": "success"}
     )
     
-    return TokenResponse(access_token=token, user=user)
+    return TokenResponse(access_token=token, user=user, must_change_password=must_change_password)
 
 @api_router.post("/auth/logout")
 async def logout(current_user: dict = Depends(get_current_user)):
     """Log user logout"""
     await log_audit(current_user, "LOGOUT", "auth", current_user["user_id"], {"status": "success"})
     return {"message": "Sesión cerrada"}
+
+@api_router.post("/auth/change-password")
+async def change_password(payload: ChangePasswordRequest, request: Request, current_user: dict = Depends(get_current_user)):
+    user_doc = await db.users.find_one({"id": current_user["user_id"]}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    if not verify_password(payload.current_password, user_doc.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="La contraseña actual es incorrecta")
+    if payload.current_password == payload.new_password:
+        raise HTTPException(status_code=422, detail="La nueva contraseña debe ser diferente a la actual")
+    validate_password_policy(payload.new_password)
+
+    await db.users.update_one({"id": user_doc["id"]}, {"$set": {
+        "password_hash": hash_password(payload.new_password),
+        "must_change_password": False,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }})
+    await log_audit(current_user, "PASSWORD_CHANGED", "users", user_doc["id"], {"source": "settings"}, ip_address=request.client.host if request.client else None)
+    fresh = await db.users.find_one({"id": user_doc["id"]}, {"_id": 0})
+    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False)
+    user = User(**{k: v for k, v in fresh.items() if k != "password_hash"})
+    return TokenResponse(access_token=token, user=user, must_change_password=False)
+
+
+@api_router.post("/auth/force-change-password")
+async def force_change_password(payload: ForceChangePasswordRequest, request: Request, current_user: dict = Depends(get_current_user)):
+    user_doc = await db.users.find_one({"id": current_user["user_id"]}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    if not user_doc.get("must_change_password", False):
+        raise HTTPException(status_code=403, detail="El usuario no requiere cambio forzado de contraseña")
+    validate_password_policy(payload.new_password)
+    if verify_password(payload.new_password, user_doc.get("password_hash", "")):
+        raise HTTPException(status_code=422, detail="La nueva contraseña debe ser diferente a la actual")
+
+    await db.users.update_one({"id": user_doc["id"]}, {"$set": {
+        "password_hash": hash_password(payload.new_password),
+        "must_change_password": False,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }})
+    await log_audit(current_user, "PASSWORD_CHANGED", "users", user_doc["id"], {"source": "force_change"}, ip_address=request.client.host if request.client else None)
+    fresh = await db.users.find_one({"id": user_doc["id"]}, {"_id": 0})
+    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False)
+    user = User(**{k: v for k, v in fresh.items() if k != "password_hash"})
+    return TokenResponse(access_token=token, user=user, must_change_password=False)
 
 @api_router.get("/auth/me", response_model=User)
 async def get_me(current_user: dict = Depends(get_current_user)):
@@ -2344,6 +2413,7 @@ async def admin_update_user_password(
         {"id": user_id},
         {"$set": {
             "password_hash": hash_password(payload.password),
+            "must_change_password": True,
             "is_active": True,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }}
@@ -2397,6 +2467,7 @@ async def admin_create_entity(
         if not password:
             raise HTTPException(status_code=400, detail="password es requerido")
         doc["password_hash"] = hash_password(password)
+        doc["must_change_password"] = True
 
     await db[collection].insert_one(doc)
     await log_admin_action(request, current_user, "ADMIN_CREATE", entity, doc["id"], True, after={k: v for k, v in doc.items() if k != "password_hash"})
@@ -2428,6 +2499,7 @@ async def admin_update_entity(
 
     if collection == "users" and "password" in payload:
         payload["password_hash"] = hash_password(payload.pop("password"))
+        payload["must_change_password"] = True
 
     if entity == "catalogo_partidas" and old_doc.get("codigo") != payload.get("codigo", old_doc.get("codigo")):
         raise HTTPException(status_code=400, detail="No se permite cambiar código de partida")
