@@ -108,6 +108,36 @@ restart_backend_if_available() {
   echo "[WARN] o BACKEND_RESTART_COMMAND='systemctl restart mi-service'."
 }
 
+
+log_backend_runtime_config() {
+  local redacted_cmd="<empty>"
+  if [[ -n "${BACKEND_RESTART_COMMAND}" ]]; then
+    redacted_cmd="${BACKEND_RESTART_COMMAND}"
+  fi
+
+  echo "[INFO] Backend runtime config: RESTART_BACKEND=${RESTART_BACKEND} BACKEND_URL=${BACKEND_URL} BACKEND_VERIFY_PATH=${BACKEND_VERIFY_PATH}"
+  echo "[INFO] Backend restart command: ${redacted_cmd}"
+}
+
+verify_backend_source_route() {
+  local backend_file
+  backend_file="${EC2_WORK_DIR}/backend/server.py"
+
+  if [[ ! -f "${backend_file}" ]]; then
+    echo "[WARN] No existe ${backend_file}; omitiendo verificación de código fuente backend."
+    return
+  fi
+
+  if ! grep -q '"/auth/change-password"' "${backend_file}"; then
+    echo "[ERROR] El código backend en ${backend_file} no contiene /auth/change-password." >&2
+    echo "[ERROR] Commit desplegado: $(run_privileged git -C "${EC2_WORK_DIR}" rev-parse --short HEAD 2>/dev/null || echo desconocido)." >&2
+    echo "[ERROR] Haz merge/cherry-pick del commit que agrega el endpoint y vuelve a desplegar." >&2
+    exit 1
+  fi
+
+  echo "[OK] Código backend contiene /auth/change-password."
+}
+
 verify_backend_route() {
   local openapi
   openapi="$(curl -fsSL "${BACKEND_URL}/openapi.json" || true)"
@@ -142,6 +172,8 @@ main() {
   log_space "${EC2_WORK_DIR}"
   assert_space_health "${EC2_WORK_DIR}"
 
+  log_backend_runtime_config
+  verify_backend_source_route
   restart_backend_if_available
 
   echo "[INFO] Verificando rutas backend disponibles ..."
