@@ -220,6 +220,47 @@ def test_admin_create_user_returns_201_and_duplicate_409():
     assert duplicate.status_code == 409
 
 
+def test_general_users_endpoints_disabled():
+    client = client_for_role("admin")
+    res_get = client.get("/api/users")
+    res_put = client.put("/api/users/u1", json={"role": "finanzas"})
+    assert res_get.status_code == 404
+    assert res_put.status_code == 404
+
+
+def test_admin_users_list_role_patch_and_delete_safety():
+    fake_db = FakeDB()
+    fake_db.users.rows.append({
+        "id": "u2",
+        "email": "x@test.com",
+        "name": "X",
+        "role": "finanzas",
+        "is_active": True,
+        "password_hash": server.hash_password("Pass1234"),
+    })
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "u1", "email": "u@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+
+    listed = client.get("/api/admin/users")
+    assert listed.status_code == 200
+    assert len(listed.json()) >= 2
+
+    changed = client.patch("/api/admin/users/u2/role", json={"role": "autorizador"})
+    assert changed.status_code == 200
+    assert changed.json()["role"] == "autorizador"
+
+    self_delete = client.delete("/api/admin/users/u1")
+    assert self_delete.status_code == 409
+
+    removed = client.delete("/api/admin/users/u2")
+    assert removed.status_code == 200
+
+
 def test_audit_logs_endpoint_does_not_500_with_non_json_changes():
     fake_db = FakeDB()
     fake_db.audit_logs.rows.append({

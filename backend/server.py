@@ -753,29 +753,11 @@ async def get_my_permissions(current_user: dict = Depends(get_current_user)):
 # ========================= USER ROUTES =========================
 @api_router.get("/users", response_model=List[User])
 async def get_users(current_user: dict = Depends(require_permission(Permission.VIEW_USERS, Permission.MANAGE_USERS))):
-    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
-    normalized = []
-    for u in users:
-        user_doc = dict(u)
-        user_doc["role"] = normalize_role_input(user_doc.get("role"))
-        normalized.append(User(**user_doc))
-    return normalized
+    raise HTTPException(status_code=404, detail="La gestión de usuarios se movió a /api/admin/users")
 
 @api_router.put("/users/{user_id}")
 async def update_user(user_id: str, updates: dict, current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
-    old_doc = await db.users.find_one({"id": user_id}, {"_id": 0})
-    if not old_doc:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    allowed_fields = ["name", "role", "is_active"]
-    update_data = {k: v for k, v in updates.items() if k in allowed_fields}
-    
-    await db.users.update_one({"id": user_id}, {"$set": update_data})
-    await log_audit(current_user, "UPDATE", "users", user_id, {
-        "before": {k: old_doc.get(k) for k in allowed_fields},
-        "after": update_data
-    })
-    return {"message": "Usuario actualizado"}
+    raise HTTPException(status_code=404, detail="La gestión de usuarios se movió a /api/admin/users")
 
 # ========================= EMPRESA ROUTES =========================
 @api_router.get("/empresas")
@@ -2483,32 +2465,76 @@ async def admin_list_entity(
     cursor = db[collection].find(query, projection)
     if sort:
         cursor = cursor.sort(sort)
-    return await cursor.to_list(1000)
+    rows = await cursor.to_list(1000)
+    return [sanitize_mongo_document(row) for row in rows]
 
 
 @api_router.get("/admin/users")
-async def admin_find_users(
-    email: Optional[str] = None,
-    username: Optional[str] = None,
+async def admin_list_users(
     include_inactive: bool = True,
     current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     ensure_admin(current_user)
-    if not email and not username:
-        raise HTTPException(status_code=400, detail="Debes enviar email o username")
+    query = {} if include_inactive else {"is_active": {"$ne": False}}
+    users = await db.users.find(query, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(1000)
+    return [sanitize_mongo_document(u) for u in users]
 
-    filters = []
-    if email:
-        filters.append({"email": email})
-    if username:
-        filters.append({"name": username})
 
-    query = {"$or": filters} if len(filters) > 1 else filters[0]
-    if not include_inactive:
-        query["is_active"] = {"$ne": False}
+class AdminUserRoleUpdate(BaseModel):
+    role: UserRole
 
-    users = await db.users.find(query, {"_id": 0, "password_hash": 0}).to_list(50)
-    return users
+
+@api_router.patch("/admin/users/{user_id}/role")
+async def admin_update_user_role(
+    user_id: str,
+    payload: AdminUserRoleUpdate,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    if user_id == current_user.get("user_id") and payload.role != UserRole.ADMIN:
+        raise HTTPException(status_code=409, detail="No puedes quitarte rol admin a ti mismo")
+
+    if user.get("role") == UserRole.ADMIN.value and payload.role != UserRole.ADMIN:
+        admins = await db.users.count_documents({"role": UserRole.ADMIN.value, "is_active": {"$ne": False}})
+        if admins <= 1:
+            raise HTTPException(status_code=409, detail="No puedes quitar el último admin")
+
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"role": payload.role.value, "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    await log_admin_action(request, current_user, "ADMIN_UPDATE_ROLE", "users", user_id, True, before=user, after=updated)
+    return sanitize_mongo_document(updated)
+
+
+@api_router.delete("/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: str,
+    request: Request,
+    current_user: dict = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    ensure_admin(current_user)
+    if user_id == current_user.get("user_id"):
+        raise HTTPException(status_code=409, detail="No puedes eliminar tu propio usuario")
+
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    if user.get("role") == UserRole.ADMIN.value:
+        admins = await db.users.count_documents({"role": UserRole.ADMIN.value, "is_active": {"$ne": False}})
+        if admins <= 1:
+            raise HTTPException(status_code=409, detail="No puedes eliminar el último admin")
+
+    await db.users.delete_one({"id": user_id})
+    await log_admin_action(request, current_user, "ADMIN_DELETE_USER", "users", user_id, True, before=user)
+    return {"message": "Usuario eliminado"}
 
 
 class AdminPasswordUpdate(BaseModel):
@@ -2693,7 +2719,7 @@ async def admin_update_entity(
         after={k: v for k, v in updated.items() if k != "password_hash"},
     )
     updated.pop("password_hash", None)
-    return updated
+    return sanitize_mongo_document(updated)
 
 
 @api_router.delete("/admin/catalogs/{entity}/{entity_id}")
@@ -2719,6 +2745,14 @@ async def admin_delete_entity(
     old_doc = await db[collection].find_one({"id": entity_id}, {"_id": 0})
     if not old_doc:
         raise HTTPException(status_code=404, detail="Registro no encontrado")
+
+    if collection == "users":
+        if entity_id == current_user.get("user_id"):
+            raise HTTPException(status_code=409, detail="No puedes eliminar tu propio usuario")
+        if old_doc.get("role") == UserRole.ADMIN.value:
+            admins = await db.users.count_documents({"role": UserRole.ADMIN.value, "is_active": {"$ne": False}})
+            if admins <= 1:
+                raise HTTPException(status_code=409, detail="No puedes eliminar el último admin")
 
     if hard_delete:
         await assert_no_references(entity, entity_id)

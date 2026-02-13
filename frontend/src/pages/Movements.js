@@ -47,6 +47,9 @@ const Movements = () => {
   });
 
   const yearOptions = buildYearOptions();
+  const captureAllowedCodes = ["103", "203", "206", "402", "403"];
+  const isCaptureUser = user?.role === "captura" || user?.role === "captura_ingresos";
+  const isIngresoNoProvider = ["402", "403"].includes(String(formData.partida_codigo || ""));
 
   const months = [
     { value: 1, label: "Enero" }, { value: 2, label: "Febrero" }, { value: 3, label: "Marzo" },
@@ -112,8 +115,16 @@ const Movements = () => {
       const payload = {
         ...formData,
         amount_original: parseFloat(formData.amount_original),
-        exchange_rate: parseFloat(formData.exchange_rate)
+        exchange_rate: parseFloat(formData.exchange_rate),
+        provider_id: isIngresoNoProvider ? null : formData.provider_id,
+        customer_name: isIngresoNoProvider ? String(formData.customer_name || "").trim() : undefined,
       };
+
+      if (isIngresoNoProvider && !payload.customer_name) {
+        toast.error("Nombre del cliente es obligatorio para partidas 402/403");
+        setIsSaving(false);
+        return;
+      }
       
       const response = await api().post("/movements", payload);
       
@@ -171,6 +182,7 @@ const Movements = () => {
       project_id: "",
       partida_codigo: "",
       provider_id: "",
+      customer_name: "",
       date: new Date().toISOString().split("T")[0],
       currency: "MXN",
       amount_original: "",
@@ -324,7 +336,7 @@ const Movements = () => {
                         <SelectValue placeholder="Seleccionar partida..." />
                       </SelectTrigger>
                       <SelectContent className="max-h-[300px]">
-                        {catalogoPartidas.filter((p) => user?.role !== "captura_ingresos" || String(p.codigo).startsWith("4")).map(p => (
+                        {catalogoPartidas.filter((p) => !isCaptureUser || captureAllowedCodes.includes(String(p.codigo))).map(p => (
                           <SelectItem key={p.codigo} value={p.codigo}>
                             {p.codigo} - {p.nombre}
                           </SelectItem>
@@ -334,22 +346,36 @@ const Movements = () => {
                   </div>
                 </div>
                 
-                <div className="space-y-2">
-                  <Label>Proveedor</Label>
-                  <Select
-                    value={formData.provider_id}
-                    onValueChange={(v) => setFormData(prev => ({ ...prev, provider_id: v }))}
-                  >
-                    <SelectTrigger data-testid="movement-provider-select">
-                      <SelectValue placeholder="Seleccionar..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {providers.map(p => (
-                        <SelectItem key={p.id} value={p.id}>{p.code} - {p.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                {isIngresoNoProvider ? (
+                  <div className="space-y-2">
+                    <Label>Cliente</Label>
+                    <Input
+                      value={formData.customer_name || ""}
+                      onChange={(e) => setFormData(prev => ({ ...prev, customer_name: e.target.value }))}
+                      placeholder="Nombre del cliente"
+                      required
+                      minLength={2}
+                      data-testid="movement-customer-name-input"
+                    />
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <Label>Proveedor</Label>
+                    <Select
+                      value={formData.provider_id}
+                      onValueChange={(v) => setFormData(prev => ({ ...prev, provider_id: v }))}
+                    >
+                      <SelectTrigger data-testid="movement-provider-select">
+                        <SelectValue placeholder="Seleccionar..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {providers.map(p => (
+                          <SelectItem key={p.id} value={p.id}>{p.code} - {p.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
                 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
@@ -488,7 +514,7 @@ const Movements = () => {
               </SelectTrigger>
               <SelectContent className="max-h-[300px]">
                 <SelectItem value="all">Todas las partidas</SelectItem>
-                {catalogoPartidas.filter((p) => user?.role !== "captura_ingresos" || String(p.codigo).startsWith("4")).map(p => (
+                {catalogoPartidas.filter((p) => !isCaptureUser || captureAllowedCodes.includes(String(p.codigo))).map(p => (
                   <SelectItem key={p.codigo} value={p.codigo}>{p.codigo} - {p.nombre}</SelectItem>
                 ))}
               </SelectContent>
@@ -563,7 +589,7 @@ const Movements = () => {
                       <td className="font-mono text-sm">{formatDate(mov.date)}</td>
                       <td>{getProjectName(mov.project_id)}</td>
                       <td className="text-sm">{mov.partida_codigo}</td>
-                      <td className="max-w-[150px] truncate">{getProviderName(mov.provider_id)}</td>
+                      <td className="max-w-[220px] truncate">{mov.provider_id ? getProviderName(mov.provider_id) : (mov.customer_name ? `Cliente: ${mov.customer_name}` : "N/A")}</td>
                       <td className="font-mono text-sm">{mov.reference}</td>
                       <td className="mono-number">
                         {formatCurrency(mov.amount_original, mov.currency)}

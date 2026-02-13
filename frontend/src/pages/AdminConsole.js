@@ -82,8 +82,13 @@ const AdminConsole = () => {
   };
 
   const hardDelete = async (row) => {
+    if (tab === "usuarios" && !window.confirm(`¿Eliminar usuario ${row.email}? Esta acción no se puede deshacer.`)) return;
     try {
-      await api().delete(`/admin/catalogs/${tab}/${row.id}`, { params: { hard_delete: true } });
+      if (tab === "usuarios") {
+        await api().delete(`/admin/users/${row.id}`);
+      } else {
+        await api().delete(`/admin/catalogs/${tab}/${row.id}`, { params: { hard_delete: true } });
+      }
       toast.success("Eliminado físicamente");
       await loadRows();
     } catch (err) {
@@ -97,6 +102,17 @@ const AdminConsole = () => {
       toast.success("Reversa creada");
     } catch (err) {
       toast.error(err?.response?.data?.detail || "Error al revertir");
+    }
+  };
+
+  const updateUserRole = async (row, role) => {
+    if (!window.confirm(`¿Cambiar rol de ${row.email} a ${role}?`)) return;
+    try {
+      await api().patch(`/admin/users/${row.id}/role`, { role });
+      toast.success("Rol actualizado");
+      await loadRows();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Error al cambiar rol");
     }
   };
 
@@ -204,10 +220,10 @@ const AdminConsole = () => {
                       ? <Button size="sm" onClick={() => restore(row)}>Restaurar</Button>
                       : <Button size="sm" variant="secondary" onClick={() => softDelete(row)}>Desactivar</Button>
                     }
-                    <Button size="sm" variant="destructive" onClick={() => hardDelete(row)}>Hard delete</Button>
+                    <Button size="sm" variant="destructive" onClick={() => hardDelete(row)}>Eliminar</Button>
                     {tab === "usuarios" && (
-                      <Button size="sm" variant="outline" onClick={() => api().put(`/admin/catalogs/usuarios/${row.id}`, { role: row.role === "admin" ? "finanzas" : "admin" }).then(loadRows)}>
-                        Toggle admin
+                      <Button size="sm" variant="outline" onClick={() => updateUserRole(row, row.role === "admin" ? "finanzas" : "admin")}>
+                        Cambiar rol
                       </Button>
                     )}
                   </td>
