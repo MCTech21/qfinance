@@ -1,5 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Query, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -15,6 +16,7 @@ import bcrypt
 from enum import Enum
 import csv
 import io
+from openpyxl import Workbook, load_workbook
 from dateutil import parser as date_parser
 import pytz
 
@@ -60,6 +62,7 @@ class UserRole(str, Enum):
     FINANZAS = "finanzas"
     AUTORIZADOR = "autorizador"
     SOLO_LECTURA = "solo_lectura"
+    CAPTURA_INGRESOS = "captura_ingresos"
 
 class Currency(str, Enum):
     MXN = "MXN"
@@ -107,15 +110,24 @@ class User(UserBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_active: bool = True
+    must_change_password: bool = False
 
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+class ForceChangePasswordRequest(BaseModel):
+    new_password: str
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: User
+    must_change_password: bool = False
 
 class ProjectBase(BaseModel):
     code: str
@@ -178,6 +190,18 @@ class Budget(BudgetBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     created_by: str
+
+class BudgetRequestBase(BudgetBase):
+    reason: Optional[str] = None
+
+class BudgetRequest(BudgetRequestBase):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    status: AuthorizationStatus = AuthorizationStatus.PENDING
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    requested_by: str
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[str] = None
 
 class MovementBase(BaseModel):
     project_id: str
@@ -284,18 +308,31 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
-def create_token(user_id: str, email: str, role: str) -> str:
+def validate_password_policy(password: str):
+    if len(password) < 8:
+        raise HTTPException(status_code=422, detail="La nueva contraseña debe tener al menos 8 caracteres")
+    if not any(ch.isalpha() for ch in password) or not any(ch.isdigit() for ch in password):
+        raise HTTPException(status_code=422, detail="La nueva contraseña debe contener letras y números")
+
+
+def create_token(user_id: str, email: str, role: str, must_change_password: bool = False) -> str:
     payload = {
         "user_id": user_id,
         "email": email,
         "role": role,
+        "must_change_password": must_change_password,
         "exp": datetime.now(timezone.utc).timestamp() + 86400 * 7
     }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+
+async def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=["HS256"])
+        if payload.get("must_change_password"):
+            allowed_paths = {"/api/auth/force-change-password", "/api/auth/logout", "/api/auth/me", "/api/auth/permissions"}
+            if request.url.path not in allowed_paths:
+                raise HTTPException(status_code=403, detail="Debes cambiar tu contraseña para continuar")
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expirado")
@@ -333,6 +370,7 @@ class Permission(str, Enum):
     # Budgets
     VIEW_BUDGETS = "view_budgets"
     MANAGE_BUDGETS = "manage_budgets"
+    REQUEST_BUDGETS = "request_budgets"
     
     # Users
     VIEW_USERS = "view_users"
@@ -353,10 +391,11 @@ ROLE_PERMISSIONS = {
         Permission.CREATE_MOVEMENT.value,
         Permission.VIEW_MOVEMENTS.value,
         Permission.IMPORT_MOVEMENTS.value,
-        Permission.VIEW_AUTHORIZATIONS.value,  # Can view but NOT approve/reject
+        Permission.VIEW_AUTHORIZATIONS.value,
         Permission.VIEW_CATALOGS.value,
         Permission.VIEW_BUDGETS.value,
-        Permission.MANAGE_BUDGETS.value,  # Can manage budgets
+        Permission.REQUEST_BUDGETS.value,
+        Permission.MANAGE_CATALOGS.value,
     ],
     
     UserRole.AUTORIZADOR.value: [
@@ -371,6 +410,15 @@ ROLE_PERMISSIONS = {
         Permission.VIEW_AUDIT.value,
     ],
     
+    UserRole.CAPTURA_INGRESOS.value: [
+        Permission.VIEW_DASHBOARD.value,
+        Permission.VIEW_REPORTS.value,
+        Permission.CREATE_MOVEMENT.value,
+        Permission.VIEW_MOVEMENTS.value,
+        Permission.VIEW_CATALOGS.value,
+        Permission.VIEW_BUDGETS.value,
+    ],
+
     UserRole.SOLO_LECTURA.value: [
         Permission.VIEW_DASHBOARD.value,
         Permission.VIEW_REPORTS.value,
@@ -482,9 +530,26 @@ def to_tijuana(dt: datetime) -> datetime:
         dt = pytz.UTC.localize(dt)
     return dt.astimezone(TIMEZONE)
 
+def get_year_range() -> tuple[int, int]:
+    current_year = to_tijuana(datetime.now(timezone.utc)).year
+    from_year = min(2025, current_year)
+    to_year = max(current_year + 10, 2031)
+    return from_year, to_year
+
+def validate_year_in_range(year: int):
+    from_year, to_year = get_year_range()
+    if year < from_year or year > to_year:
+        raise HTTPException(status_code=422, detail=f"Año fuera de rango permitido ({from_year}-{to_year})")
+
+def validate_date_in_range(dt: datetime):
+    validate_year_in_range(to_tijuana(dt).year)
+
+def is_ingresos_partida(codigo: str) -> bool:
+    return str(codigo).startswith("4")
+
 # ========================= AUTH ROUTES =========================
 @api_router.post("/auth/register", response_model=User)
-async def register(user_data: UserCreate):
+async def register(user_data: UserCreate, current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
     existing = await db.users.find_one({"email": user_data.email}, {"_id": 0})
     if existing:
         raise HTTPException(status_code=400, detail="Email ya registrado")
@@ -492,6 +557,7 @@ async def register(user_data: UserCreate):
     user = User(**user_data.model_dump(exclude={"password"}))
     doc = user.model_dump()
     doc['password_hash'] = hash_password(user_data.password)
+    doc['must_change_password'] = False
     doc['created_at'] = doc['created_at'].isoformat()
     await db.users.insert_one(doc)
     return user
@@ -511,7 +577,8 @@ async def login(credentials: UserLogin):
         logger.info("Login failed: inactive user id=%s", user_doc.get('id'))
         raise HTTPException(status_code=401, detail="Usuario desactivado")
     
-    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'])
+    must_change_password = bool(user_doc.get('must_change_password', False))
+    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'], must_change_password=must_change_password)
     user = User(**{k: v for k, v in user_doc.items() if k != 'password_hash'})
     
     # Log successful login
@@ -523,13 +590,58 @@ async def login(credentials: UserLogin):
         {"status": "success"}
     )
     
-    return TokenResponse(access_token=token, user=user)
+    return TokenResponse(access_token=token, user=user, must_change_password=must_change_password)
 
 @api_router.post("/auth/logout")
 async def logout(current_user: dict = Depends(get_current_user)):
     """Log user logout"""
     await log_audit(current_user, "LOGOUT", "auth", current_user["user_id"], {"status": "success"})
     return {"message": "Sesión cerrada"}
+
+@api_router.post("/auth/change-password")
+async def change_password(payload: ChangePasswordRequest, request: Request, current_user: dict = Depends(get_current_user)):
+    user_doc = await db.users.find_one({"id": current_user["user_id"]}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    if not verify_password(payload.current_password, user_doc.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="La contraseña actual es incorrecta")
+    if payload.current_password == payload.new_password:
+        raise HTTPException(status_code=422, detail="La nueva contraseña debe ser diferente a la actual")
+    validate_password_policy(payload.new_password)
+
+    await db.users.update_one({"id": user_doc["id"]}, {"$set": {
+        "password_hash": hash_password(payload.new_password),
+        "must_change_password": False,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }})
+    await log_audit(current_user, "PASSWORD_CHANGED", "users", user_doc["id"], {"source": "settings"}, ip_address=request.client.host if request.client else None)
+    fresh = await db.users.find_one({"id": user_doc["id"]}, {"_id": 0})
+    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False)
+    user = User(**{k: v for k, v in fresh.items() if k != "password_hash"})
+    return TokenResponse(access_token=token, user=user, must_change_password=False)
+
+
+@api_router.post("/auth/force-change-password")
+async def force_change_password(payload: ForceChangePasswordRequest, request: Request, current_user: dict = Depends(get_current_user)):
+    user_doc = await db.users.find_one({"id": current_user["user_id"]}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    if not user_doc.get("must_change_password", False):
+        raise HTTPException(status_code=403, detail="El usuario no requiere cambio forzado de contraseña")
+    validate_password_policy(payload.new_password)
+    if verify_password(payload.new_password, user_doc.get("password_hash", "")):
+        raise HTTPException(status_code=422, detail="La nueva contraseña debe ser diferente a la actual")
+
+    await db.users.update_one({"id": user_doc["id"]}, {"$set": {
+        "password_hash": hash_password(payload.new_password),
+        "must_change_password": False,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }})
+    await log_audit(current_user, "PASSWORD_CHANGED", "users", user_doc["id"], {"source": "force_change"}, ip_address=request.client.host if request.client else None)
+    fresh = await db.users.find_one({"id": user_doc["id"]}, {"_id": 0})
+    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False)
+    user = User(**{k: v for k, v in fresh.items() if k != "password_hash"})
+    return TokenResponse(access_token=token, user=user, must_change_password=False)
 
 @api_router.get("/auth/me", response_model=User)
 async def get_me(current_user: dict = Depends(get_current_user)):
@@ -695,12 +807,16 @@ async def update_partida(partida_id: str, updates: PartidaBase, current_user: di
 
 # ========================= PROVIDER ROUTES =========================
 @api_router.get("/providers", response_model=List[Provider])
-async def get_providers(current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
-    providers = await db.providers.find({}, {"_id": 0}).to_list(1000)
+async def get_providers(include_inactive: bool = False, current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
+    query = {} if include_inactive else {"is_active": {"$ne": False}}
+    providers = await db.providers.find(query, {"_id": 0}).to_list(1000)
     return [Provider(**p) for p in providers]
 
 @api_router.post("/providers", response_model=Provider)
 async def create_provider(provider_data: ProviderBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    existing = await db.providers.find_one({"code": provider_data.code}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail="Proveedor con este código ya existe")
     provider = Provider(**provider_data.model_dump())
     doc = provider.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
@@ -723,6 +839,75 @@ async def update_provider(provider_id: str, updates: ProviderBase, current_user:
     
     updated = await db.providers.find_one({"id": provider_id}, {"_id": 0})
     return Provider(**updated)
+
+
+@api_router.put("/providers/{provider_id}/toggle")
+async def toggle_provider(provider_id: str, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    provider = await db.providers.find_one({"id": provider_id}, {"_id": 0})
+    if not provider:
+        raise HTTPException(status_code=404, detail="Proveedor no encontrado")
+    new_status = not provider.get("is_active", True)
+    await db.providers.update_one({"id": provider_id}, {"$set": {"is_active": new_status}})
+    await log_audit(current_user, "TOGGLE", "providers", provider_id, {"is_active": new_status})
+    updated = await db.providers.find_one({"id": provider_id}, {"_id": 0})
+    return Provider(**updated)
+
+@api_router.get("/providers/export")
+async def export_providers(format: str = Query("csv", pattern="^(csv|xlsx)$"), current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
+    providers = await db.providers.find({}, {"_id": 0}).sort("code", 1).to_list(5000)
+    await log_audit(current_user, "EXPORT", "providers", "batch", {"format": format, "count": len(providers)})
+    if format == "csv":
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=["code", "name", "rfc", "is_active"])
+        writer.writeheader()
+        for p in providers:
+            writer.writerow({k: p.get(k) for k in ["code", "name", "rfc", "is_active"]})
+        return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=providers.csv"})
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "providers"
+    ws.append(["code", "name", "rfc", "is_active"])
+    for p in providers:
+        ws.append([p.get("code"), p.get("name"), p.get("rfc"), p.get("is_active", True)])
+    b=io.BytesIO(); wb.save(b); b.seek(0)
+    return StreamingResponse(b, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=providers.xlsx"})
+
+@api_router.post("/providers/import")
+async def import_providers(file: UploadFile = File(...), current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    filename=(file.filename or "").lower()
+    content=await file.read()
+    rows=[]
+    if filename.endswith(".csv"):
+        text=content.decode("utf-8-sig")
+        rows=list(csv.DictReader(io.StringIO(text)))
+    elif filename.endswith(".xlsx"):
+        wb=load_workbook(io.BytesIO(content), read_only=True)
+        ws=wb.active
+        headers=[str(c.value).strip() if c.value is not None else "" for c in next(ws.rows)]
+        for r in ws.iter_rows(min_row=2, values_only=True):
+            rows.append({headers[i]: ("" if v is None else str(v)) for i,v in enumerate(r)})
+    else:
+        raise HTTPException(status_code=400, detail="Formato soportado: csv/xlsx")
+    required=["code","name"]
+    errors=[]; duplicates=[]; created=0; updated=0
+    seen=set()
+    for idx,row in enumerate(rows, start=2):
+        missing=[c for c in required if not str(row.get(c,"")).strip()]
+        if missing:
+            errors.append({"row": idx, "error": f"Columnas requeridas faltantes: {', '.join(missing)}"}); continue
+        code=str(row.get("code")).strip().upper(); name=str(row.get("name")).strip(); rfc=str(row.get("rfc","")).strip().upper() or None
+        is_active=str(row.get("is_active","true")).strip().lower() not in {"false","0","no","inactive"}
+        if code in seen:
+            duplicates.append({"row": idx, "code": code}); continue
+        seen.add(code)
+        existing=await db.providers.find_one({"code": code},{"_id":0})
+        payload={"code":code,"name":name,"rfc":rfc,"is_active":is_active}
+        if existing:
+            await db.providers.update_one({"id":existing["id"]},{"$set":payload}); updated += 1
+        else:
+            provider=Provider(**payload); doc=provider.model_dump(); doc["created_at"]=doc["created_at"].isoformat(); await db.providers.insert_one(doc); created += 1
+    await log_audit(current_user, "IMPORT", "providers", "batch", {"filename": file.filename, "rows": len(rows), "created": created, "updated": updated, "duplicates": len(duplicates), "errors": len(errors)})
+    return {"total": len(rows), "created": created, "updated": updated, "duplicates": duplicates, "errors": errors}
 
 # ========================= BUDGET ROUTES =========================
 @api_router.get("/budgets")
@@ -748,6 +933,9 @@ async def get_budgets(
 
 @api_router.post("/budgets")
 async def create_budget(budget_data: BudgetBase, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
+    validate_year_in_range(budget_data.year)
+    if current_user.get("role") != UserRole.ADMIN.value:
+        raise HTTPException(status_code=403, detail="Solo admin puede crear presupuestos directamente")
     # VALIDACIÓN BLOQUEANTE: partida debe existir en catálogo
     await validate_partida(budget_data.partida_codigo)
     
@@ -784,6 +972,7 @@ async def create_budget(budget_data: BudgetBase, current_user: dict = Depends(re
 
 @api_router.put("/budgets/{budget_id}")
 async def update_budget(budget_id: str, updates: BudgetBase, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
+    validate_year_in_range(updates.year)
     # VALIDACIÓN BLOQUEANTE: partida debe existir
     await validate_partida(updates.partida_codigo)
     
@@ -816,6 +1005,46 @@ async def delete_budget(budget_id: str, current_user: dict = Depends(require_per
         }
     })
     return {"message": "Presupuesto eliminado"}
+
+@api_router.get("/budget-requests")
+async def get_budget_requests(status: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_BUDGETS))):
+    query = {}
+    if status:
+        query["status"] = status
+    if current_user.get("role") == UserRole.FINANZAS.value:
+        query["requested_by"] = current_user["user_id"]
+    return await db.budget_requests.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+
+@api_router.post("/budget-requests")
+async def create_budget_request(payload: BudgetRequestBase, current_user: dict = Depends(require_permission(Permission.REQUEST_BUDGETS, Permission.MANAGE_BUDGETS))):
+    validate_year_in_range(payload.year)
+    await validate_partida(payload.partida_codigo)
+    if current_user.get("role") not in [UserRole.FINANZAS.value, UserRole.ADMIN.value]:
+        raise HTTPException(status_code=403, detail="Rol sin permisos para solicitar presupuesto")
+    req = BudgetRequest(**payload.model_dump(), requested_by=current_user["user_id"])
+    doc = req.model_dump(); doc["created_at"] = doc["created_at"].isoformat()
+    await db.budget_requests.insert_one(doc)
+    await log_audit(current_user, "CREATE", "budget_requests", req.id, {"data": payload.model_dump()})
+    return doc
+
+@api_router.put("/budget-requests/{request_id}/resolve")
+async def resolve_budget_request(request_id: str, resolution: AuthorizationResolve, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
+    if current_user.get("role") != UserRole.ADMIN.value:
+        raise HTTPException(status_code=403, detail="Solo admin puede resolver solicitudes")
+    req = await db.budget_requests.find_one({"id": request_id}, {"_id": 0})
+    if not req:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+    if req.get("status") != AuthorizationStatus.PENDING.value:
+        raise HTTPException(status_code=400, detail="Solicitud ya resuelta")
+    update = {"status": resolution.status.value, "resolved_at": datetime.now(timezone.utc).isoformat(), "resolved_by": current_user["user_id"]}
+    await db.budget_requests.update_one({"id": request_id}, {"$set": update})
+    if resolution.status == AuthorizationStatus.APPROVED:
+        existing = await db.budgets.find_one({"project_id": req["project_id"], "partida_codigo": req["partida_codigo"], "year": req["year"], "month": req["month"]}, {"_id":0})
+        if not existing:
+            budget = Budget(project_id=req["project_id"], partida_codigo=req["partida_codigo"], year=req["year"], month=req["month"], amount_mxn=req["amount_mxn"], notes=req.get("notes"), created_by=current_user["user_id"])
+            d=budget.model_dump(); d["created_at"]=d["created_at"].isoformat(); await db.budgets.insert_one(d)
+    await log_audit(current_user, f"BUDGET_REQUEST_{resolution.status.value.upper()}", "budget_requests", request_id, {"notes": resolution.notes})
+    return {"message": f"Solicitud {resolution.status.value}"}
 
 # ========================= EXCHANGE RATE ROUTES =========================
 @api_router.get("/exchange-rates")
@@ -860,7 +1089,8 @@ async def get_movements(
         query["status"] = status
     
     movements = await db.movements.find(query, {"_id": 0}).to_list(5000)
-    
+    if year:
+        validate_year_in_range(year)
     if year or month:
         filtered = []
         for m in movements:
@@ -893,6 +1123,9 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     
     # Parse date
     parsed_date = parse_date_tijuana(movement_data.date)
+    validate_date_in_range(parsed_date)
+    if current_user.get("role") == UserRole.CAPTURA_INGRESOS.value and not is_ingresos_partida(movement_data.partida_codigo):
+        raise HTTPException(status_code=403, detail="captura_ingresos solo puede registrar partidas 4xx")
     amount_mxn = movement_data.amount_original * movement_data.exchange_rate
     
     # Check for duplicates
@@ -1308,6 +1541,8 @@ async def get_authorizations(
 ):
     """Get authorizations with filters and enriched movement data"""
     query = {}
+    if year:
+        validate_year_in_range(year)
     if status:
         query["status"] = status
     
@@ -1388,6 +1623,7 @@ async def get_pending_summary(
     """Get summary of pending authorizations for dashboard KPI"""
     now = to_tijuana(datetime.now(timezone.utc))
     year = year or now.year
+    validate_year_in_range(year)
     month = month or now.month
     
     # Get pending movements
@@ -1483,6 +1719,7 @@ async def get_dashboard(
 ):
     now = to_tijuana(datetime.now(timezone.utc))
     year = year or now.year
+    validate_year_in_range(year)
     month = month or now.month
     
     # Get projects filtered by empresa
@@ -1641,6 +1878,7 @@ async def get_partida_detail(
 ):
     now = to_tijuana(datetime.now(timezone.utc))
     year = year or now.year
+    validate_year_in_range(year)
     month = month or now.month
     
     # Get partida from catalogo
@@ -1724,6 +1962,7 @@ async def get_export_data(
     """
     now = to_tijuana(datetime.now(timezone.utc))
     year = year or now.year
+    validate_year_in_range(year)
     month = month or now.month
     
     # Get empresas for filter names
@@ -2174,6 +2413,7 @@ async def admin_update_user_password(
         {"id": user_id},
         {"$set": {
             "password_hash": hash_password(payload.password),
+            "must_change_password": True,
             "is_active": True,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }}
@@ -2227,6 +2467,7 @@ async def admin_create_entity(
         if not password:
             raise HTTPException(status_code=400, detail="password es requerido")
         doc["password_hash"] = hash_password(password)
+        doc["must_change_password"] = True
 
     await db[collection].insert_one(doc)
     await log_admin_action(request, current_user, "ADMIN_CREATE", entity, doc["id"], True, after={k: v for k, v in doc.items() if k != "password_hash"})
@@ -2258,6 +2499,7 @@ async def admin_update_entity(
 
     if collection == "users" and "password" in payload:
         payload["password_hash"] = hash_password(payload.pop("password"))
+        payload["must_change_password"] = True
 
     if entity == "catalogo_partidas" and old_doc.get("codigo") != payload.get("codigo", old_doc.get("codigo")):
         raise HTTPException(status_code=400, detail="No se permite cambiar código de partida")

@@ -1,3 +1,4 @@
+import { buildYearOptions } from "../lib/yearRange";
 import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "../context/AuthContext";
 import { toast } from "sonner";
@@ -21,6 +22,8 @@ const Dashboard = () => {
   const [selectedMonth, setSelectedMonth] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [chartsReady, setChartsReady] = useState(false);
+
+  const yearOptions = buildYearOptions();
 
   const months = [
     { value: 1, label: "Enero" }, { value: 2, label: "Febrero" }, { value: 3, label: "Marzo" },
@@ -153,7 +156,7 @@ const Dashboard = () => {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {[2024, 2025, 2026].map((y) => (
+              {yearOptions.map((y) => (
                 <SelectItem key={y} value={String(y)}>{y}</SelectItem>
               ))}
             </SelectContent>
