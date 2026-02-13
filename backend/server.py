@@ -64,6 +64,7 @@ class UserRole(str, Enum):
     FINANZAS = "finanzas"
     AUTORIZADOR = "autorizador"
     SOLO_LECTURA = "solo_lectura"
+    CAPTURA = "captura"
     CAPTURA_INGRESOS = "captura_ingresos"
 
 class Currency(str, Enum):
@@ -423,6 +424,15 @@ ROLE_PERMISSIONS = {
         Permission.VIEW_BUDGETS.value,
     ],
 
+    UserRole.CAPTURA.value: [
+        Permission.VIEW_DASHBOARD.value,
+        Permission.VIEW_REPORTS.value,
+        Permission.CREATE_MOVEMENT.value,
+        Permission.VIEW_MOVEMENTS.value,
+        Permission.VIEW_CATALOGS.value,
+        Permission.VIEW_BUDGETS.value,
+    ],
+
     UserRole.SOLO_LECTURA.value: [
         Permission.VIEW_DASHBOARD.value,
         Permission.VIEW_REPORTS.value,
@@ -457,7 +467,7 @@ async def log_audit(user: dict, action: str, entity_type: str, entity_id: str, c
         "action": action,
         "entity_type": entity_type,
         "entity_id": entity_id,
-        "changes": changes,
+        "changes": to_json_safe(changes),
         "ip_address": ip_address,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
@@ -564,6 +574,29 @@ def sanitize_mongo_document(doc: dict) -> dict:
     if mongo_id is not None and not clean.get("id"):
         clean["id"] = str(mongo_id)
     return clean
+
+
+def to_json_safe(value: Any):
+    if isinstance(value, dict):
+        return {k: to_json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [to_json_safe(v) for v in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def normalize_role_input(role: Optional[str]) -> Optional[str]:
+    if role is None:
+        return None
+    role_normalized = str(role).strip().lower()
+    if role_normalized == UserRole.CAPTURA.value:
+        return UserRole.CAPTURA_INGRESOS.value
+    return role_normalized
 
 
 def is_capture_role(role: Optional[str]) -> bool:
@@ -721,7 +754,12 @@ async def get_my_permissions(current_user: dict = Depends(get_current_user)):
 @api_router.get("/users", response_model=List[User])
 async def get_users(current_user: dict = Depends(require_permission(Permission.VIEW_USERS, Permission.MANAGE_USERS))):
     users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
-    return [User(**u) for u in users]
+    normalized = []
+    for u in users:
+        user_doc = dict(u)
+        user_doc["role"] = normalize_role_input(user_doc.get("role"))
+        normalized.append(User(**user_doc))
+    return normalized
 
 @api_router.put("/users/{user_id}")
 async def update_user(user_id: str, updates: dict, current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
@@ -1195,8 +1233,6 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     # Parse date
     parsed_date = parse_date_tijuana(movement_data.date)
     validate_date_in_range(parsed_date)
-    if current_user.get("role") == UserRole.CAPTURA_INGRESOS.value and not is_ingresos_partida(movement_data.partida_codigo):
-        raise HTTPException(status_code=403, detail="captura_ingresos solo puede registrar partidas 4xx")
     amount_mxn = movement_data.amount_original * movement_data.exchange_rate
     
     # Check for duplicates
@@ -2247,7 +2283,7 @@ async def get_audit_logs(
             query["timestamp"]["$lte"] = date_to + "T23:59:59"
     
     logs = await db.audit_logs.find(query, {"_id": 0}).sort("timestamp", -1).to_list(limit)
-    return logs
+    return [to_json_safe(sanitize_mongo_document(log)) for log in logs]
 
 @api_router.get("/audit-logs/export-csv")
 async def export_audit_logs_csv(
@@ -2275,6 +2311,7 @@ async def export_audit_logs_csv(
             query["timestamp"]["$lte"] = date_to + "T23:59:59"
     
     logs = await db.audit_logs.find(query, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+    logs = [to_json_safe(sanitize_mongo_document(log)) for log in logs]
     
     # Build CSV
     output = io.StringIO()
@@ -2321,6 +2358,7 @@ async def get_audit_summary(
             query["timestamp"]["$lte"] = date_to + "T23:59:59"
     
     logs = await db.audit_logs.find(query, {"_id": 0}).to_list(5000)
+    logs = [to_json_safe(sanitize_mongo_document(log)) for log in logs]
     
     # Count by action
     by_action = {}

@@ -220,6 +220,31 @@ def test_admin_create_user_returns_201_and_duplicate_409():
     assert duplicate.status_code == 409
 
 
+def test_audit_logs_endpoint_does_not_500_with_non_json_changes():
+    fake_db = FakeDB()
+    fake_db.audit_logs.rows.append({
+        "id": "a1",
+        "user_id": "u1",
+        "user_email": "u@test.com",
+        "user_role": "admin",
+        "action": "TEST",
+        "entity_type": "users",
+        "entity_id": "u1",
+        "changes": {"before": {"created_at": server.datetime.now(server.timezone.utc)}},
+        "timestamp": server.datetime.now(server.timezone.utc),
+    })
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "adm1", "email": "a@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+    res = client.get("/api/audit-logs")
+    assert res.status_code == 200
+    assert isinstance(res.json(), list)
+
+
 def test_readonly_roles_cannot_mutate_providers_or_budgets():
     for role in ["autorizador", "solo_lectura"]:
         client = client_for_role(role)
