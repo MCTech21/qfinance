@@ -272,6 +272,15 @@ NODE_MEMORY_MB=2048 NODE_MEMORY_MB_SAFE=1024 WEB_URL=http://52.53.215.40:8088 EN
 ```
 
 
+
+Si el deploy termina pero sigues viendo `404` en rutas nuevas (ej. `/api/auth/change-password`), fuerza reinicio del servicio real de backend en el deploy:
+
+```bash
+BACKEND_RESTART_COMMAND='systemctl restart <tu-backend.service>' \
+EC2_HOST=52.53.215.40 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 MIN_FREE_MB=600 \
+  bash scripts/cloudshell_sync_and_deploy.sh
+```
+
 ### Troubleshooting: `cannot lock ref ... No space left on device`
 
 Si `git fetch` falla en CloudShell por falta de espacio/bloqueos (`index.lock`, `refs/.../HEAD.lock`), el script `scripts/cloudshell_sync_and_deploy.sh` ya intenta recuperación automática:
@@ -299,3 +308,10 @@ QFINANCE_API_BASE_URL=http://52.53.215.40:8088/api BOOTSTRAP_ADMIN_EMAIL=admin@f
 ```bash
 EC2_HOST=52.53.215.40 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 MIN_FREE_MB=600 bash scripts/cloudshell_sync_and_deploy.sh
 ```
+
+
+## Seguridad de cuenta (first login)
+
+- Existe flujo de cambio de contraseña desde **Mi Cuenta / Configuración**.
+- Si un usuario tiene `must_change_password=true` (por ejemplo tras reset a contraseña temporal), el sistema obliga el flujo `/force-change-password` antes de permitir acceso al resto de módulos.
+

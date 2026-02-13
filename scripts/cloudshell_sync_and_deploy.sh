@@ -13,14 +13,55 @@ EC2_WORK_DIR="${EC2_WORK_DIR:-/opt/qfinance_git}"
 REPO_URL="${REPO_URL:-git@github.com:MCTech21/qfinance.git}"
 BRANCH="${BRANCH:-main}"
 WEB_URL="${WEB_URL:-http://127.0.0.1:8088}"
+BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:8000}"
 ENABLE_SWAP="${ENABLE_SWAP:-0}"
 MIN_FREE_MB="${MIN_FREE_MB:-350}"
+RESTART_BACKEND="${RESTART_BACKEND:-1}"
+BACKEND_SERVICE_CANDIDATES="${BACKEND_SERVICE_CANDIDATES:-}"
+BACKEND_RESTART_COMMAND="${BACKEND_RESTART_COMMAND:-}"
+BACKEND_VERIFY_PATH="${BACKEND_VERIFY_PATH:-}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "[ERROR] Falta comando requerido: $1" >&2; exit 1; }
 }
 
-remote_payload="WEB_URL='${WEB_URL}' ENABLE_SWAP='${ENABLE_SWAP}' MIN_FREE_MB='${MIN_FREE_MB}' BRANCH='${BRANCH}' EC2_WORK_DIR='${EC2_WORK_DIR}' REPO_URL='${REPO_URL}' bash '${EC2_WORK_DIR}/scripts/ec2_sync_and_deploy.sh'"
+shell_escape() {
+  printf '%q' "$1"
+}
+
+build_remote_payload() {
+  local q_work_dir q_repo_url q_branch q_web_url q_backend_url q_enable_swap q_min_free_mb
+  local q_restart_backend q_backend_service_candidates q_backend_restart_command q_backend_verify_path
+
+  q_work_dir=$(shell_escape "${EC2_WORK_DIR}")
+  q_repo_url=$(shell_escape "${REPO_URL}")
+  q_branch=$(shell_escape "${BRANCH}")
+  q_web_url=$(shell_escape "${WEB_URL}")
+  q_backend_url=$(shell_escape "${BACKEND_URL}")
+  q_enable_swap=$(shell_escape "${ENABLE_SWAP}")
+  q_min_free_mb=$(shell_escape "${MIN_FREE_MB}")
+  q_restart_backend=$(shell_escape "${RESTART_BACKEND}")
+  q_backend_service_candidates=$(shell_escape "${BACKEND_SERVICE_CANDIDATES}")
+  q_backend_restart_command=$(shell_escape "${BACKEND_RESTART_COMMAND}")
+  q_backend_verify_path=$(shell_escape "${BACKEND_VERIFY_PATH}")
+
+  cat <<REMOTE
+set -euo pipefail
+if [[ ! -d ${q_work_dir}/.git ]]; then
+  mkdir -p "\$(dirname ${q_work_dir})"
+  git clone --depth 1 --branch ${q_branch} ${q_repo_url} ${q_work_dir}
+else
+  git -C ${q_work_dir} fetch --all --prune
+  git -C ${q_work_dir} checkout ${q_branch}
+  git -C ${q_work_dir} reset --hard origin/${q_branch}
+  git -C ${q_work_dir} clean -fd
+fi
+WEB_URL=${q_web_url} BACKEND_URL=${q_backend_url} ENABLE_SWAP=${q_enable_swap} MIN_FREE_MB=${q_min_free_mb} BRANCH=${q_branch} EC2_WORK_DIR=${q_work_dir} REPO_URL=${q_repo_url} RESTART_BACKEND=${q_restart_backend} BACKEND_SERVICE_CANDIDATES=${q_backend_service_candidates} BACKEND_RESTART_COMMAND=${q_backend_restart_command} BACKEND_VERIFY_PATH=${q_backend_verify_path} bash ${q_work_dir}/scripts/ec2_sync_and_deploy.sh
+REMOTE
+}
+
+remote_payload="$(build_remote_payload)"
+remote_payload_compact="${remote_payload//$'\n'/; }"
 
 run_ssh() {
   require_cmd ssh
@@ -35,7 +76,7 @@ run_ssh() {
   ssh "${ssh_opts[@]}" "${EC2_USER}@${EC2_HOST}" "echo '[OK] SSH reachability confirmada'"
 
   echo "[INFO] Ejecutando deploy EC2-first vía SSH ..."
-  ssh "${ssh_opts[@]}" "${EC2_USER}@${EC2_HOST}" "bash -lc \"${remote_payload}\""
+  ssh "${ssh_opts[@]}" "${EC2_USER}@${EC2_HOST}" "bash -lc $(shell_escape "${remote_payload}")"
 }
 
 run_ssm() {
@@ -57,7 +98,7 @@ run_ssm() {
     --instance-ids "${EC2_INSTANCE_ID}" \
     --document-name "AWS-RunShellScript" \
     --comment "qfinance ec2-first deploy" \
-    --parameters "commands=[\"${remote_payload}\"]" \
+    --parameters "commands=[\"${remote_payload_compact}\"]" \
     --query 'Command.CommandId' \
     --output text)
 

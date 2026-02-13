@@ -157,7 +157,7 @@ def run_db_mode(args: argparse.Namespace) -> int:
     password_hash = bcrypt.hashpw(args.new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     result = db.users.update_one(
         {"id": target["id"]},
-        {"$set": {"password_hash": password_hash, "is_active": True, "role": "admin"}},
+        {"$set": {"password_hash": password_hash, "is_active": True, "role": "admin", "must_change_password": True}},
     )
     if result.matched_count != 1:
         print(f"[ERROR] Could not update DB user id={target.get('id')}", file=sys.stderr)
