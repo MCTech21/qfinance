@@ -8,18 +8,23 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "../components/ui/dialog";
 import { Plus, Pencil, Trash2, Loader2 } from "lucide-react";
+import { buildYearOptions } from "../lib/yearRange";
 
 const Budgets = () => {
-  const { api, canManage } = useAuth();
+  const { api, canManage, user } = useAuth();
   const [budgets, setBudgets] = useState([]);
   const [projects, setProjects] = useState([]);
   const [partidas, setPartidas] = useState([]);
+  const [empresas, setEmpresas] = useState([]);
+  const [budgetRequests, setBudgetRequests] = useState([]);
+  const [yearOptions] = useState(buildYearOptions());
   const [isLoading, setIsLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingBudget, setEditingBudget] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
   
   const [filters, setFilters] = useState({
+    empresa_id: "all",
     project_id: "all",
     year: new Date().getFullYear(),
     month: new Date().getMonth() + 1
@@ -27,7 +32,7 @@ const Budgets = () => {
   
   const [formData, setFormData] = useState({
     project_id: "",
-    partida_id: "",
+    partida_codigo: "",
     year: new Date().getFullYear(),
     month: new Date().getMonth() + 1,
     amount_mxn: "",
@@ -44,7 +49,7 @@ const Budgets = () => {
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [budgetsRes, projectsRes, partidasRes] = await Promise.all([
+      const [budgetsRes, projectsRes, partidasRes, empresasRes, budgetRequestsRes] = await Promise.all([
         api().get("/budgets", {
           params: {
             project_id: filters.project_id !== "all" ? filters.project_id : undefined,
@@ -52,12 +57,16 @@ const Budgets = () => {
             month: filters.month
           }
         }),
-        api().get("/projects"),
-        api().get("/partidas")
+        api().get("/projects", { params: { empresa_id: filters.empresa_id !== "all" ? filters.empresa_id : undefined } }),
+        api().get("/catalogo-partidas"),
+        api().get("/empresas"),
+        api().get("/budget-requests")
       ]);
       setBudgets(budgetsRes.data);
       setProjects(projectsRes.data);
       setPartidas(partidasRes.data);
+      setEmpresas(empresasRes.data);
+      setBudgetRequests(budgetRequestsRes.data);
     } catch (error) {
       toast.error("Error al cargar presupuestos");
     } finally {
@@ -74,7 +83,7 @@ const Budgets = () => {
       setEditingBudget(budget);
       setFormData({
         project_id: budget.project_id,
-        partida_id: budget.partida_id,
+        partida_codigo: budget.partida_codigo,
         year: budget.year,
         month: budget.month,
         amount_mxn: budget.amount_mxn,
@@ -84,7 +93,7 @@ const Budgets = () => {
       setEditingBudget(null);
       setFormData({
         project_id: "",
-        partida_id: "",
+        partida_codigo: "",
         year: filters.year,
         month: filters.month,
         amount_mxn: "",
@@ -104,12 +113,13 @@ const Budgets = () => {
         amount_mxn: parseFloat(formData.amount_mxn)
       };
       
+      const endpoint = user?.role === "finanzas" && !editingBudget ? "/budget-requests" : "/budgets";
       if (editingBudget) {
         await api().put(`/budgets/${editingBudget.id}`, payload);
         toast.success("Presupuesto actualizado");
       } else {
-        await api().post("/budgets", payload);
-        toast.success("Presupuesto creado");
+        await api().post(endpoint, payload);
+        toast.success(endpoint === "/budgets" ? "Presupuesto creado" : "Solicitud de presupuesto creada");
       }
       
       setDialogOpen(false);
@@ -143,8 +153,8 @@ const Budgets = () => {
   };
 
   const getProjectName = (id) => projects.find(p => p.id === id)?.name || "N/A";
-  const getPartidaName = (id) => partidas.find(p => p.id === id)?.name || "N/A";
-  const getPartidaCode = (id) => partidas.find(p => p.id === id)?.code || "N/A";
+  const getPartidaName = (codigo) => partidas.find(p => p.codigo === codigo)?.nombre || "N/A";
+  const getPartidaCode = (codigo) => partidas.find(p => p.codigo === codigo)?.codigo || "N/A";
 
   return (
     <div className="space-y-6" data-testid="budgets-page">
@@ -158,12 +168,12 @@ const Budgets = () => {
           <DialogTrigger asChild>
             <Button onClick={() => handleOpenDialog()} data-testid="add-budget-btn">
               <Plus className="h-4 w-4 mr-2" />
-              Nuevo Presupuesto
+              {user?.role === "finanzas" ? "Solicitar Presupuesto" : "Nuevo Presupuesto"}
             </Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>{editingBudget ? "Editar Presupuesto" : "Nuevo Presupuesto"}</DialogTitle>
+              <DialogTitle>{editingBudget ? "Editar Presupuesto" : (user?.role === "finanzas" ? "Solicitar Presupuesto" : "Nuevo Presupuesto")}</DialogTitle>
             </DialogHeader>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -186,15 +196,15 @@ const Budgets = () => {
                 <div className="space-y-2">
                   <Label>Partida</Label>
                   <Select
-                    value={formData.partida_id}
-                    onValueChange={(v) => setFormData(prev => ({ ...prev, partida_id: v }))}
+                    value={formData.partida_codigo}
+                    onValueChange={(v) => setFormData(prev => ({ ...prev, partida_codigo: v }))}
                   >
                     <SelectTrigger data-testid="budget-partida-select">
                       <SelectValue placeholder="Seleccionar..." />
                     </SelectTrigger>
                     <SelectContent>
                       {partidas.map(p => (
-                        <SelectItem key={p.id} value={p.id}>{p.code} - {p.name}</SelectItem>
+                        <SelectItem key={p.codigo} value={p.codigo}>{p.codigo} - {p.nombre}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -212,7 +222,7 @@ const Budgets = () => {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {[2024, 2025, 2026].map(y => (
+                      {yearOptions.map(y => (
                         <SelectItem key={y} value={String(y)}>{y}</SelectItem>
                       ))}
                     </SelectContent>
@@ -278,6 +288,20 @@ const Budgets = () => {
         <CardContent className="pt-6">
           <div className="flex flex-wrap gap-4">
             <Select
+              value={filters.empresa_id}
+              onValueChange={(v) => setFilters(prev => ({ ...prev, empresa_id: v, project_id: "all" }))}
+            >
+              <SelectTrigger className="w-[220px]">
+                <SelectValue placeholder="Empresa" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Todas las empresas</SelectItem>
+                {empresas.map(e => (
+                  <SelectItem key={e.id} value={e.id}>{e.nombre}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select
               value={filters.project_id}
               onValueChange={(v) => setFilters(prev => ({ ...prev, project_id: v }))}
             >
@@ -314,7 +338,7 @@ const Budgets = () => {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {[2024, 2025, 2026].map(y => (
+                {yearOptions.map(y => (
                   <SelectItem key={y} value={String(y)}>{y}</SelectItem>
                 ))}
               </SelectContent>
@@ -356,9 +380,9 @@ const Budgets = () => {
                       <td>{getProjectName(budget.project_id)}</td>
                       <td>
                         <span className="font-mono text-xs text-muted-foreground mr-2">
-                          {getPartidaCode(budget.partida_id)}
+                          {getPartidaCode(budget.partida_codigo)}
                         </span>
-                        {getPartidaName(budget.partida_id)}
+                        {getPartidaName(budget.partida_codigo)}
                       </td>
                       <td>{months.find(m => m.value === budget.month)?.label} {budget.year}</td>
                       <td className="mono-number">{formatCurrency(budget.amount_mxn)}</td>
@@ -394,6 +418,21 @@ const Budgets = () => {
           )}
         </CardContent>
       </Card>
+
+      {user?.role === "finanzas" && (
+        <Card>
+          <CardHeader><CardTitle className="font-heading text-lg">Solicitudes de presupuesto</CardTitle></CardHeader>
+          <CardContent>
+            {budgetRequests.length === 0 ? <div className="text-sm text-muted-foreground">Sin solicitudes</div> : (
+              <ul className="space-y-2 text-sm">
+                {budgetRequests.map((r) => (
+                  <li key={r.id}>{r.partida_codigo} / {r.year}-{String(r.month).padStart(2, "0")} - ${r.amount_mxn} <span className="text-muted-foreground">({r.status})</span></li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 };

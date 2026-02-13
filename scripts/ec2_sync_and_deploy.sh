@@ -10,6 +10,10 @@ BRANCH="${BRANCH:-main}"
 WEB_URL="${WEB_URL:-http://127.0.0.1:8088}"
 ENABLE_SWAP="${ENABLE_SWAP:-0}"
 MIN_FREE_MB="${MIN_FREE_MB:-350}"
+RESTART_BACKEND="${RESTART_BACKEND:-1}"
+BACKEND_SERVICE_CANDIDATES="${BACKEND_SERVICE_CANDIDATES:-qfinance-backend qfinance-api qfinance finrealty-api}"
+BACKEND_RESTART_COMMAND="${BACKEND_RESTART_COMMAND:-}"
+BACKEND_VERIFY_PATH="${BACKEND_VERIFY_PATH:-/api/auth/change-password}"
 
 run_privileged() {
   if command -v sudo >/dev/null 2>&1; then
@@ -69,6 +73,62 @@ ensure_repo() {
   run_privileged git -C "${EC2_WORK_DIR}" clean -fd
 }
 
+restart_backend_if_available() {
+  [[ "${RESTART_BACKEND}" == "1" ]] || {
+    echo "[INFO] RESTART_BACKEND=0, omitiendo reinicio de backend."
+    return
+  }
+
+  if [[ -n "${BACKEND_RESTART_COMMAND}" ]]; then
+    echo "[INFO] Ejecutando BACKEND_RESTART_COMMAND personalizado..."
+    run_privileged bash -lc "${BACKEND_RESTART_COMMAND}"
+    echo "[OK] BACKEND_RESTART_COMMAND ejecutado."
+    return
+  fi
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "[WARN] systemctl no disponible; omitiendo reinicio de backend."
+    return
+  fi
+
+  local service
+  for service in ${BACKEND_SERVICE_CANDIDATES}; do
+    if run_privileged systemctl list-unit-files --type=service | awk '{print $1}' | grep -qx "${service}.service"; then
+      echo "[INFO] Reiniciando backend service detectado: ${service}.service"
+      run_privileged systemctl restart "${service}.service"
+      run_privileged systemctl is-active --quiet "${service}.service"
+      echo "[OK] Backend reiniciado: ${service}.service"
+      return
+    fi
+  done
+
+  echo "[WARN] No se detectó servicio backend conocido (${BACKEND_SERVICE_CANDIDATES})."
+  echo "[WARN] Si usas otro nombre, exporta BACKEND_SERVICE_CANDIDATES='mi-service'"
+  echo "[WARN] o BACKEND_RESTART_COMMAND='systemctl restart mi-service'."
+}
+
+verify_backend_route() {
+  local openapi
+  openapi="$(curl -fsSL "${WEB_URL}/openapi.json" || true)"
+  if [[ -z "${openapi}" ]]; then
+    openapi="$(curl -fsSL "${WEB_URL}/api/openapi.json" || true)"
+  fi
+
+  if [[ -z "${openapi}" ]]; then
+    echo "[ERROR] No se pudo obtener OpenAPI desde ${WEB_URL} (ni /openapi.json ni /api/openapi.json)." >&2
+    exit 1
+  fi
+
+  if ! printf '%s' "${openapi}" | grep -q "\"${BACKEND_VERIFY_PATH}\""; then
+    echo "[ERROR] Backend no expone ${BACKEND_VERIFY_PATH}." >&2
+    echo "[ERROR] Esto causará 404 en el frontend para rutas nuevas." >&2
+    echo "[ERROR] Revisa nombre del service y define BACKEND_RESTART_COMMAND si aplica." >&2
+    exit 1
+  fi
+
+  echo "[OK] Backend expone ${BACKEND_VERIFY_PATH}."
+}
+
 main() {
   echo "[INFO] Iniciando flujo EC2-first"
   echo "[INFO] EC2_WORK_DIR=${EC2_WORK_DIR} BRANCH=${BRANCH} WEB_URL=${WEB_URL} ENABLE_SWAP=${ENABLE_SWAP} MIN_FREE_MB=${MIN_FREE_MB}"
@@ -80,6 +140,11 @@ main() {
 
   log_space "${EC2_WORK_DIR}"
   assert_space_health "${EC2_WORK_DIR}"
+
+  restart_backend_if_available
+
+  echo "[INFO] Verificando rutas backend disponibles ..."
+  verify_backend_route
 
   echo "[INFO] Ejecutando deploy frontend en EC2 ..."
   run_privileged bash -lc "cd '${EC2_WORK_DIR}' && WEB_URL='${WEB_URL}' ENABLE_SWAP='${ENABLE_SWAP}' bash scripts/deploy_frontend_ec2.sh"
