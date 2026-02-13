@@ -1,3 +1,4 @@
+import { buildYearOptions } from "../lib/yearRange";
 import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "../context/AuthContext";
 import { toast } from "sonner";
@@ -30,6 +31,8 @@ const Authorizations = () => {
     month: 1,
     status: "pending"
   });
+
+  const yearOptions = buildYearOptions();
 
   const months = [
     { value: 1, label: "Enero" }, { value: 2, label: "Febrero" }, { value: 3, label: "Marzo" },
@@ -205,7 +208,7 @@ const Authorizations = () => {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {[2024, 2025, 2026].map(y => (
+                {yearOptions.map(y => (
                   <SelectItem key={y} value={String(y)}>{y}</SelectItem>
                 ))}
               </SelectContent>
