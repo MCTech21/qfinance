@@ -8,6 +8,7 @@ EC2_WORK_DIR="${EC2_WORK_DIR:-/opt/qfinance_git}"
 REPO_URL="${REPO_URL:-git@github.com:MCTech21/qfinance.git}"
 BRANCH="${BRANCH:-main}"
 WEB_URL="${WEB_URL:-http://127.0.0.1:8088}"
+BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:8000}"
 ENABLE_SWAP="${ENABLE_SWAP:-0}"
 MIN_FREE_MB="${MIN_FREE_MB:-350}"
 RESTART_BACKEND="${RESTART_BACKEND:-1}"
@@ -109,13 +110,13 @@ restart_backend_if_available() {
 
 verify_backend_route() {
   local openapi
-  openapi="$(curl -fsSL "${WEB_URL}/openapi.json" || true)"
+  openapi="$(curl -fsSL "${BACKEND_URL}/openapi.json" || true)"
   if [[ -z "${openapi}" ]]; then
-    openapi="$(curl -fsSL "${WEB_URL}/api/openapi.json" || true)"
+    openapi="$(curl -fsSL "${BACKEND_URL}/api/openapi.json" || true)"
   fi
 
   if [[ -z "${openapi}" ]]; then
-    echo "[ERROR] No se pudo obtener OpenAPI desde ${WEB_URL} (ni /openapi.json ni /api/openapi.json)." >&2
+    echo "[ERROR] No se pudo obtener OpenAPI desde ${BACKEND_URL} (ni /openapi.json ni /api/openapi.json)." >&2
     exit 1
   fi
 
@@ -131,7 +132,7 @@ verify_backend_route() {
 
 main() {
   echo "[INFO] Iniciando flujo EC2-first"
-  echo "[INFO] EC2_WORK_DIR=${EC2_WORK_DIR} BRANCH=${BRANCH} WEB_URL=${WEB_URL} ENABLE_SWAP=${ENABLE_SWAP} MIN_FREE_MB=${MIN_FREE_MB}"
+  echo "[INFO] EC2_WORK_DIR=${EC2_WORK_DIR} BRANCH=${BRANCH} WEB_URL=${WEB_URL} BACKEND_URL=${BACKEND_URL} ENABLE_SWAP=${ENABLE_SWAP} MIN_FREE_MB=${MIN_FREE_MB}"
 
   log_space "$(dirname "${EC2_WORK_DIR}")"
   assert_space_health "$(dirname "${EC2_WORK_DIR}")"
