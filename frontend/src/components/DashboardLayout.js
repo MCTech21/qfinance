@@ -32,7 +32,8 @@ const roleLabels = {
   admin: "Administrador",
   finanzas: "Finanzas",
   autorizador: "Autorizador",
-  solo_lectura: "Solo Lectura"
+  solo_lectura: "Solo Lectura",
+  captura_ingresos: "Captura Ingresos"
 };
 
 const DashboardLayout = ({ children }) => {
@@ -47,16 +48,16 @@ const DashboardLayout = ({ children }) => {
   };
 
   const navItems = [
-    { path: "/dashboard", icon: LayoutDashboard, label: "Dashboard", roles: ["admin", "finanzas", "autorizador", "solo_lectura"] },
+    { path: "/dashboard", icon: LayoutDashboard, label: "Dashboard", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos"] },
     { path: "/budgets", icon: Wallet, label: "Presupuestos", roles: ["admin", "finanzas"] },
-    { path: "/movements", icon: ArrowRightLeft, label: "Movimientos", roles: ["admin", "finanzas"] },
+    { path: "/movements", icon: ArrowRightLeft, label: "Movimientos", roles: ["admin", "finanzas", "captura_ingresos"] },
     { path: "/authorizations", icon: CheckSquare, label: "Autorizaciones", roles: ["admin", "autorizador"] },
-    { path: "/reports", icon: BarChart3, label: "Reportes", roles: ["admin", "finanzas", "autorizador", "solo_lectura"] },
-    { path: "/catalogs", icon: FolderOpen, label: "Catálogos", roles: ["admin"] },
+    { path: "/reports", icon: BarChart3, label: "Reportes", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos"] },
+    { path: "/catalogs", icon: FolderOpen, label: "Proveedores", roles: ["admin"] },
     { path: "/users", icon: Users, label: "Usuarios", roles: ["admin"] },
     { path: "/audit", icon: ScrollText, label: "Bitácora", roles: ["admin", "autorizador"] },
     { path: "/admin", icon: Shield, label: "Admin Console", roles: ["admin"] },
-    { path: "/settings", icon: Settings, label: "Configuración", roles: ["admin"] },
+    { path: "/settings", icon: Settings, label: "Mi Cuenta", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos"] },
   ];
 
   const filteredNav = navItems.filter(item => 

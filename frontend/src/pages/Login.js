@@ -16,7 +16,7 @@ const Login = () => {
 
   useEffect(() => {
     if (user) {
-      navigate("/dashboard");
+      navigate(user.must_change_password ? "/force-change-password" : "/dashboard");
     }
   }, [user, navigate]);
 
@@ -25,9 +25,14 @@ const Login = () => {
     setIsLoading(true);
     
     try {
-      await login(email, password);
-      toast.success("Bienvenido al sistema");
-      navigate("/dashboard");
+      const result = await login(email, password);
+      if (result.must_change_password) {
+        toast.warning("Debes cambiar tu contraseña antes de continuar");
+        navigate("/force-change-password");
+      } else {
+        toast.success("Bienvenido al sistema");
+        navigate("/dashboard");
+      }
     } catch (error) {
       const message = error.response?.data?.detail || "Error al iniciar sesión";
       toast.error(message);

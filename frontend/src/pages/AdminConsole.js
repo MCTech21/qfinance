@@ -12,6 +12,9 @@ const entityConfig = {
   usuarios: { label: "Usuarios", fields: ["email", "name", "role", "is_active"] },
 };
 
+
+const userRoleOptions = ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos"];
+
 const AdminConsole = () => {
   const { api } = useAuth();
   const [tab, setTab] = useState("empresas");
@@ -21,6 +24,7 @@ const AdminConsole = () => {
   const [form, setForm] = useState({});
   const [editingId, setEditingId] = useState(null);
   const [postedMovements, setPostedMovements] = useState([]);
+  const [empresasCatalog, setEmpresasCatalog] = useState([]);
 
   const loadRows = useCallback(async () => {
     const response = await api().get(`/admin/catalogs/${tab}`, { params: { include_inactive: includeInactive } });
@@ -30,6 +34,12 @@ const AdminConsole = () => {
   useEffect(() => {
     loadRows().catch(() => toast.error("No se pudo cargar admin"));
   }, [loadRows]);
+
+  useEffect(() => {
+    if (tab === "proyectos") {
+      api().get("/admin/catalogs/empresas", { params: { include_inactive: true } }).then((r) => setEmpresasCatalog(r.data || [])).catch(() => setEmpresasCatalog([]));
+    }
+  }, [api, tab]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return rows;
@@ -105,14 +115,57 @@ const AdminConsole = () => {
       <div className="space-y-3 border border-border rounded-lg p-4">
         <h3 className="font-semibold">{editingId ? "Editar" : "Crear"} {entityConfig[tab].label}</h3>
         <form onSubmit={submit} className="space-y-2">
-          {columns.map((field) => (
-            <Input
-              key={field}
-              placeholder={field}
-              value={form[field] ?? ""}
-              onChange={(e) => setForm((prev) => ({ ...prev, [field]: e.target.value }))}
-            />
-          ))}
+          {columns.map((field) => {
+            if (tab === "proyectos" && field === "empresa_id") {
+              return (
+                <select
+                  key={field}
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  value={form[field] ?? ""}
+                  onChange={(e) => setForm((prev) => ({ ...prev, [field]: e.target.value }))}
+                  required
+                >
+                  <option value="">Selecciona empresa...</option>
+                  {empresasCatalog.map((e) => <option key={e.id} value={e.id}>{e.nombre}</option>)}
+                </select>
+              );
+            }
+
+            if (tab === "usuarios" && field === "role") {
+              return (
+                <select
+                  key={field}
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  value={form[field] ?? "finanzas"}
+                  onChange={(e) => setForm((prev) => ({ ...prev, [field]: e.target.value }))}
+                >
+                  {userRoleOptions.map((role) => <option key={role} value={role}>{role}</option>)}
+                </select>
+              );
+            }
+
+            if (tab === "usuarios" && field === "is_active") {
+              return (
+                <label key={field} className="text-sm flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(form.is_active ?? true)}
+                    onChange={(e) => setForm((prev) => ({ ...prev, is_active: e.target.checked }))}
+                  />
+                  Usuario activo
+                </label>
+              );
+            }
+
+            return (
+              <Input
+                key={field}
+                placeholder={field}
+                value={form[field] ?? ""}
+                onChange={(e) => setForm((prev) => ({ ...prev, [field]: e.target.value }))}
+              />
+            );
+          })}
           {tab === "usuarios" && !editingId && (
             <Input placeholder="password" type="password" value={form.password ?? ""} onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value }))} />
           )}
@@ -146,7 +199,7 @@ const AdminConsole = () => {
                   <td className="max-w-[120px] truncate">{row.id}</td>
                   {columns.map((c) => <td key={c}>{String(row[c] ?? "")}</td>)}
                   <td className="space-x-1 whitespace-nowrap">
-                    <Button size="sm" variant="outline" onClick={() => { setEditingId(row.id); setForm(Object.fromEntries(columns.map((c) => [c, row[c] ?? ""]))); }}>Editar</Button>
+                    <Button size="sm" variant="outline" onClick={() => { setEditingId(row.id); setForm(Object.fromEntries(columns.map((c) => [c, c === "is_active" ? (row[c] !== false) : (row[c] ?? "")]))); }}>Editar</Button>
                     {row.is_active === false
                       ? <Button size="sm" onClick={() => restore(row)}>Restaurar</Button>
                       : <Button size="sm" variant="secondary" onClick={() => softDelete(row)}>Desactivar</Button>
