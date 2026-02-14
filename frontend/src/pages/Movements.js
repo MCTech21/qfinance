@@ -11,6 +11,8 @@ import { Badge } from "../components/ui/badge";
 import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle, Pencil, Trash2 } from "lucide-react";
 import { buildYearOptions } from "../lib/yearRange";
 import { useNavigate } from "react-router-dom";
+import * as XLSX from "xlsx";
+import { saveAs } from "file-saver";
 
 const Movements = () => {
   const { api, user } = useAuth();
@@ -164,6 +166,9 @@ const Movements = () => {
       } else {
         toast.success("Movimiento creado correctamente");
       }
+      if (response.data.receipt_url) {
+        window.open(response.data.receipt_url, "_blank");
+      }
       
       setDialogOpen(false);
       fetchData();
@@ -246,6 +251,33 @@ const Movements = () => {
     return p ? `${p.codigo} - ${p.nombre}` : codigo;
   };
   const getProviderName = (id) => providers.find(p => p.id === id)?.name || "N/A";
+
+  const exportToExcel = () => {
+    const rows = movements.map((mov) => {
+      const project = projects.find((p) => p.id === mov.project_id);
+      const empresa = empresas.find((e) => e.id === project?.empresa_id);
+      return {
+        fecha: mov.date,
+        empresa: empresa?.nombre || project?.empresa_id || "",
+        proyecto: project ? `${project.code} - ${project.name}` : mov.project_id,
+        partida: mov.partida_codigo,
+        proveedor_cliente: mov.provider_id ? getProviderName(mov.provider_id) : (mov.customer_name || mov.client_id || ""),
+        moneda: mov.currency,
+        monto_original: mov.amount_original,
+        tipo_cambio: mov.exchange_rate,
+        monto_mxn: mov.amount_mxn,
+        referencia: mov.reference,
+        descripcion: mov.description || "",
+        estado: mov.status,
+      };
+    });
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
+    const buffer = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+    saveAs(new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), `movimientos_${filters.year}_${filters.month}.xlsx`);
+  };
+
 
   const handleApiError = (error, fallbackMessage) => {
     const status = error?.response?.status;
@@ -454,6 +486,10 @@ const Movements = () => {
           
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild>
+              <Button variant="outline" onClick={exportToExcel}>
+                <FileSpreadsheet className="h-4 w-4 mr-2" />
+                Exportar Excel
+              </Button>
               <Button data-testid="add-movement-btn">
                 <Plus className="h-4 w-4 mr-2" />
                 Nuevo Movimiento

@@ -14,6 +14,7 @@ class FakeCollection:
         for k, v in query.items():
             if isinstance(v, dict):
                 if "$in" in v and row.get(k) not in v["$in"]: return False
+                if "$ne" in v and row.get(k) == v["$ne"]: return False
             elif row.get(k) != v:
                 return False
         return True
@@ -27,6 +28,8 @@ class FakeCollection:
     async def update_one(self, query, update):
         for r in self.rows:
             if self._matches(r, query): r.update(update.get("$set", {}))
+    async def delete_one(self, query):
+        self.rows = [r for r in self.rows if not self._matches(r, query)]
 
 
 class FakeDB:
@@ -134,3 +137,29 @@ def test_update_inventory_endpoint_recalculates_total():
     r = c.put("/api/inventory/inv1", json={"descuento_bonificacion": 1000})
     assert r.status_code == 200
     assert r.json()["precio_total"] == 99000.0
+
+
+def test_clients_list_includes_abonos_and_inventory_clave():
+    c, db = make_client()
+    db.movements.rows.append({"id": "m2", "project_id": "p1", "partida_codigo": "402", "client_id": "cl1", "date": "2026-01-15T00:00:00+00:00", "status": "posted", "amount_mxn": 2500.0})
+    r = c.get("/api/clients")
+    assert r.status_code == 200
+    cl = next(x for x in r.json() if x["id"] == "cl1")
+    assert cl["inventory_clave"] == "L1-M3"
+    assert cl["abonos_total_mxn"] == 2500.0
+
+
+def test_inventory_summary_returns_totals():
+    c, db = make_client()
+    db.inventory_items.rows[0].update({"precio_total": 10000.0})
+    db.clients.rows[0].update({"abonos_total_mxn": 1000.0})
+    r = c.get("/api/inventory/summary")
+    assert r.status_code == 200
+    assert r.json()["valor_total_inventario_mxn"] == 10000.0
+
+
+def test_delete_client_conflict_when_has_movements():
+    c, db = make_client()
+    db.movements.rows.append({"id": "m3", "client_id": "cl1", "status": "posted", "partida_codigo": "402"})
+    r = c.delete("/api/clients/cl1")
+    assert r.status_code == 409
