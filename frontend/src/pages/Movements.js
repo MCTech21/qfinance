@@ -129,6 +129,7 @@ const Movements = () => {
         exchange_rate: parseFloat(formData.exchange_rate),
         provider_id: isIngresoNoProvider ? null : formData.provider_id,
         customer_name: isIngresoNoProvider ? String(formData.customer_name || "").trim() : undefined,
+        client_id: isIngresoNoProvider ? (formData.client_id || undefined) : undefined,
       };
 
       if (isIngresoNoProvider && !payload.customer_name) {
@@ -194,6 +195,8 @@ const Movements = () => {
       partida_codigo: "",
       provider_id: "",
       customer_name: "",
+      client_id: "",
+    client_id: "",
       date: new Date().toISOString().split("T")[0],
       currency: "MXN",
       amount_original: "",
@@ -483,6 +486,12 @@ const Movements = () => {
                 {isIngresoNoProvider ? (
                   <div className="space-y-2">
                     <Label>Cliente</Label>
+                    <Input
+                      value={formData.client_id || ""}
+                      onChange={(e) => setFormData(prev => ({ ...prev, client_id: e.target.value }))}
+                      placeholder="ID Cliente"
+                      required
+                    />
                     <Input
                       value={formData.customer_name || ""}
                       onChange={(e) => setFormData(prev => ({ ...prev, customer_name: e.target.value }))}

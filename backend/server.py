@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
 from typing import List, Optional, Dict, Any
+from decimal import Decimal, InvalidOperation
 import uuid
 from datetime import datetime, timezone, date
 import jwt
@@ -104,6 +105,7 @@ class UserBase(BaseModel):
     email: EmailStr
     name: str
     role: UserRole
+    empresa_id: Optional[str] = None
 
 class UserCreate(UserBase):
     password: str
@@ -137,6 +139,7 @@ class ProjectBase(BaseModel):
     name: str
     empresa_id: str  # OBLIGATORIO - vincula a empresa
     description: Optional[str] = None
+    client_id: Optional[str] = None
     is_active: bool = True
 
 class Project(ProjectBase):
@@ -186,6 +189,15 @@ class BudgetBase(BaseModel):
     year: int
     month: int
     amount_mxn: float
+    notes: Optional[str] = None
+
+
+class BudgetPlanInput(BaseModel):
+    project_id: str
+    partida_codigo: str
+    total: Decimal
+    annual_breakdown: Dict[str, Decimal] = Field(default_factory=dict)
+    monthly_breakdown: Dict[str, Decimal] = Field(default_factory=dict)
     notes: Optional[str] = None
 
 class Budget(BudgetBase):
@@ -239,6 +251,46 @@ class MovementCreate(BaseModel):
     exchange_rate: float
     reference: str
     description: Optional[str] = None
+    client_id: Optional[str] = None
+
+
+class InventoryItemBase(BaseModel):
+    company_id: str
+    project_id: str
+    m2_superficie: Decimal
+    m2_construccion: Optional[Decimal] = Decimal("0")
+    lote_edificio: str
+    manzana_departamento: str
+    precio_m2_superficie: Decimal
+    precio_m2_construccion: Optional[Decimal] = Decimal("0")
+    descuento_bonificacion: Decimal = Decimal("0")
+
+
+class InventoryItem(InventoryItemBase):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    precio_venta: Decimal
+    precio_total: Decimal
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ClientBase(BaseModel):
+    company_id: str
+    project_id: str
+    nombre: str
+    telefono: Optional[str] = None
+    domicilio: Optional[str] = None
+    inventory_item_id: Optional[str] = None
+
+
+class Client(ClientBase):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    precio_venta_snapshot: Decimal = Decimal("0")
+    saldo_restante: Decimal = Decimal("0")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class MovementAdminUpdate(BaseModel):
@@ -348,11 +400,12 @@ def validate_password_policy(password: str):
         raise HTTPException(status_code=422, detail="La nueva contraseña debe contener letras y números")
 
 
-def create_token(user_id: str, email: str, role: str, must_change_password: bool = False) -> str:
+def create_token(user_id: str, email: str, role: str, must_change_password: bool = False, empresa_id: Optional[str] = None) -> str:
     payload = {
         "user_id": user_id,
         "email": email,
         "role": role,
+        "empresa_id": empresa_id,
         "must_change_password": must_change_password,
         "exp": datetime.now(timezone.utc).timestamp() + 86400 * 7
     }
@@ -655,6 +708,109 @@ def requires_budget(budget_code: str) -> bool:
     return (100 <= code <= 199) or (200 <= code <= 299)
 
 
+
+
+def decimal_from_value(value: Any, field_name: str = "value") -> Decimal:
+    try:
+        dec = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        raise HTTPException(status_code=422, detail={"code": "invalid_decimal", "message": f"{field_name} debe ser decimal válido"})
+    return dec
+
+
+def ensure_non_negative(value: Decimal, field_name: str):
+    if value < Decimal("0"):
+        raise HTTPException(status_code=422, detail={"code": "negative_not_allowed", "message": f"{field_name} no puede ser negativo"})
+
+
+def user_company_scope_query(current_user: dict, company_field: str = "company_id") -> dict:
+    role = current_user.get("role")
+    if role in {UserRole.ADMIN.value, UserRole.FINANZAS.value}:
+        return {}
+    company_id = current_user.get("empresa_id")
+    if not company_id:
+        raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
+    return {company_field: company_id}
+
+
+def enforce_company_access(current_user: dict, company_id: Optional[str]):
+    role = current_user.get("role")
+    if role in {UserRole.ADMIN.value, UserRole.FINANZAS.value}:
+        return
+    user_company_id = current_user.get("empresa_id")
+    if not company_id or user_company_id != company_id:
+        raise HTTPException(status_code=403, detail="Acceso restringido a la empresa del usuario")
+
+
+def normalize_budget_breakdown(payload: BudgetPlanInput):
+    total = decimal_from_value(payload.total, "total")
+    ensure_non_negative(total, "total")
+
+    annual = {}
+    monthly = {}
+
+    for y, amount in (payload.annual_breakdown or {}).items():
+        year_str = str(y)
+        year_int = int(year_str)
+        validate_year_in_range(year_int)
+        dec = decimal_from_value(amount, f"annual_breakdown.{year_str}")
+        ensure_non_negative(dec, f"annual_breakdown.{year_str}")
+        annual[year_str] = dec
+
+    for ym, amount in (payload.monthly_breakdown or {}).items():
+        ym_str = str(ym)
+        if len(ym_str) != 7 or ym_str[4] != '-':
+            raise HTTPException(status_code=422, detail={"code": "invalid_month_key", "message": f"Formato inválido para {ym_str}, usa YYYY-MM"})
+        year_str = ym_str[:4]
+        month = int(ym_str[5:7])
+        if month < 1 or month > 12:
+            raise HTTPException(status_code=422, detail={"code": "invalid_month_key", "message": f"Mes inválido en {ym_str}"})
+        validate_year_in_range(int(year_str))
+        dec = decimal_from_value(amount, f"monthly_breakdown.{ym_str}")
+        ensure_non_negative(dec, f"monthly_breakdown.{ym_str}")
+        monthly[ym_str] = dec
+
+    annual_sum = sum(annual.values(), Decimal("0"))
+    monthly_sum = sum(monthly.values(), Decimal("0"))
+
+    if annual_sum > total:
+        raise HTTPException(status_code=422, detail={"code": "annual_sum_exceeds_total", "message": "La suma anual excede el total"})
+
+    if monthly_sum > total:
+        raise HTTPException(status_code=422, detail={"code": "monthly_sum_exceeds_total", "message": "La suma mensual excede el total"})
+
+    monthly_by_year = {}
+    for ym, amount in monthly.items():
+        y = ym[:4]
+        monthly_by_year[y] = monthly_by_year.get(y, Decimal("0")) + amount
+
+    for y, monthly_total in monthly_by_year.items():
+        annual_total = annual.get(y, Decimal("0"))
+        if monthly_total > annual_total:
+            raise HTTPException(status_code=422, detail={"code": "monthly_sum_exceeds_annual", "message": f"La suma mensual de {y} excede el anual"})
+
+    return total, annual, monthly
+
+
+def compute_inventory_totals(payload: InventoryItemBase):
+    m2_superficie = decimal_from_value(payload.m2_superficie, "m2_superficie")
+    m2_construccion = decimal_from_value(payload.m2_construccion or 0, "m2_construccion")
+    precio_m2_superficie = decimal_from_value(payload.precio_m2_superficie, "precio_m2_superficie")
+    precio_m2_construccion = decimal_from_value(payload.precio_m2_construccion or 0, "precio_m2_construccion")
+    descuento = decimal_from_value(payload.descuento_bonificacion or 0, "descuento_bonificacion")
+
+    for name, val in [
+        ("m2_superficie", m2_superficie),
+        ("m2_construccion", m2_construccion),
+        ("precio_m2_superficie", precio_m2_superficie),
+        ("precio_m2_construccion", precio_m2_construccion),
+        ("descuento_bonificacion", descuento),
+    ]:
+        ensure_non_negative(val, name)
+
+    precio_venta = (m2_superficie * precio_m2_superficie) + (m2_construccion * precio_m2_construccion)
+    precio_total = precio_venta - descuento
+    return precio_venta, precio_total
 def normalize_customer_name(name: Optional[str]) -> Optional[str]:
     if name is None:
         return None
@@ -703,7 +859,7 @@ async def login(credentials: UserLogin):
         raise HTTPException(status_code=401, detail="Usuario desactivado")
     
     must_change_password = bool(user_doc.get('must_change_password', False))
-    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'], must_change_password=must_change_password)
+    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'], must_change_password=must_change_password, empresa_id=user_doc.get('empresa_id'))
     user = User(**{k: v for k, v in user_doc.items() if k != 'password_hash'})
     
     # Log successful login
@@ -741,7 +897,7 @@ async def change_password(payload: ChangePasswordRequest, request: Request, curr
     }})
     await log_audit(current_user, "PASSWORD_CHANGED", "users", user_doc["id"], {"source": "settings"}, ip_address=request.client.host if request.client else None)
     fresh = await db.users.find_one({"id": user_doc["id"]}, {"_id": 0})
-    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False)
+    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False, empresa_id=fresh.get("empresa_id"))
     user = User(**{k: v for k, v in fresh.items() if k != "password_hash"})
     return TokenResponse(access_token=token, user=user, must_change_password=False)
 
@@ -764,7 +920,7 @@ async def force_change_password(payload: ForceChangePasswordRequest, request: Re
     }})
     await log_audit(current_user, "PASSWORD_CHANGED", "users", user_doc["id"], {"source": "force_change"}, ip_address=request.client.host if request.client else None)
     fresh = await db.users.find_one({"id": user_doc["id"]}, {"_id": 0})
-    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False)
+    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False, empresa_id=fresh.get("empresa_id"))
     user = User(**{k: v for k, v in fresh.items() if k != "password_hash"})
     return TokenResponse(access_token=token, user=user, must_change_password=False)
 
@@ -1119,6 +1275,33 @@ async def delete_budget(budget_id: str, current_user: dict = Depends(require_per
     })
     return {"message": "Presupuesto eliminado"}
 
+
+
+@api_router.post("/budgets/plan", status_code=201)
+async def create_budget_plan(payload: BudgetPlanInput, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
+    project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+    enforce_company_access(current_user, project.get("empresa_id"))
+    await validate_partida(payload.partida_codigo)
+
+    total, annual, monthly = normalize_budget_breakdown(payload)
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "project_id": payload.project_id,
+        "partida_codigo": payload.partida_codigo,
+        "total": float(total),
+        "annual_breakdown": {k: float(v) for k, v in annual.items()},
+        "monthly_breakdown": {k: float(v) for k, v in monthly.items()},
+        "notes": payload.notes,
+        "created_by": current_user["user_id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.budget_plans.insert_one(doc)
+    await log_audit(current_user, "CREATE", "budget_plans", doc["id"], {"data": doc})
+    return sanitize_mongo_document(doc)
 @api_router.get("/budget-requests")
 async def get_budget_requests(status: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_BUDGETS))):
     query = {}
@@ -1233,11 +1416,23 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     if not project:
         raise HTTPException(status_code=400, detail="Proyecto no válido")
     
+    client_doc = None
     if no_provider_flow:
         if movement_data.provider_id:
             raise HTTPException(status_code=422, detail="Las partidas 402/403 no aceptan proveedor")
-        if not customer_name or len(customer_name) < 3:
-            raise HTTPException(status_code=422, detail="customer_name es obligatorio para partidas 402/403 (mínimo 3 caracteres)")
+        if not movement_data.client_id:
+            raise HTTPException(status_code=422, detail={"code": "client_required_for_partida_402_403", "message": "client_id es obligatorio para partidas 402/403"})
+        client_doc = await db.clients.find_one({"id": movement_data.client_id}, {"_id": 0})
+        if not client_doc:
+            raise HTTPException(status_code=422, detail={"code": "client_not_found", "message": "Cliente no válido"})
+        if not client_doc.get("inventory_item_id"):
+            raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Cliente no tiene inventario ligado"})
+        inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0})
+        if not inventory_item:
+            raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Inventario ligado no encontrado"})
+        enforce_company_access(current_user, client_doc.get("company_id"))
+        customer_name = normalize_customer_name(client_doc.get("nombre"))
+        movement_data.reference = f"{inventory_item.get('lote_edificio','')}-{inventory_item.get('manzana_departamento','')}"
         provider = None
     else:
         provider = await db.providers.find_one({"id": movement_data.provider_id}, {"_id": 0})
@@ -1246,6 +1441,9 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     
     if movement_data.amount_original <= 0:
         raise HTTPException(status_code=400, detail="Monto debe ser mayor a 0")
+
+    if project:
+        enforce_company_access(current_user, project.get("empresa_id"))
     
     # Parse date
     parsed_date = parse_date_tijuana(movement_data.date)
@@ -1314,6 +1512,7 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         exchange_rate=movement_data.exchange_rate,
         amount_mxn=amount_mxn,
         reference=movement_data.reference,
+        client_id=movement_data.client_id if no_provider_flow else None,
         description=movement_data.description,
         created_by=current_user["user_id"],
         status=MovementStatus.PENDING_APPROVAL if requires_auth else MovementStatus.POSTED
@@ -1345,7 +1544,22 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         doc['authorization_id'] = auth.id
     
     await db.movements.insert_one(doc)
-    
+
+    if no_provider_flow and client_doc:
+        saldo_before = decimal_from_value(client_doc.get("saldo_restante", 0), "saldo_restante")
+        monto = decimal_from_value(amount_mxn, "amount_mxn")
+        if monto > saldo_before:
+            raise HTTPException(status_code=422, detail={"code": "payment_exceeds_balance", "message": "El abono excede el saldo restante"})
+        saldo_after = saldo_before - monto
+        await db.clients.update_one({"id": client_doc["id"]}, {"$set": {"saldo_restante": float(saldo_after), "updated_at": datetime.now(timezone.utc).isoformat()}})
+        await log_audit(current_user, "MOVEMENT_402_403_BALANCE", "clients", client_doc["id"], {
+            "movement_id": movement.id,
+            "client_id": client_doc["id"],
+            "inventory_item_id": client_doc.get("inventory_item_id"),
+            "saldo_before": str(saldo_before),
+            "saldo_after": str(saldo_after)
+        })
+
     # Remove MongoDB _id before returning
     doc.pop('_id', None)
     
@@ -1907,7 +2121,7 @@ async def get_dashboard(
     
     # Calculate totals
     total_budget = sum(b['amount_mxn'] for b in budgets)
-    total_real = sum(m['amount_mxn'] for m in movements)
+    total_real = sum(abs(float(m.get('amount_mxn',0))) for m in movements)
     variation = total_budget - total_real
     percentage = (total_real / total_budget * 100) if total_budget > 0 else 0
     
@@ -1923,7 +2137,7 @@ async def get_dashboard(
         key = m.get('partida_codigo', m.get('partida_id', 'N/A'))
         if key not in partidas_data:
             partidas_data[key] = {"budget": 0, "real": 0}
-        partidas_data[key]["real"] += m['amount_mxn']
+        partidas_data[key]["real"] += abs(float(m.get('amount_mxn',0)))
     
     # Get partida names from catalogo
     partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(1000)
@@ -2048,7 +2262,7 @@ async def get_partida_detail(
         if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
     ]
     
-    total_real = sum(m['amount_mxn'] for m in movements)
+    total_real = sum(abs(float(m.get('amount_mxn',0))) for m in movements)
     percentage = (total_real / total_budget * 100) if total_budget > 0 else (100 if total_real > 0 else 0)
     
     # Get provider names
@@ -2120,7 +2334,7 @@ async def get_export_data(
     budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(1000)
     
     # Get movements
-    movement_query = {"status": {"$in": ["normal", "authorized"]}}
+    movement_query = {"status": MovementStatus.POSTED.value}
     if project_id:
         movement_query["project_id"] = project_id
     elif empresa_id:
@@ -2136,7 +2350,7 @@ async def get_export_data(
     
     # Calculate totals
     total_budget = sum(b['amount_mxn'] for b in budgets)
-    total_real = sum(m['amount_mxn'] for m in movements)
+    total_real = sum(abs(float(m.get('amount_mxn',0))) for m in movements)
     variation = total_budget - total_real
     percentage = (total_real / total_budget * 100) if total_budget > 0 else 0
     
@@ -2152,7 +2366,7 @@ async def get_export_data(
         key = m.get('partida_codigo', 'N/A')
         if key not in partidas_data:
             partidas_data[key] = {"budget": 0, "real": 0}
-        partidas_data[key]["real"] += m['amount_mxn']
+        partidas_data[key]["real"] += abs(float(m.get('amount_mxn',0)))
     
     # Get partida info from catalogo
     partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(1000)
@@ -3111,3 +3325,178 @@ async def setup_indexes():
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+
+def _period_match(dt: datetime, year: Optional[int], month: Optional[int], period: str):
+    if period == "total":
+        return True
+    if period == "annual":
+        return dt.year == year
+    if period == "quarterly":
+        if dt.year != year:
+            return False
+        q = ((month or 1) - 1) // 3
+        return ((dt.month - 1) // 3) == q
+    return dt.year == year and dt.month == month
+
+
+async def _dashboard_period_data(current_user: dict, empresa_id: Optional[str], project_id: Optional[str], year: Optional[int], month: Optional[int], period: str):
+    if empresa_id:
+        enforce_company_access(current_user, empresa_id)
+    project_query = {}
+    if empresa_id:
+        project_query["empresa_id"] = empresa_id
+    if project_id:
+        project_query["id"] = project_id
+    projects = await db.projects.find(project_query, {"_id": 0}).to_list(2000)
+    if project_id and not projects:
+        raise HTTPException(status_code=403, detail="Proyecto fuera de alcance")
+    project_ids = [p["id"] for p in projects]
+
+    budget_query = {}
+    if project_ids:
+        budget_query["project_id"] = {"$in": project_ids}
+    budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(5000)
+
+    mov_query = {"status": MovementStatus.POSTED.value}
+    if project_ids:
+        mov_query["project_id"] = {"$in": project_ids}
+    movements = await db.movements.find(movement_active_query(extra=mov_query), {"_id": 0}).to_list(5000)
+
+    by_partida = {}
+    total_budget = 0.0
+    total_real = 0.0
+
+    for b in budgets:
+        y = b.get("year")
+        m = b.get("month")
+        fake_dt = datetime(y, m, 1)
+        if _period_match(fake_dt, year, month, period):
+            key = b.get("partida_codigo")
+            by_partida.setdefault(key, {"partida_codigo": key, "budget": 0.0, "real": 0.0})
+            by_partida[key]["budget"] += float(b.get("amount_mxn", 0))
+            total_budget += float(b.get("amount_mxn", 0))
+
+    for mv in movements:
+        dt = date_parser.parse(mv["date"])
+        if _period_match(dt, year, month, period):
+            key = mv.get("partida_codigo")
+            by_partida.setdefault(key, {"partida_codigo": key, "budget": 0.0, "real": 0.0})
+            by_partida[key]["real"] += float(mv.get("amount_mxn", 0))
+            total_real += float(mv.get("amount_mxn", 0))
+
+    out_partidas = []
+    for _, item in by_partida.items():
+        pct = (item["real"] / item["budget"] * 100) if item["budget"] else (100 if item["real"] else 0)
+        item["percentage"] = pct
+        item["traffic_light"] = get_traffic_light(pct)
+        item["variation"] = item["budget"] - item["real"]
+        out_partidas.append(item)
+
+    pct_total = (total_real / total_budget * 100) if total_budget else 0
+    return {
+        "totals": {
+            "budget": total_budget,
+            "real": total_real,
+            "variation": total_budget - total_real,
+            "percentage": pct_total,
+            "traffic_light": get_traffic_light(pct_total),
+        },
+        "by_partida": sorted(out_partidas, key=lambda x: x["partida_codigo"] or ""),
+        "period": period,
+    }
+
+
+@api_router.get("/dashboard/total")
+async def dashboard_total(empresa_id: Optional[str] = None, project_id: Optional[str] = None, year: Optional[int] = None, month: Optional[int] = None, current_user: dict = Depends(require_permission(Permission.VIEW_DASHBOARD))):
+    return await _dashboard_period_data(current_user, empresa_id, project_id, year, month, "total")
+
+
+@api_router.get("/dashboard/monthly")
+async def dashboard_monthly(empresa_id: Optional[str] = None, project_id: Optional[str] = None, year: Optional[int] = None, month: Optional[int] = None, current_user: dict = Depends(require_permission(Permission.VIEW_DASHBOARD))):
+    now = to_tijuana(datetime.now(timezone.utc))
+    return await _dashboard_period_data(current_user, empresa_id, project_id, year or now.year, month or now.month, "monthly")
+
+
+@api_router.get("/dashboard/quarterly")
+async def dashboard_quarterly(empresa_id: Optional[str] = None, project_id: Optional[str] = None, year: Optional[int] = None, month: Optional[int] = None, current_user: dict = Depends(require_permission(Permission.VIEW_DASHBOARD))):
+    now = to_tijuana(datetime.now(timezone.utc))
+    return await _dashboard_period_data(current_user, empresa_id, project_id, year or now.year, month or now.month, "quarterly")
+
+
+@api_router.get("/dashboard/annual")
+async def dashboard_annual(empresa_id: Optional[str] = None, project_id: Optional[str] = None, year: Optional[int] = None, current_user: dict = Depends(require_permission(Permission.VIEW_DASHBOARD))):
+    now = to_tijuana(datetime.now(timezone.utc))
+    return await _dashboard_period_data(current_user, empresa_id, project_id, year or now.year, 1, "annual")
+
+
+@api_router.post("/inventory", status_code=201)
+async def create_inventory_item(payload: InventoryItemBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    enforce_company_access(current_user, payload.company_id)
+    precio_venta, precio_total = compute_inventory_totals(payload)
+    doc = InventoryItem(**payload.model_dump(), precio_venta=precio_venta, precio_total=precio_total).model_dump()
+    doc["created_at"] = doc["created_at"].isoformat(); doc["updated_at"] = doc["updated_at"].isoformat()
+    for k in ["m2_superficie", "m2_construccion", "precio_m2_superficie", "precio_m2_construccion", "descuento_bonificacion", "precio_venta", "precio_total"]:
+        doc[k] = float(doc[k])
+    await db.inventory_items.insert_one(doc)
+    await log_audit(current_user, "CREATE", "inventory", doc["id"], {"data": doc})
+    return sanitize_mongo_document(doc)
+
+
+@api_router.get("/inventory")
+async def list_inventory(company_id: Optional[str] = None, project_id: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
+    query = {}
+    scope = user_company_scope_query(current_user)
+    query.update(scope)
+    if company_id:
+        enforce_company_access(current_user, company_id)
+        query["company_id"] = company_id
+    if project_id:
+        query["project_id"] = project_id
+    return await db.inventory_items.find(query, {"_id": 0}).to_list(5000)
+
+
+@api_router.post("/clients", status_code=201)
+async def create_client(payload: ClientBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    enforce_company_access(current_user, payload.company_id)
+    nombre = (payload.nombre or "").strip().upper()
+    if not nombre:
+        raise HTTPException(status_code=422, detail="nombre es obligatorio")
+    snapshot = Decimal("0")
+    if payload.inventory_item_id:
+        inventory_item = await db.inventory_items.find_one({"id": payload.inventory_item_id}, {"_id": 0})
+        if not inventory_item:
+            raise HTTPException(status_code=422, detail="inventory_item_id inválido")
+        snapshot = decimal_from_value(inventory_item.get("precio_total", 0), "precio_total")
+    doc = Client(**payload.model_dump(), nombre=nombre, precio_venta_snapshot=snapshot, saldo_restante=snapshot).model_dump()
+    doc["created_at"] = doc["created_at"].isoformat(); doc["updated_at"] = doc["updated_at"].isoformat()
+    doc["precio_venta_snapshot"] = float(doc["precio_venta_snapshot"])
+    doc["saldo_restante"] = float(doc["saldo_restante"])
+    await db.clients.insert_one(doc)
+    await log_audit(current_user, "CREATE", "clients", doc["id"], {"data": doc})
+    return sanitize_mongo_document(doc)
+
+
+@api_router.get("/clients")
+async def list_clients(company_id: Optional[str] = None, project_id: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
+    query = {}
+    query.update(user_company_scope_query(current_user))
+    if company_id:
+        enforce_company_access(current_user, company_id)
+        query["company_id"] = company_id
+    if project_id:
+        query["project_id"] = project_id
+    return await db.clients.find(query, {"_id": 0}).to_list(5000)
+
+
+@api_router.get("/movements/{movement_id}/receipt.pdf")
+async def movement_receipt_pdf(movement_id: str, current_user: dict = Depends(require_permission(Permission.VIEW_MOVEMENTS))):
+    movement = await db.movements.find_one({"id": movement_id}, {"_id": 0})
+    if not movement:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    project = await db.projects.find_one({"id": movement.get("project_id")}, {"_id": 0})
+    if project:
+        enforce_company_access(current_user, project.get("empresa_id"))
+    html = f"Recibo Quantum\nID: {movement.get('id')}\nCliente: {movement.get('customer_name') or movement.get('client_id') or ''}\nProyecto: {project.get('name') if project else ''}\nPartida: {movement.get('partida_codigo')}\nFecha: {movement.get('date')}\nMonto: {movement.get('amount_original')} {movement.get('currency')}\nReferencia: {movement.get('reference')}\nDescripción: {movement.get('description') or ''}\n"
+    await log_audit(current_user, "RECEIPT_PDF", "movements", movement_id, {"reference": movement.get("reference")})
+    return StreamingResponse(io.BytesIO(html.encode("utf-8")), media_type="application/pdf", headers={"Content-Disposition": f"inline; filename=recibo_{movement_id}.pdf"})
