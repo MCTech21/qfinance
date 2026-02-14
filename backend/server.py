@@ -284,6 +284,24 @@ class ClientBase(BaseModel):
     inventory_item_id: Optional[str] = None
 
 
+
+
+class ClientUpdate(BaseModel):
+    nombre: Optional[str] = None
+    telefono: Optional[str] = None
+    domicilio: Optional[str] = None
+    inventory_item_id: Optional[str] = None
+
+
+class InventoryItemUpdate(BaseModel):
+    project_id: Optional[str] = None
+    m2_superficie: Optional[Decimal] = None
+    m2_construccion: Optional[Decimal] = None
+    lote_edificio: Optional[str] = None
+    manzana_departamento: Optional[str] = None
+    precio_m2_superficie: Optional[Decimal] = None
+    precio_m2_construccion: Optional[Decimal] = None
+    descuento_bonificacion: Optional[Decimal] = None
 class Client(ClientBase):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -1432,6 +1450,8 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
             raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Inventario ligado no encontrado"})
         enforce_company_access(current_user, client_doc.get("company_id"))
         customer_name = normalize_customer_name(client_doc.get("nombre"))
+        if not customer_name:
+            raise HTTPException(status_code=422, detail={"code": "client_name_required", "message": "Cliente sin nombre válido"})
         movement_data.reference = f"{inventory_item.get('lote_edificio','')}-{inventory_item.get('manzana_departamento','')}"
         provider = None
     else:
@@ -3489,6 +3509,80 @@ async def list_clients(company_id: Optional[str] = None, project_id: Optional[st
     return await db.clients.find(query, {"_id": 0}).to_list(5000)
 
 
+
+
+@api_router.put("/inventory/{item_id}")
+async def update_inventory_item(item_id: str, payload: InventoryItemUpdate, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    item = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Item de inventario no encontrado")
+    enforce_company_access(current_user, item.get("company_id"))
+
+    merged = {
+        "company_id": item.get("company_id"),
+        "project_id": payload.project_id or item.get("project_id"),
+        "m2_superficie": payload.m2_superficie if payload.m2_superficie is not None else item.get("m2_superficie"),
+        "m2_construccion": payload.m2_construccion if payload.m2_construccion is not None else item.get("m2_construccion", 0),
+        "lote_edificio": payload.lote_edificio if payload.lote_edificio is not None else item.get("lote_edificio"),
+        "manzana_departamento": payload.manzana_departamento if payload.manzana_departamento is not None else item.get("manzana_departamento"),
+        "precio_m2_superficie": payload.precio_m2_superficie if payload.precio_m2_superficie is not None else item.get("precio_m2_superficie"),
+        "precio_m2_construccion": payload.precio_m2_construccion if payload.precio_m2_construccion is not None else item.get("precio_m2_construccion", 0),
+        "descuento_bonificacion": payload.descuento_bonificacion if payload.descuento_bonificacion is not None else item.get("descuento_bonificacion", 0),
+    }
+    base = InventoryItemBase(**merged)
+    precio_venta, precio_total = compute_inventory_totals(base)
+
+    update_data = base.model_dump()
+    update_data["precio_venta"] = float(precio_venta)
+    update_data["precio_total"] = float(precio_total)
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    for k in ["m2_superficie", "m2_construccion", "precio_m2_superficie", "precio_m2_construccion", "descuento_bonificacion"]:
+        update_data[k] = float(update_data[k])
+
+    await db.inventory_items.update_one({"id": item_id}, {"$set": update_data})
+    updated = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
+    await log_audit(current_user, "UPDATE", "inventory", item_id, {"before": item, "after": updated})
+    return sanitize_mongo_document(updated)
+
+
+@api_router.put("/clients/{client_id}")
+async def update_client(client_id: str, payload: ClientUpdate, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    client_doc = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    if not client_doc:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    enforce_company_access(current_user, client_doc.get("company_id"))
+
+    update_data = {}
+    if payload.nombre is not None:
+        nombre = payload.nombre.strip().upper()
+        if not nombre:
+            raise HTTPException(status_code=422, detail="nombre es obligatorio")
+        update_data["nombre"] = nombre
+    if payload.telefono is not None:
+        update_data["telefono"] = payload.telefono
+    if payload.domicilio is not None:
+        update_data["domicilio"] = payload.domicilio
+    if payload.inventory_item_id is not None:
+        if payload.inventory_item_id:
+            inventory_item = await db.inventory_items.find_one({"id": payload.inventory_item_id}, {"_id": 0})
+            if not inventory_item:
+                raise HTTPException(status_code=422, detail="inventory_item_id inválido")
+            update_data["inventory_item_id"] = payload.inventory_item_id
+            snapshot = decimal_from_value(inventory_item.get("precio_total", 0), "precio_total")
+            update_data["precio_venta_snapshot"] = float(snapshot)
+            if decimal_from_value(client_doc.get("saldo_restante", 0), "saldo_restante") <= Decimal("0"):
+                update_data["saldo_restante"] = float(snapshot)
+        else:
+            update_data["inventory_item_id"] = None
+
+    if not update_data:
+        return sanitize_mongo_document(client_doc)
+
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.clients.update_one({"id": client_id}, {"$set": update_data})
+    updated = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    await log_audit(current_user, "UPDATE", "clients", client_id, {"before": client_doc, "after": updated})
+    return sanitize_mongo_document(updated)
 @api_router.get("/movements/{movement_id}/receipt.pdf")
 async def movement_receipt_pdf(movement_id: str, current_user: dict = Depends(require_permission(Permission.VIEW_MOVEMENTS))):
     movement = await db.movements.find_one({"id": movement_id}, {"_id": 0})

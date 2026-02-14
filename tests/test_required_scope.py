@@ -110,3 +110,27 @@ def test_report_export_ejecutado_not_zero_with_egreso():
     r = c.get("/api/reports/export-data", params={"year": 2026, "month": 1})
     assert r.status_code == 200
     assert r.json()["resumen"]["ejecutado"] == 123.0
+
+
+def test_update_client_endpoint_ok():
+    c, db = make_client()
+    r = c.put("/api/clients/cl1", json={"nombre": "maria", "telefono": "555"})
+    assert r.status_code == 200
+    assert r.json()["nombre"] == "MARIA"
+    cl = next(x for x in db.clients.rows if x["id"] == "cl1")
+    assert cl["telefono"] == "555"
+
+
+def test_update_inventory_endpoint_recalculates_total():
+    c, db = make_client()
+    db.inventory_items.rows[0].update({
+        "m2_superficie": 100,
+        "m2_construccion": 0,
+        "precio_m2_superficie": 1000,
+        "precio_m2_construccion": 0,
+        "descuento_bonificacion": 0,
+        "precio_venta": 100000,
+    })
+    r = c.put("/api/inventory/inv1", json={"descuento_bonificacion": 1000})
+    assert r.status_code == 200
+    assert r.json()["precio_total"] == 99000.0
