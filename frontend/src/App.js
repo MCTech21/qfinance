@@ -11,6 +11,8 @@ import Catalogs from "./pages/Catalogs";
 import AuditLog from "./pages/AuditLog";
 import Settings from "./pages/Settings";
 import AdminConsole from "./pages/AdminConsole";
+import Clients from "./pages/Clients";
+import Inventory from "./pages/Inventory";
 import DashboardLayout from "./components/DashboardLayout";
 import ForceChangePassword from "./pages/ForceChangePassword";
 
@@ -83,6 +85,23 @@ function App() {
             </ProtectedRoute>
           } />
           
+
+          <Route path="/clientes" element={
+            <ProtectedRoute allowedRoles={["admin", "finanzas", "captura_ingresos"]}>
+              <DashboardLayout>
+                <Clients />
+              </DashboardLayout>
+            </ProtectedRoute>
+          } />
+
+          <Route path="/inventarios" element={
+            <ProtectedRoute allowedRoles={["admin", "finanzas", "captura_ingresos"]}>
+              <DashboardLayout>
+                <Inventory />
+              </DashboardLayout>
+            </ProtectedRoute>
+          } />
+
           <Route path="/authorizations" element={
             <ProtectedRoute allowedRoles={["admin", "autorizador"]}>
               <DashboardLayout>
