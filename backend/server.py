@@ -3321,7 +3321,6 @@ async def admin_reverse_movement(
 
 
 # Include router
-app.include_router(api_router)
 
 # CORS
 raw_cors_origins = os.environ.get('CORS_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000')
@@ -3594,3 +3593,5 @@ async def movement_receipt_pdf(movement_id: str, current_user: dict = Depends(re
     html = f"Recibo Quantum\nID: {movement.get('id')}\nCliente: {movement.get('customer_name') or movement.get('client_id') or ''}\nProyecto: {project.get('name') if project else ''}\nPartida: {movement.get('partida_codigo')}\nFecha: {movement.get('date')}\nMonto: {movement.get('amount_original')} {movement.get('currency')}\nReferencia: {movement.get('reference')}\nDescripción: {movement.get('description') or ''}\n"
     await log_audit(current_user, "RECEIPT_PDF", "movements", movement_id, {"reference": movement.get("reference")})
     return StreamingResponse(io.BytesIO(html.encode("utf-8")), media_type="application/pdf", headers={"Content-Disposition": f"inline; filename=recibo_{movement_id}.pdf"})
+
+app.include_router(api_router)
