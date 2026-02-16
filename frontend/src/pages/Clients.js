@@ -131,6 +131,18 @@ export default function Clients() {
     }
   };
 
+  // QF FIX: auto-refresh de clientes al volver a la pestaña (abonos/saldo)
+  useEffect(() => {
+    const refresh = () => { try { deleteClient(); } catch (e) {} };
+    const onVis = () => { if (!document.hidden) refresh(); };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
+
   const exportExcel = () => {
     const rows = clients.map((c) => ({
       nombre: c.nombre,
