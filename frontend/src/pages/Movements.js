@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import { toast } from "sonner";
 import { Button } from "../components/ui/button";
@@ -119,6 +119,21 @@ const Movements = () => {
       setClientsLoading(false);
     }
   }, [api, filters]);
+
+  // QF FRONT FIX: load clients for 402/403 => resolve client_id from name
+  useEffect(() => {
+    try {
+      const t = localStorage.getItem("access_token") || localStorage.getItem("token") || localStorage.getItem("jwt") || "";
+      if (!t) return;
+      fetch("/api/clients", { headers: { Authorization: `Bearer ${t}` } })
+        .then(r => r.json())
+        .then(j => {
+          const arr = Array.isArray(j) ? j : (j.items || j.data || j.clients || []);
+          if (Array.isArray(arr)) setClients(arr);
+        })
+        .catch(() => {});
+    } catch (_) {}
+  }, []);
 
   useEffect(() => {
     fetchData();
@@ -982,5 +997,79 @@ const Movements = () => {
     </div>
   );
 };
+
+
+// ---------------- QF FRONT HELPERS (402/403 client_id) ----------------
+function qfNormPartida(m) {
+  const keys = ["partida_codigo","partida","partida_code","partidaCodigo","partidaCode"];
+  for (const k of keys) {
+    const v = m && m[k];
+    if (v === undefined || v === null) continue;
+    const n = parseInt(String(v).trim(), 10);
+    if (!Number.isNaN(n)) return n;
+  }
+  return null;
+}
+function qfIsPosted(m) {
+  const st = m && m.status;
+  if (typeof st === "string" && st.trim().toLowerCase() === "posted") return true;
+  const pb = m && m.posted;
+  return pb === true;
+}
+function qfNeedsClientId(m) {
+  const p = qfNormPartida(m);
+  return p === 402 || p === 403;
+}
+function qfGetClientId(m) {
+  if (!m) return "";
+  if (m.client_id) return String(m.client_id);
+  if (m.clientId) return String(m.clientId);
+  // por si guardan objeto
+  if (m.client && typeof m.client === "object") {
+    if (m.client.id) return String(m.client.id);
+    if (m.client._id) return String(m.client._id);
+  }
+  return "";
+}
+function qfGetClientName(m) {
+  if (!m) return "";
+  const cand = [
+    m.cliente, m.client, m.client_name, m.clientName, m.nombre_cliente,
+    m.cliente_nombre, m.customer, m.customer_name, m.customerName
+  ];
+  for (const v of cand) {
+    if (typeof v === "string" && v.trim().length >= 3) return v.trim();
+    if (v && typeof v === "object") {
+      const nm = v.nombre || v.name;
+      if (typeof nm === "string" && nm.trim().length >= 3) return nm.trim();
+    }
+  }
+  return "";
+}
+function qfResolveClientIdFromName(m, clients) {
+  const name = qfGetClientName(m);
+  if (!name || !Array.isArray(clients) || clients.length === 0) return "";
+  const norm = (x) => String(x || "").trim().toLowerCase().replace(/\s+/g," ");
+  const target = norm(name);
+  const hits = clients.filter(c => target && (norm(c.nombre || c.name) === target));
+  if (hits.length === 1) return String(hits[0].id || hits[0]._id || "");
+  return "";
+}
+function prepareMovementPayload(payload, clients) {
+  const p = payload && typeof payload === "object" ? { ...payload } : {};
+  const need = qfNeedsClientId(p) && qfIsPosted(p);
+  if (!need) return p;
+
+  let cid = qfGetClientId(p);
+  if (!cid) cid = qfResolveClientIdFromName(p, clients);
+
+  if (cid) {
+    p.client_id = cid;
+    p.clientId = cid;
+  }
+  return p;
+}
+// ---------------- /QF FRONT HELPERS ----------------
+
 
 export default Movements;
