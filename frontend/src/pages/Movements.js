@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, {useCallback, useEffect, useRef, useState} from "react";
+
 import { useAuth } from "../context/AuthContext";
 import { toast } from "sonner";
 import { Button } from "../components/ui/button";
@@ -416,6 +417,18 @@ const Movements = () => {
       setIsDeleteSaving(false);
     }
   };
+
+  // QF FIX: clients auto refresh
+  // - refresca al entrar a la página
+  // - refresca al volver a la pestaña (focus)
+  // - refresca cada 8s para que los saldos se actualicen sin recargar manual
+  React.useEffect(() => {
+    try { fetchClients && fetchClients(); } catch (e) {}
+    const onFocus = () => { try { fetchClients && fetchClients(); } catch (e) {} };
+    window.addEventListener('focus', onFocus);
+    const t = setInterval(() => { try { fetchClients && fetchClients(); } catch (e) {} }, 8000);
+    return () => { window.removeEventListener('focus', onFocus); clearInterval(t); };
+  }, []);
 
   return (
     <div className="space-y-6" data-testid="movements-page">
