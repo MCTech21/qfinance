@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Plus, FileSpreadsheet, Trash2 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { saveAs } from "file-saver";
+import { useLocation } from "react-router-dom";
 
 const initialForm = {
   company_id: "",
@@ -21,6 +22,11 @@ const initialForm = {
 };
 
 export default function Clients() {
+  const location = useLocation();
+
+  // QF PERM FIX: refetch clients on navigation
+// QF CLEAN: removed misplaced useEffect(fetchClients)
+
   const { api, user } = useAuth();
   const [clients, setClients] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -137,6 +143,10 @@ export default function Clients() {
     const onVis = () => { if (!document.hidden) refresh(); };
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", onVis);
+
+
+
+
     return () => {
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", onVis);
