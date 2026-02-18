@@ -2160,6 +2160,8 @@ async def resolve_authorization(
             {"$set": {"status": new_status.value}}
         )
         movement = await db.movements.find_one({"id": auth['movement_id']}, {"_id": 0})
+        if movement and movement_counts_as_abono_doc(movement):
+            await recalc_client_financials(movement.get("client_id"))
     
     # Detailed audit log for approve/reject
     await log_audit(current_user, f"AUTH_{resolution.status.value.upper()}", "authorizations", auth_id, {
@@ -3604,21 +3606,39 @@ async def list_inventory(company_id: Optional[str] = None, project_id: Optional[
 @api_router.post("/clients", status_code=201)
 async def create_client(payload: ClientBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
     enforce_company_access(current_user, payload.company_id)
+    project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=422, detail="project_id inválido")
+    if project.get("empresa_id") != payload.company_id:
+        raise HTTPException(status_code=422, detail="project_id no pertenece a company_id")
+
     nombre = (payload.nombre or "").strip().upper()
     if not nombre:
         raise HTTPException(status_code=422, detail="nombre es obligatorio")
+
     snapshot = Decimal("0")
     if payload.inventory_item_id:
         inventory_item = await db.inventory_items.find_one({"id": payload.inventory_item_id}, {"_id": 0})
         if not inventory_item:
             raise HTTPException(status_code=422, detail="inventory_item_id inválido")
+        if inventory_item.get("company_id") != payload.company_id:
+            raise HTTPException(status_code=422, detail="inventory_item_id no pertenece a la empresa seleccionada")
+        if inventory_item.get("project_id") != payload.project_id:
+            raise HTTPException(status_code=422, detail="inventory_item_id no pertenece al proyecto seleccionado")
+        existing_for_inventory = await db.clients.find_one({"inventory_item_id": payload.inventory_item_id}, {"_id": 0})
+        if existing_for_inventory:
+            raise HTTPException(status_code=409, detail="El inventario seleccionado ya está ligado a otro cliente")
         snapshot = decimal_from_value(inventory_item.get("precio_total", 0), "precio_total")
+
     doc = Client(**payload.model_dump(), nombre=nombre, precio_venta_snapshot=snapshot, saldo_restante=snapshot).model_dump()
     doc["created_at"] = doc["created_at"].isoformat(); doc["updated_at"] = doc["updated_at"].isoformat()
     doc["precio_venta_snapshot"] = float(doc["precio_venta_snapshot"])
     doc["abonos_total_mxn"] = 0.0
     doc["saldo_restante"] = float(doc["saldo_restante"])
-    await db.clients.insert_one(doc)
+    try:
+        await db.clients.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Conflicto al crear cliente (revisa inventario ligado o datos duplicados)")
     await log_audit(current_user, "CREATE", "clients", doc["id"], {"data": doc})
     return sanitize_mongo_document(doc)
 

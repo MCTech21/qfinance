@@ -308,6 +308,7 @@ const Movements = () => {
       project_id: movement?.project_id || "",
       partida_codigo: movement?.partida_codigo || "",
       provider_id: movement?.provider_id || "",
+      client_id: movement?.client_id || "",
       customer_name: movement?.customer_name || "",
       date: dateValue,
       currency: movement?.currency || "MXN",
@@ -329,6 +330,11 @@ const Movements = () => {
   };
 
   const isEditIngresoNoProvider = ["402", "403"].includes(String(editFormData.partida_codigo || ""));
+  const editMovementClients = clients.filter((c) => {
+    if (editFormData.project_id) return c.project_id === editFormData.project_id;
+    return true;
+  });
+
 
   const handleEditMovement = async (e) => {
     e.preventDefault();
@@ -342,12 +348,13 @@ const Movements = () => {
       amount_original: parseFloat(editFormData.amount_original),
       exchange_rate: parseFloat(editFormData.exchange_rate),
       provider_id: isEditIngresoNoProvider ? null : editFormData.provider_id,
-      customer_name: isEditIngresoNoProvider ? String(editFormData.customer_name || "").trim() : undefined,
+      client_id: isEditIngresoNoProvider ? (editFormData.client_id || undefined) : undefined,
+      customer_name: undefined,
       reason: editReason.trim(),
     };
 
-    if (isEditIngresoNoProvider && !payload.customer_name) {
-      toast.error("Nombre del cliente es obligatorio para partidas 402/403");
+    if (isEditIngresoNoProvider && !payload.client_id) {
+      toast.error("Cliente es obligatorio para partidas 402/403");
       return;
     }
 
@@ -494,6 +501,10 @@ const Movements = () => {
               <Button variant="outline" onClick={exportToExcel}>
                 <FileSpreadsheet className="h-4 w-4 mr-2" />
                 Exportar Excel
+              </Button>
+              <Button data-testid="add-movement-btn">
+                <Plus className="h-4 w-4 mr-2" />
+                Nuevo Movimiento
               </Button>
               <Button data-testid="add-movement-btn">
                               <Plus className="h-4 w-4 mr-2" />
@@ -716,7 +727,17 @@ const Movements = () => {
                 {isEditIngresoNoProvider ? (
                   <div className="space-y-2">
                     <Label>Cliente</Label>
-                    <Input value={editFormData.customer_name || ""} onChange={(e) => setEditFormData(prev => ({ ...prev, customer_name: e.target.value }))} placeholder="Nombre del cliente" required />
+                    <Select value={editFormData.client_id || ""} onValueChange={(v) => {
+                      const selected = clients.find((c) => c.id === v);
+                      setEditFormData((prev) => ({ ...prev, client_id: v, customer_name: selected?.nombre || "" }));
+                    }}>
+                      <SelectTrigger><SelectValue placeholder="Selecciona cliente" /></SelectTrigger>
+                      <SelectContent>
+                        {editMovementClients.map((client) => (
+                          <SelectItem key={client.id} value={client.id}>{client.nombre}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 ) : (
                   <div className="space-y-2">

@@ -163,3 +163,39 @@ def test_delete_client_conflict_when_has_movements():
     db.movements.rows.append({"id": "m3", "client_id": "cl1", "status": "posted", "partida_codigo": "402"})
     r = c.delete("/api/clients/cl1")
     assert r.status_code == 409
+
+
+def test_create_client_conflict_when_inventory_already_linked():
+    c, _ = make_client()
+    payload = {
+        "company_id": "c1",
+        "project_id": "p1",
+        "nombre": "MARIA",
+        "telefono": "555",
+        "domicilio": "X",
+        "inventory_item_id": "inv1",
+    }
+    r = c.post("/api/clients", json=payload)
+    assert r.status_code == 409
+
+
+def test_authorization_approval_recalculates_client_abonos():
+    c, db = make_client()
+    db.clients.rows[0].update({"precio_venta_snapshot": 100000.0, "abonos_total_mxn": 0.0, "saldo_restante": 100000.0})
+    db.movements.rows.append({
+        "id": "m-auth-1",
+        "project_id": "p1",
+        "partida_codigo": "402",
+        "client_id": "cl1",
+        "status": "pending_approval",
+        "amount_mxn": 17500.0,
+        "date": "2026-02-18T00:00:00+00:00",
+    })
+    db.authorizations.rows.append({"id": "a1", "status": "pending", "movement_id": "m-auth-1"})
+
+    r = c.put("/api/authorizations/a1", json={"status": "approved"})
+    assert r.status_code == 200
+
+    cl = next(x for x in db.clients.rows if x["id"] == "cl1")
+    assert cl["abonos_total_mxn"] == 17500.0
+    assert cl["saldo_restante"] == 82500.0
