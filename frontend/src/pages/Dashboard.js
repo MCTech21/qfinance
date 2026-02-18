@@ -20,6 +20,7 @@ const Dashboard = () => {
   const [selectedProject, setSelectedProject] = useState("all");
   const [selectedYear, setSelectedYear] = useState(2025);
   const [selectedMonth, setSelectedMonth] = useState(1);
+  const [selectedPeriod, setSelectedPeriod] = useState("monthly");
   const [isLoading, setIsLoading] = useState(true);
   const [chartsReady, setChartsReady] = useState(false);
 
@@ -40,8 +41,9 @@ const Dashboard = () => {
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
+      const endpointByPeriod = { total: "/dashboard/total", monthly: "/dashboard/monthly", quarterly: "/dashboard/quarterly", annual: "/dashboard/annual" };
       const [dashboardRes, empresasRes, projectsRes] = await Promise.all([
-        api().get("/reports/dashboard", {
+        api().get(endpointByPeriod[selectedPeriod] || "/dashboard/monthly", {
           params: {
             empresa_id: selectedEmpresa !== "all" ? selectedEmpresa : undefined,
             project_id: selectedProject !== "all" ? selectedProject : undefined,
@@ -60,7 +62,7 @@ const Dashboard = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [api, selectedEmpresa, selectedProject, selectedYear, selectedMonth]);
+  }, [api, selectedEmpresa, selectedProject, selectedYear, selectedMonth, selectedPeriod]);
 
   useEffect(() => {
     fetchData();
@@ -140,6 +142,19 @@ const Dashboard = () => {
             </SelectContent>
           </Select>
           
+
+          <Select value={selectedPeriod} onValueChange={setSelectedPeriod}>
+            <SelectTrigger className="w-[150px]" data-testid="filter-period">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="total">TODO</SelectItem>
+              <SelectItem value="monthly">Mensual</SelectItem>
+              <SelectItem value="quarterly">Trimestral</SelectItem>
+              <SelectItem value="annual">Anual</SelectItem>
+            </SelectContent>
+          </Select>
+
           <Select value={String(selectedMonth)} onValueChange={(v) => setSelectedMonth(Number(v))}>
             <SelectTrigger className="w-[140px]" data-testid="filter-month">
               <SelectValue />

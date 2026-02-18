@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
 from typing import List, Optional, Dict, Any
+from decimal import Decimal, InvalidOperation
 import uuid
 from datetime import datetime, timezone, date
 import jwt
@@ -104,6 +105,7 @@ class UserBase(BaseModel):
     email: EmailStr
     name: str
     role: UserRole
+    empresa_id: Optional[str] = None
 
 class UserCreate(UserBase):
     password: str
@@ -137,6 +139,7 @@ class ProjectBase(BaseModel):
     name: str
     empresa_id: str  # OBLIGATORIO - vincula a empresa
     description: Optional[str] = None
+    client_id: Optional[str] = None
     is_active: bool = True
 
 class Project(ProjectBase):
@@ -186,6 +189,15 @@ class BudgetBase(BaseModel):
     year: int
     month: int
     amount_mxn: float
+    notes: Optional[str] = None
+
+
+class BudgetPlanInput(BaseModel):
+    project_id: str
+    partida_codigo: str
+    total: Decimal
+    annual_breakdown: Dict[str, Decimal] = Field(default_factory=dict)
+    monthly_breakdown: Dict[str, Decimal] = Field(default_factory=dict)
     notes: Optional[str] = None
 
 class Budget(BudgetBase):
@@ -239,6 +251,64 @@ class MovementCreate(BaseModel):
     exchange_rate: float
     reference: str
     description: Optional[str] = None
+    client_id: Optional[str] = None
+
+
+class InventoryItemBase(BaseModel):
+    company_id: str
+    project_id: str
+    m2_superficie: Decimal
+    m2_construccion: Optional[Decimal] = Decimal("0")
+    lote_edificio: str
+    manzana_departamento: str
+    precio_m2_superficie: Decimal
+    precio_m2_construccion: Optional[Decimal] = Decimal("0")
+    descuento_bonificacion: Decimal = Decimal("0")
+
+
+class InventoryItem(InventoryItemBase):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    precio_venta: Decimal
+    precio_total: Decimal
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ClientBase(BaseModel):
+    company_id: str
+    project_id: str
+    nombre: str
+    telefono: Optional[str] = None
+    domicilio: Optional[str] = None
+    inventory_item_id: Optional[str] = None
+
+
+
+
+class ClientUpdate(BaseModel):
+    nombre: Optional[str] = None
+    telefono: Optional[str] = None
+    domicilio: Optional[str] = None
+    inventory_item_id: Optional[str] = None
+
+
+class InventoryItemUpdate(BaseModel):
+    project_id: Optional[str] = None
+    m2_superficie: Optional[Decimal] = None
+    m2_construccion: Optional[Decimal] = None
+    lote_edificio: Optional[str] = None
+    manzana_departamento: Optional[str] = None
+    precio_m2_superficie: Optional[Decimal] = None
+    precio_m2_construccion: Optional[Decimal] = None
+    descuento_bonificacion: Optional[Decimal] = None
+class Client(ClientBase):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    precio_venta_snapshot: Decimal = Decimal("0")
+    saldo_restante: Decimal = Decimal("0")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class MovementAdminUpdate(BaseModel):
@@ -348,11 +418,12 @@ def validate_password_policy(password: str):
         raise HTTPException(status_code=422, detail="La nueva contraseña debe contener letras y números")
 
 
-def create_token(user_id: str, email: str, role: str, must_change_password: bool = False) -> str:
+def create_token(user_id: str, email: str, role: str, must_change_password: bool = False, empresa_id: Optional[str] = None) -> str:
     payload = {
         "user_id": user_id,
         "email": email,
         "role": role,
+        "empresa_id": empresa_id,
         "must_change_password": must_change_password,
         "exp": datetime.now(timezone.utc).timestamp() + 86400 * 7
     }
@@ -655,11 +726,213 @@ def requires_budget(budget_code: str) -> bool:
     return (100 <= code <= 199) or (200 <= code <= 299)
 
 
+
+
+def decimal_from_value(value: Any, field_name: str = "value") -> Decimal:
+    try:
+        dec = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        raise HTTPException(status_code=422, detail={"code": "invalid_decimal", "message": f"{field_name} debe ser decimal válido"})
+    return dec
+
+
+def ensure_non_negative(value: Decimal, field_name: str):
+    if value < Decimal("0"):
+        raise HTTPException(status_code=422, detail={"code": "negative_not_allowed", "message": f"{field_name} no puede ser negativo"})
+
+
+def user_company_scope_query(current_user: dict, company_field: str = "company_id") -> dict:
+    role = current_user.get("role")
+    if role in {UserRole.ADMIN.value, UserRole.FINANZAS.value}:
+        return {}
+    company_id = current_user.get("empresa_id")
+    if not company_id:
+        raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
+    return {company_field: company_id}
+
+
+def enforce_company_access(current_user: dict, company_id: Optional[str]):
+    role = current_user.get("role")
+    if role in {UserRole.ADMIN.value, UserRole.FINANZAS.value}:
+        return
+    user_company_id = current_user.get("empresa_id")
+    if not company_id or user_company_id != company_id:
+        raise HTTPException(status_code=403, detail="Acceso restringido a la empresa del usuario")
+
+
+def normalize_budget_breakdown(payload: BudgetPlanInput):
+    total = decimal_from_value(payload.total, "total")
+    ensure_non_negative(total, "total")
+
+    annual = {}
+    monthly = {}
+
+    for y, amount in (payload.annual_breakdown or {}).items():
+        year_str = str(y)
+        year_int = int(year_str)
+        validate_year_in_range(year_int)
+        dec = decimal_from_value(amount, f"annual_breakdown.{year_str}")
+        ensure_non_negative(dec, f"annual_breakdown.{year_str}")
+        annual[year_str] = dec
+
+    for ym, amount in (payload.monthly_breakdown or {}).items():
+        ym_str = str(ym)
+        if len(ym_str) != 7 or ym_str[4] != '-':
+            raise HTTPException(status_code=422, detail={"code": "invalid_month_key", "message": f"Formato inválido para {ym_str}, usa YYYY-MM"})
+        year_str = ym_str[:4]
+        month = int(ym_str[5:7])
+        if month < 1 or month > 12:
+            raise HTTPException(status_code=422, detail={"code": "invalid_month_key", "message": f"Mes inválido en {ym_str}"})
+        validate_year_in_range(int(year_str))
+        dec = decimal_from_value(amount, f"monthly_breakdown.{ym_str}")
+        ensure_non_negative(dec, f"monthly_breakdown.{ym_str}")
+        monthly[ym_str] = dec
+
+    annual_sum = sum(annual.values(), Decimal("0"))
+    monthly_sum = sum(monthly.values(), Decimal("0"))
+
+    if annual_sum > total:
+        raise HTTPException(status_code=422, detail={"code": "annual_sum_exceeds_total", "message": "La suma anual excede el total"})
+
+    if monthly_sum > total:
+        raise HTTPException(status_code=422, detail={"code": "monthly_sum_exceeds_total", "message": "La suma mensual excede el total"})
+
+    monthly_by_year = {}
+    for ym, amount in monthly.items():
+        y = ym[:4]
+        monthly_by_year[y] = monthly_by_year.get(y, Decimal("0")) + amount
+
+    for y, monthly_total in monthly_by_year.items():
+        annual_total = annual.get(y, Decimal("0"))
+        if monthly_total > annual_total:
+            raise HTTPException(status_code=422, detail={"code": "monthly_sum_exceeds_annual", "message": f"La suma mensual de {y} excede el anual"})
+
+    return total, annual, monthly
+
+
+def compute_inventory_totals(payload: InventoryItemBase):
+    m2_superficie = decimal_from_value(payload.m2_superficie, "m2_superficie")
+    m2_construccion = decimal_from_value(payload.m2_construccion or 0, "m2_construccion")
+    precio_m2_superficie = decimal_from_value(payload.precio_m2_superficie, "precio_m2_superficie")
+    precio_m2_construccion = decimal_from_value(payload.precio_m2_construccion or 0, "precio_m2_construccion")
+    descuento = decimal_from_value(payload.descuento_bonificacion or 0, "descuento_bonificacion")
+
+    for name, val in [
+        ("m2_superficie", m2_superficie),
+        ("m2_construccion", m2_construccion),
+        ("precio_m2_superficie", precio_m2_superficie),
+        ("precio_m2_construccion", precio_m2_construccion),
+        ("descuento_bonificacion", descuento),
+    ]:
+        ensure_non_negative(val, name)
+
+    precio_venta = (m2_superficie * precio_m2_superficie) + (m2_construccion * precio_m2_construccion)
+    precio_total = precio_venta - descuento
+    return precio_venta, precio_total
 def normalize_customer_name(name: Optional[str]) -> Optional[str]:
     if name is None:
         return None
     normalized = name.strip()
     return normalized or None
+
+
+ABONO_PARTIDAS = {"402", "403"}
+
+def movement_counts_as_abono_doc(movement: dict) -> bool:
+    if not movement:
+        return False
+    if movement.get("is_deleted") is True:
+        return False
+    if str(movement.get("partida_codigo")) not in ABONO_PARTIDAS:
+        return False
+    if movement.get("status") != MovementStatus.POSTED.value:
+        return False
+    return bool(movement.get("client_id"))
+
+
+def get_inventory_clave(item: Optional[dict]) -> Optional[str]:
+    if not item:
+        return None
+    lote = (item.get("lote_edificio") or "").strip()
+    manzana = (item.get("manzana_departamento") or "").strip()
+    if lote and manzana:
+        return f"{lote}-{manzana}"
+    return lote or manzana or None
+
+
+async def recalc_client_financials(client_id: str):
+    client_doc = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    if not client_doc:
+        return None
+    movements = await db.movements.find(movement_active_query(extra={"client_id": client_id, "status": MovementStatus.POSTED.value, "partida_codigo": {"$in": list(ABONO_PARTIDAS)}}), {"_id": 0}).to_list(5000)
+    abonos_total = sum(decimal_from_value(m.get("amount_mxn", 0), "amount_mxn") for m in movements)
+    valor_total = decimal_from_value(client_doc.get("precio_venta_snapshot", 0), "precio_venta_snapshot")
+    saldo = valor_total - abonos_total
+    if saldo < Decimal("0"):
+        saldo = Decimal("0")
+    update = {
+        "abonos_total_mxn": float(abonos_total),
+        "saldo_restante": float(saldo),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.clients.update_one({"id": client_id}, {"$set": update})
+    updated = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    return updated
+
+
+async def validate_client_abono_limit(client_id: str, delta_amount_mxn: Decimal, exclude_movement_id: Optional[str] = None):
+    client_doc = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    if not client_doc:
+        raise HTTPException(status_code=422, detail={"code": "client_not_found", "message": "Cliente no válido"})
+    valor_total = decimal_from_value(client_doc.get("precio_venta_snapshot", 0), "precio_venta_snapshot")
+    query = {"client_id": client_id, "status": MovementStatus.POSTED.value, "partida_codigo": {"$in": list(ABONO_PARTIDAS)}}
+    movements = await db.movements.find(movement_active_query(extra=query), {"_id": 0}).to_list(5000)
+    abonos_total = Decimal("0")
+    for mov in movements:
+        if exclude_movement_id and mov.get("id") == exclude_movement_id:
+            continue
+        abonos_total += decimal_from_value(mov.get("amount_mxn", 0), "amount_mxn")
+    projected = abonos_total + delta_amount_mxn
+    if projected > valor_total:
+        raise HTTPException(status_code=422, detail={"code": "payment_exceeds_balance", "message": "El abono excede el saldo restante"})
+
+
+def render_basic_pdf(lines: List[str]) -> bytes:
+    safe_lines = []
+    for line in lines:
+        safe = str(line).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        safe_lines.append(safe)
+    content_lines = ["BT", "/F1 11 Tf", "50 780 Td"]
+    first = True
+    for line in safe_lines:
+        if first:
+            content_lines.append(f"({line}) Tj")
+            first = False
+        else:
+            content_lines.append("0 -16 Td")
+            content_lines.append(f"({line}) Tj")
+    content_lines.append("ET")
+    stream = "\n".join(content_lines).encode("latin-1", errors="replace")
+
+    objects = []
+    objects.append(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+    objects.append(b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n")
+    objects.append(b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n")
+    objects.append(b"4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n")
+    objects.append(f"5 0 obj << /Length {len(stream)} >> stream\n".encode("latin-1") + stream + b"\nendstream endobj\n")
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(pdf))
+        pdf.extend(obj)
+    xref_start = len(pdf)
+    pdf.extend(f"xref\n0 {len(offsets)}\n".encode("latin-1"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        pdf.extend(f"{off:010d} 00000 n \n".encode("latin-1"))
+    pdf.extend(f"trailer << /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode("latin-1"))
+    return bytes(pdf)
 
 # ========================= AUTH ROUTES =========================
 @api_router.post("/auth/register", response_model=User)
@@ -703,7 +976,7 @@ async def login(credentials: UserLogin):
         raise HTTPException(status_code=401, detail="Usuario desactivado")
     
     must_change_password = bool(user_doc.get('must_change_password', False))
-    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'], must_change_password=must_change_password)
+    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'], must_change_password=must_change_password, empresa_id=user_doc.get('empresa_id'))
     user = User(**{k: v for k, v in user_doc.items() if k != 'password_hash'})
     
     # Log successful login
@@ -741,7 +1014,7 @@ async def change_password(payload: ChangePasswordRequest, request: Request, curr
     }})
     await log_audit(current_user, "PASSWORD_CHANGED", "users", user_doc["id"], {"source": "settings"}, ip_address=request.client.host if request.client else None)
     fresh = await db.users.find_one({"id": user_doc["id"]}, {"_id": 0})
-    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False)
+    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False, empresa_id=fresh.get("empresa_id"))
     user = User(**{k: v for k, v in fresh.items() if k != "password_hash"})
     return TokenResponse(access_token=token, user=user, must_change_password=False)
 
@@ -764,7 +1037,7 @@ async def force_change_password(payload: ForceChangePasswordRequest, request: Re
     }})
     await log_audit(current_user, "PASSWORD_CHANGED", "users", user_doc["id"], {"source": "force_change"}, ip_address=request.client.host if request.client else None)
     fresh = await db.users.find_one({"id": user_doc["id"]}, {"_id": 0})
-    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False)
+    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False, empresa_id=fresh.get("empresa_id"))
     user = User(**{k: v for k, v in fresh.items() if k != "password_hash"})
     return TokenResponse(access_token=token, user=user, must_change_password=False)
 
@@ -1119,6 +1392,33 @@ async def delete_budget(budget_id: str, current_user: dict = Depends(require_per
     })
     return {"message": "Presupuesto eliminado"}
 
+
+
+@api_router.post("/budgets/plan", status_code=201)
+async def create_budget_plan(payload: BudgetPlanInput, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
+    project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+    enforce_company_access(current_user, project.get("empresa_id"))
+    await validate_partida(payload.partida_codigo)
+
+    total, annual, monthly = normalize_budget_breakdown(payload)
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "project_id": payload.project_id,
+        "partida_codigo": payload.partida_codigo,
+        "total": float(total),
+        "annual_breakdown": {k: float(v) for k, v in annual.items()},
+        "monthly_breakdown": {k: float(v) for k, v in monthly.items()},
+        "notes": payload.notes,
+        "created_by": current_user["user_id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.budget_plans.insert_one(doc)
+    await log_audit(current_user, "CREATE", "budget_plans", doc["id"], {"data": doc})
+    return sanitize_mongo_document(doc)
 @api_router.get("/budget-requests")
 async def get_budget_requests(status: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_BUDGETS))):
     query = {}
@@ -1233,11 +1533,25 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     if not project:
         raise HTTPException(status_code=400, detail="Proyecto no válido")
     
+    client_doc = None
     if no_provider_flow:
         if movement_data.provider_id:
             raise HTTPException(status_code=422, detail="Las partidas 402/403 no aceptan proveedor")
-        if not customer_name or len(customer_name) < 3:
-            raise HTTPException(status_code=422, detail="customer_name es obligatorio para partidas 402/403 (mínimo 3 caracteres)")
+        if not movement_data.client_id:
+            raise HTTPException(status_code=422, detail={"code": "client_required_for_partida_402_403", "message": "client_id es obligatorio para partidas 402/403"})
+        client_doc = await db.clients.find_one({"id": movement_data.client_id}, {"_id": 0})
+        if not client_doc:
+            raise HTTPException(status_code=422, detail={"code": "client_not_found", "message": "Cliente no válido"})
+        if not client_doc.get("inventory_item_id"):
+            raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Cliente no tiene inventario ligado"})
+        inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0})
+        if not inventory_item:
+            raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Inventario ligado no encontrado"})
+        enforce_company_access(current_user, client_doc.get("company_id"))
+        customer_name = normalize_customer_name(client_doc.get("nombre"))
+        if not customer_name:
+            raise HTTPException(status_code=422, detail={"code": "client_name_required", "message": "Cliente sin nombre válido"})
+        movement_data.reference = f"{inventory_item.get('lote_edificio','')}-{inventory_item.get('manzana_departamento','')}"
         provider = None
     else:
         provider = await db.providers.find_one({"id": movement_data.provider_id}, {"_id": 0})
@@ -1246,11 +1560,17 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     
     if movement_data.amount_original <= 0:
         raise HTTPException(status_code=400, detail="Monto debe ser mayor a 0")
+
+    if project:
+        enforce_company_access(current_user, project.get("empresa_id"))
     
     # Parse date
     parsed_date = parse_date_tijuana(movement_data.date)
     validate_date_in_range(parsed_date)
     amount_mxn = movement_data.amount_original * movement_data.exchange_rate
+
+    if no_provider_flow and movement_data.client_id:
+        await validate_client_abono_limit(movement_data.client_id, decimal_from_value(amount_mxn, "amount_mxn"))
     
     # Check for duplicates
     dup_check = await db.movements.find_one({
@@ -1314,6 +1634,7 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         exchange_rate=movement_data.exchange_rate,
         amount_mxn=amount_mxn,
         reference=movement_data.reference,
+        client_id=movement_data.client_id if no_provider_flow else None,
         description=movement_data.description,
         created_by=current_user["user_id"],
         status=MovementStatus.PENDING_APPROVAL if requires_auth else MovementStatus.POSTED
@@ -1345,13 +1666,25 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         doc['authorization_id'] = auth.id
     
     await db.movements.insert_one(doc)
-    
+
+    receipt_url = None
+    if no_provider_flow and client_doc and movement_counts_as_abono_doc(doc):
+        updated_client = await recalc_client_financials(client_doc["id"])
+        await log_audit(current_user, "MOVEMENT_402_403_BALANCE", "clients", client_doc["id"], {
+            "movement_id": movement.id,
+            "client_id": client_doc["id"],
+            "inventory_item_id": client_doc.get("inventory_item_id"),
+            "abonos_total_mxn": updated_client.get("abonos_total_mxn", 0) if updated_client else 0,
+            "saldo_restante": updated_client.get("saldo_restante", 0) if updated_client else 0,
+        })
+        receipt_url = f"/api/movements/{movement.id}/receipt.pdf"
+
     # Remove MongoDB _id before returning
     doc.pop('_id', None)
     
-    await log_audit(current_user, "CREATE", "movements", movement.id, {"data": doc, "requires_auth": requires_auth})
+    await log_audit(current_user, "CREATE", "movements", movement.id, {"data": doc, "requires_auth": requires_auth, "receipt_url": receipt_url})
     
-    return {"movement": sanitize_mongo_document(doc), "requires_authorization": requires_auth, "reason": auth_reason if requires_auth else None}
+    return {"movement": sanitize_mongo_document(doc), "requires_authorization": requires_auth, "reason": auth_reason if requires_auth else None, "receipt_url": receipt_url}
 
 @api_router.post("/movements/import-csv")
 async def import_movements_csv(file: UploadFile = File(...), current_user: dict = Depends(require_permission(Permission.IMPORT_MOVEMENTS))):
@@ -1827,6 +2160,8 @@ async def resolve_authorization(
             {"$set": {"status": new_status.value}}
         )
         movement = await db.movements.find_one({"id": auth['movement_id']}, {"_id": 0})
+        if movement and movement_counts_as_abono_doc(movement):
+            await recalc_client_financials(movement.get("client_id"))
     
     # Detailed audit log for approve/reject
     await log_audit(current_user, f"AUTH_{resolution.status.value.upper()}", "authorizations", auth_id, {
@@ -1907,7 +2242,7 @@ async def get_dashboard(
     
     # Calculate totals
     total_budget = sum(b['amount_mxn'] for b in budgets)
-    total_real = sum(m['amount_mxn'] for m in movements)
+    total_real = sum(abs(float(m.get('amount_mxn',0))) for m in movements)
     variation = total_budget - total_real
     percentage = (total_real / total_budget * 100) if total_budget > 0 else 0
     
@@ -1923,7 +2258,7 @@ async def get_dashboard(
         key = m.get('partida_codigo', m.get('partida_id', 'N/A'))
         if key not in partidas_data:
             partidas_data[key] = {"budget": 0, "real": 0}
-        partidas_data[key]["real"] += m['amount_mxn']
+        partidas_data[key]["real"] += abs(float(m.get('amount_mxn',0)))
     
     # Get partida names from catalogo
     partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(1000)
@@ -2048,7 +2383,7 @@ async def get_partida_detail(
         if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
     ]
     
-    total_real = sum(m['amount_mxn'] for m in movements)
+    total_real = sum(abs(float(m.get('amount_mxn',0))) for m in movements)
     percentage = (total_real / total_budget * 100) if total_budget > 0 else (100 if total_real > 0 else 0)
     
     # Get provider names
@@ -2120,7 +2455,7 @@ async def get_export_data(
     budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(1000)
     
     # Get movements
-    movement_query = {"status": {"$in": ["normal", "authorized"]}}
+    movement_query = {"status": MovementStatus.POSTED.value}
     if project_id:
         movement_query["project_id"] = project_id
     elif empresa_id:
@@ -2136,7 +2471,7 @@ async def get_export_data(
     
     # Calculate totals
     total_budget = sum(b['amount_mxn'] for b in budgets)
-    total_real = sum(m['amount_mxn'] for m in movements)
+    total_real = sum(abs(float(m.get('amount_mxn',0))) for m in movements)
     variation = total_budget - total_real
     percentage = (total_real / total_budget * 100) if total_budget > 0 else 0
     
@@ -2152,7 +2487,7 @@ async def get_export_data(
         key = m.get('partida_codigo', 'N/A')
         if key not in partidas_data:
             partidas_data[key] = {"budget": 0, "real": 0}
-        partidas_data[key]["real"] += m['amount_mxn']
+        partidas_data[key]["real"] += abs(float(m.get('amount_mxn',0)))
     
     # Get partida info from catalogo
     partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(1000)
@@ -2864,20 +3199,32 @@ async def admin_update_movimiento(
         enforce_capture_budget_scope(current_user, updates["partida_codigo"])
 
     no_provider_flow = str(updates.get("partida_codigo", old_doc.get("partida_codigo"))) in NO_PROVIDER_BUDGET_CODES
-    if "project_id" in updates:
-        project = await db.projects.find_one({"id": updates["project_id"]}, {"_id": 0})
-        if not project:
-            raise HTTPException(status_code=400, detail="Proyecto no válido")
+    target_project_id = updates.get("project_id", old_doc.get("project_id"))
+    project = await db.projects.find_one({"id": target_project_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=400, detail="Proyecto no válido")
+    enforce_company_access(current_user, project.get("empresa_id"))
 
     if no_provider_flow:
         provider_id = updates.get("provider_id", old_doc.get("provider_id"))
-        customer_name = normalize_customer_name(updates.get("customer_name", old_doc.get("customer_name")))
+        client_id = updates.get("client_id", old_doc.get("client_id"))
         if provider_id:
             raise HTTPException(status_code=422, detail="Las partidas 402/403 no aceptan proveedor")
-        if not customer_name or len(customer_name) < 3:
-            raise HTTPException(status_code=422, detail="customer_name es obligatorio para partidas 402/403 (mínimo 3 caracteres)")
+        if not client_id:
+            raise HTTPException(status_code=422, detail={"code": "client_required_for_partida_402_403", "message": "client_id es obligatorio para partidas 402/403"})
+        client_doc = await db.clients.find_one({"id": client_id}, {"_id": 0})
+        if not client_doc:
+            raise HTTPException(status_code=422, detail={"code": "client_not_found", "message": "Cliente no válido"})
+        enforce_company_access(current_user, client_doc.get("company_id"))
+        if not client_doc.get("inventory_item_id"):
+            raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Cliente no tiene inventario ligado"})
+        inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0})
+        if not inventory_item:
+            raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Inventario ligado no encontrado"})
         updates["provider_id"] = None
-        updates["customer_name"] = customer_name
+        updates["client_id"] = client_id
+        updates["customer_name"] = normalize_customer_name(client_doc.get("nombre"))
+        updates["reference"] = f"{inventory_item.get('lote_edificio','')}-{inventory_item.get('manzana_departamento','')}"
     elif "provider_id" in updates:
         provider = await db.providers.find_one({"id": updates["provider_id"]}, {"_id": 0})
         if not provider:
@@ -2899,8 +3246,23 @@ async def admin_update_movimiento(
         updates["amount_mxn"] = final_amount_original * final_exchange_rate
 
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    projected = dict(old_doc)
+    projected.update(updates)
+    if movement_counts_as_abono_doc(projected):
+        await validate_client_abono_limit(projected.get("client_id"), decimal_from_value(projected.get("amount_mxn", 0), "amount_mxn"), exclude_movement_id=movement_id)
+
     await db.movements.update_one({"id": movement_id}, {"$set": updates})
     updated = await db.movements.find_one({"id": movement_id}, {"_id": 0})
+
+    affected_clients = set()
+    if old_doc.get("client_id"):
+        affected_clients.add(old_doc.get("client_id"))
+    if updated.get("client_id"):
+        affected_clients.add(updated.get("client_id"))
+    for cid in affected_clients:
+        await recalc_client_financials(cid)
+
     await log_admin_action(
         request,
         current_user,
@@ -2941,6 +3303,8 @@ async def admin_delete_movimiento(
         "updated_at": now_iso,
     }
     await db.movements.update_one({"id": movement_id}, {"$set": after})
+    if mov.get("client_id"):
+        await recalc_client_financials(mov.get("client_id"))
     await log_admin_action(request, current_user, "ADMIN_SOFT_DELETE", "movimientos", movement_id, True, before=mov, after=after, message=reason)
     return {"message": "Movimiento eliminado"}
 
@@ -3086,9 +3450,6 @@ async def admin_reverse_movement(
     return reverse_doc
 
 
-# Include router
-app.include_router(api_router)
-
 # CORS
 raw_cors_origins = os.environ.get('CORS_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000')
 cors_origins = [origin.strip() for origin in raw_cors_origins.split(',') if origin.strip()]
@@ -3111,3 +3472,399 @@ async def setup_indexes():
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+
+def _period_match(dt: datetime, year: Optional[int], month: Optional[int], period: str):
+    if period == "total":
+        return True
+    if period == "annual":
+        return dt.year == year
+    if period == "quarterly":
+        if dt.year != year:
+            return False
+        q = ((month or 1) - 1) // 3
+        return ((dt.month - 1) // 3) == q
+    return dt.year == year and dt.month == month
+
+
+async def _dashboard_period_data(current_user: dict, empresa_id: Optional[str], project_id: Optional[str], year: Optional[int], month: Optional[int], period: str):
+    if empresa_id:
+        enforce_company_access(current_user, empresa_id)
+    project_query = {}
+    if empresa_id:
+        project_query["empresa_id"] = empresa_id
+    if project_id:
+        project_query["id"] = project_id
+    projects = await db.projects.find(project_query, {"_id": 0}).to_list(2000)
+    if project_id and not projects:
+        raise HTTPException(status_code=403, detail="Proyecto fuera de alcance")
+    project_ids = [p["id"] for p in projects]
+
+    budget_query = {}
+    if project_ids:
+        budget_query["project_id"] = {"$in": project_ids}
+    budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(5000)
+
+    mov_query = {"status": MovementStatus.POSTED.value}
+    if project_ids:
+        mov_query["project_id"] = {"$in": project_ids}
+    movements = await db.movements.find(movement_active_query(extra=mov_query), {"_id": 0}).to_list(5000)
+
+    by_partida = {}
+    total_budget = 0.0
+    total_real = 0.0
+
+    for b in budgets:
+        y = b.get("year")
+        m = b.get("month")
+        fake_dt = datetime(y, m, 1)
+        if _period_match(fake_dt, year, month, period):
+            key = b.get("partida_codigo")
+            by_partida.setdefault(key, {"partida_codigo": key, "budget": 0.0, "real": 0.0})
+            by_partida[key]["budget"] += float(b.get("amount_mxn", 0))
+            total_budget += float(b.get("amount_mxn", 0))
+
+    for mv in movements:
+        dt = date_parser.parse(mv["date"])
+        if _period_match(dt, year, month, period):
+            key = mv.get("partida_codigo")
+            by_partida.setdefault(key, {"partida_codigo": key, "budget": 0.0, "real": 0.0})
+            by_partida[key]["real"] += float(mv.get("amount_mxn", 0))
+            total_real += float(mv.get("amount_mxn", 0))
+
+    out_partidas = []
+    for _, item in by_partida.items():
+        pct = (item["real"] / item["budget"] * 100) if item["budget"] else (100 if item["real"] else 0)
+        item["percentage"] = pct
+        item["traffic_light"] = get_traffic_light(pct)
+        item["variation"] = item["budget"] - item["real"]
+        out_partidas.append(item)
+
+    pct_total = (total_real / total_budget * 100) if total_budget else 0
+    return {
+        "totals": {
+            "budget": total_budget,
+            "real": total_real,
+            "variation": total_budget - total_real,
+            "percentage": pct_total,
+            "traffic_light": get_traffic_light(pct_total),
+        },
+        "by_partida": sorted(out_partidas, key=lambda x: x["partida_codigo"] or ""),
+        "period": period,
+    }
+
+
+@api_router.get("/dashboard/total")
+async def dashboard_total(empresa_id: Optional[str] = None, project_id: Optional[str] = None, year: Optional[int] = None, month: Optional[int] = None, current_user: dict = Depends(require_permission(Permission.VIEW_DASHBOARD))):
+    return await _dashboard_period_data(current_user, empresa_id, project_id, year, month, "total")
+
+
+@api_router.get("/dashboard/monthly")
+async def dashboard_monthly(empresa_id: Optional[str] = None, project_id: Optional[str] = None, year: Optional[int] = None, month: Optional[int] = None, current_user: dict = Depends(require_permission(Permission.VIEW_DASHBOARD))):
+    now = to_tijuana(datetime.now(timezone.utc))
+    return await _dashboard_period_data(current_user, empresa_id, project_id, year or now.year, month or now.month, "monthly")
+
+
+@api_router.get("/dashboard/quarterly")
+async def dashboard_quarterly(empresa_id: Optional[str] = None, project_id: Optional[str] = None, year: Optional[int] = None, month: Optional[int] = None, current_user: dict = Depends(require_permission(Permission.VIEW_DASHBOARD))):
+    now = to_tijuana(datetime.now(timezone.utc))
+    return await _dashboard_period_data(current_user, empresa_id, project_id, year or now.year, month or now.month, "quarterly")
+
+
+@api_router.get("/dashboard/annual")
+async def dashboard_annual(empresa_id: Optional[str] = None, project_id: Optional[str] = None, year: Optional[int] = None, current_user: dict = Depends(require_permission(Permission.VIEW_DASHBOARD))):
+    now = to_tijuana(datetime.now(timezone.utc))
+    return await _dashboard_period_data(current_user, empresa_id, project_id, year or now.year, 1, "annual")
+
+
+@api_router.post("/inventory", status_code=201)
+async def create_inventory_item(payload: InventoryItemBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    enforce_company_access(current_user, payload.company_id)
+    precio_venta, precio_total = compute_inventory_totals(payload)
+    doc = InventoryItem(**payload.model_dump(), precio_venta=precio_venta, precio_total=precio_total).model_dump()
+    doc["created_at"] = doc["created_at"].isoformat(); doc["updated_at"] = doc["updated_at"].isoformat()
+    for k in ["m2_superficie", "m2_construccion", "precio_m2_superficie", "precio_m2_construccion", "descuento_bonificacion", "precio_venta", "precio_total"]:
+        doc[k] = float(doc[k])
+    await db.inventory_items.insert_one(doc)
+    await log_audit(current_user, "CREATE", "inventory", doc["id"], {"data": doc})
+    return sanitize_mongo_document(doc)
+
+
+@api_router.get("/inventory")
+async def list_inventory(company_id: Optional[str] = None, project_id: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
+    query = {}
+    scope = user_company_scope_query(current_user)
+    query.update(scope)
+    if company_id:
+        enforce_company_access(current_user, company_id)
+        query["company_id"] = company_id
+    if project_id:
+        query["project_id"] = project_id
+    return await db.inventory_items.find(query, {"_id": 0}).to_list(5000)
+
+
+@api_router.post("/clients", status_code=201)
+async def create_client(payload: ClientBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    enforce_company_access(current_user, payload.company_id)
+    project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=422, detail="project_id inválido")
+    if project.get("empresa_id") != payload.company_id:
+        raise HTTPException(status_code=422, detail="project_id no pertenece a company_id")
+
+    nombre = (payload.nombre or "").strip().upper()
+    if not nombre:
+        raise HTTPException(status_code=422, detail="nombre es obligatorio")
+
+    snapshot = Decimal("0")
+    if payload.inventory_item_id:
+        inventory_item = await db.inventory_items.find_one({"id": payload.inventory_item_id}, {"_id": 0})
+        if not inventory_item:
+            raise HTTPException(status_code=422, detail="inventory_item_id inválido")
+        if inventory_item.get("company_id") != payload.company_id:
+            raise HTTPException(status_code=422, detail="inventory_item_id no pertenece a la empresa seleccionada")
+        if inventory_item.get("project_id") != payload.project_id:
+            raise HTTPException(status_code=422, detail="inventory_item_id no pertenece al proyecto seleccionado")
+        existing_for_inventory = await db.clients.find_one({"inventory_item_id": payload.inventory_item_id}, {"_id": 0})
+        if existing_for_inventory:
+            raise HTTPException(status_code=409, detail="El inventario seleccionado ya está ligado a otro cliente")
+        snapshot = decimal_from_value(inventory_item.get("precio_total", 0), "precio_total")
+
+    doc = Client(**payload.model_dump(), nombre=nombre, precio_venta_snapshot=snapshot, saldo_restante=snapshot).model_dump()
+    doc["created_at"] = doc["created_at"].isoformat(); doc["updated_at"] = doc["updated_at"].isoformat()
+    doc["precio_venta_snapshot"] = float(doc["precio_venta_snapshot"])
+    doc["abonos_total_mxn"] = 0.0
+    doc["saldo_restante"] = float(doc["saldo_restante"])
+    try:
+        await db.clients.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Conflicto al crear cliente (revisa inventario ligado o datos duplicados)")
+    await log_audit(current_user, "CREATE", "clients", doc["id"], {"data": doc})
+    return sanitize_mongo_document(doc)
+
+
+@api_router.get("/clients")
+async def list_clients(company_id: Optional[str] = None, project_id: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
+    query = {}
+    query.update(user_company_scope_query(current_user))
+    if company_id:
+        enforce_company_access(current_user, company_id)
+        query["company_id"] = company_id
+    if project_id:
+        query["project_id"] = project_id
+
+    clients = await db.clients.find(query, {"_id": 0}).to_list(5000)
+    inventory_ids = [c.get("inventory_item_id") for c in clients if c.get("inventory_item_id")]
+    inventory_map = {}
+    if inventory_ids:
+        inventory_rows = await db.inventory_items.find({"id": {"$in": inventory_ids}}, {"_id": 0}).to_list(5000)
+        inventory_map = {it.get("id"): it for it in inventory_rows}
+
+    enriched = []
+    for client_doc in clients:
+        cid = client_doc.get("id")
+        updated = await recalc_client_financials(cid) if cid else client_doc
+        row = updated or client_doc
+        valor_total = float(row.get("precio_venta_snapshot", 0) or 0)
+        abonos = float(row.get("abonos_total_mxn", 0) or 0)
+        saldo = valor_total - abonos
+        if saldo < 0:
+            saldo = 0.0
+        item = inventory_map.get(row.get("inventory_item_id"))
+        row["inventory_clave"] = get_inventory_clave(item)
+        row["valor_total_mxn"] = valor_total
+        row["abonos_total_mxn"] = abonos
+        row["saldo_restante_mxn"] = saldo
+        enriched.append(sanitize_mongo_document(row))
+    return enriched
+
+
+
+
+@api_router.put("/inventory/{item_id}")
+async def update_inventory_item(item_id: str, payload: InventoryItemUpdate, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    item = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Item de inventario no encontrado")
+    enforce_company_access(current_user, item.get("company_id"))
+
+    merged = {
+        "company_id": item.get("company_id"),
+        "project_id": payload.project_id or item.get("project_id"),
+        "m2_superficie": payload.m2_superficie if payload.m2_superficie is not None else item.get("m2_superficie"),
+        "m2_construccion": payload.m2_construccion if payload.m2_construccion is not None else item.get("m2_construccion", 0),
+        "lote_edificio": payload.lote_edificio if payload.lote_edificio is not None else item.get("lote_edificio"),
+        "manzana_departamento": payload.manzana_departamento if payload.manzana_departamento is not None else item.get("manzana_departamento"),
+        "precio_m2_superficie": payload.precio_m2_superficie if payload.precio_m2_superficie is not None else item.get("precio_m2_superficie"),
+        "precio_m2_construccion": payload.precio_m2_construccion if payload.precio_m2_construccion is not None else item.get("precio_m2_construccion", 0),
+        "descuento_bonificacion": payload.descuento_bonificacion if payload.descuento_bonificacion is not None else item.get("descuento_bonificacion", 0),
+    }
+    base = InventoryItemBase(**merged)
+    precio_venta, precio_total = compute_inventory_totals(base)
+
+    update_data = base.model_dump()
+    update_data["precio_venta"] = float(precio_venta)
+    update_data["precio_total"] = float(precio_total)
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    for k in ["m2_superficie", "m2_construccion", "precio_m2_superficie", "precio_m2_construccion", "descuento_bonificacion"]:
+        update_data[k] = float(update_data[k])
+
+    await db.inventory_items.update_one({"id": item_id}, {"$set": update_data})
+    updated = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
+    await log_audit(current_user, "UPDATE", "inventory", item_id, {"before": item, "after": updated})
+    return sanitize_mongo_document(updated)
+
+
+@api_router.put("/clients/{client_id}")
+async def update_client(client_id: str, payload: ClientUpdate, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    client_doc = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    if not client_doc:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    enforce_company_access(current_user, client_doc.get("company_id"))
+
+    update_data = {}
+    if payload.nombre is not None:
+        nombre = payload.nombre.strip().upper()
+        if not nombre:
+            raise HTTPException(status_code=422, detail="nombre es obligatorio")
+        update_data["nombre"] = nombre
+    if payload.telefono is not None:
+        update_data["telefono"] = payload.telefono
+    if payload.domicilio is not None:
+        update_data["domicilio"] = payload.domicilio
+    if payload.inventory_item_id is not None:
+        if payload.inventory_item_id:
+            inventory_item = await db.inventory_items.find_one({"id": payload.inventory_item_id}, {"_id": 0})
+            if not inventory_item:
+                raise HTTPException(status_code=422, detail="inventory_item_id inválido")
+            update_data["inventory_item_id"] = payload.inventory_item_id
+            snapshot = decimal_from_value(inventory_item.get("precio_total", 0), "precio_total")
+            update_data["precio_venta_snapshot"] = float(snapshot)
+            if decimal_from_value(client_doc.get("saldo_restante", 0), "saldo_restante") <= Decimal("0"):
+                update_data["saldo_restante"] = float(snapshot)
+        else:
+            update_data["inventory_item_id"] = None
+
+    if not update_data:
+        return sanitize_mongo_document(client_doc)
+
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.clients.update_one({"id": client_id}, {"$set": update_data})
+    updated = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    updated = await recalc_client_financials(client_id) or updated
+    await log_audit(current_user, "UPDATE", "clients", client_id, {"before": client_doc, "after": updated})
+    return sanitize_mongo_document(updated)
+
+
+@api_router.get("/inventory/summary")
+async def inventory_summary(company_id: Optional[str] = None, project_id: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
+    query = {}
+    query.update(user_company_scope_query(current_user))
+    if company_id:
+        enforce_company_access(current_user, company_id)
+        query["company_id"] = company_id
+    if project_id:
+        query["project_id"] = project_id
+
+    items = await db.inventory_items.find(query, {"_id": 0}).to_list(5000)
+    item_ids = [it.get("id") for it in items if it.get("id")]
+    valor_total = sum(float(it.get("precio_total", 0) or 0) for it in items)
+
+    clients_query = {}
+    if item_ids:
+        clients_query["inventory_item_id"] = {"$in": item_ids}
+    else:
+        clients_query["inventory_item_id"] = {"$in": []}
+    clients = await db.clients.find(clients_query, {"_id": 0}).to_list(5000)
+
+    cobrado = 0.0
+    for c in clients:
+        if c.get("id"):
+            updated = await recalc_client_financials(c["id"])
+            cobrado += float((updated or c).get("abonos_total_mxn", 0) or 0)
+    restante = valor_total - cobrado
+    if restante < 0:
+        restante = 0.0
+
+    return {
+        "valor_total_inventario_mxn": valor_total,
+        "cobrado_mxn": cobrado,
+        "restante_por_cobrar_mxn": restante,
+        "counts": {
+            "items_count": len(items),
+            "clients_count": len(clients),
+        },
+    }
+
+
+@api_router.delete("/clients/{client_id}")
+async def delete_client(client_id: str, request: Request, current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
+    ensure_admin(current_user)
+    client_doc = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    if not client_doc:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    enforce_company_access(current_user, client_doc.get("company_id"))
+    movement_ref = await db.movements.find_one(movement_active_query(extra={"client_id": client_id}), {"_id": 0})
+    if movement_ref:
+        raise HTTPException(status_code=409, detail="No se puede eliminar cliente con movimientos relacionados")
+    await db.clients.delete_one({"id": client_id})
+    await log_admin_action(request, current_user, "ADMIN_HARD_DELETE", "clients", client_id, True, before=client_doc, after=None, message="delete client")
+    return {"message": "Cliente eliminado"}
+
+
+@api_router.delete("/inventory/{item_id}")
+async def delete_inventory(item_id: str, request: Request, current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
+    ensure_admin(current_user)
+    item_doc = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
+    if not item_doc:
+        raise HTTPException(status_code=404, detail="Item de inventario no encontrado")
+    enforce_company_access(current_user, item_doc.get("company_id"))
+    linked_client = await db.clients.find_one({"inventory_item_id": item_id}, {"_id": 0})
+    if linked_client:
+        raise HTTPException(status_code=409, detail="No se puede eliminar inventario ligado a clientes")
+    await db.inventory_items.delete_one({"id": item_id})
+    await log_admin_action(request, current_user, "ADMIN_HARD_DELETE", "inventory", item_id, True, before=item_doc, after=None, message="delete inventory")
+    return {"message": "Inventario eliminado"}
+@api_router.get("/movements/{movement_id}/receipt.pdf")
+async def movement_receipt_pdf(movement_id: str, current_user: dict = Depends(require_permission(Permission.VIEW_MOVEMENTS))):
+    movement = await db.movements.find_one({"id": movement_id}, {"_id": 0})
+    if not movement:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    if not movement_counts_as_abono_doc(movement):
+        raise HTTPException(status_code=422, detail="Solo aplica a movimientos de abono 402/403 posted")
+
+    project = await db.projects.find_one({"id": movement.get("project_id")}, {"_id": 0})
+    if project:
+        enforce_company_access(current_user, project.get("empresa_id"))
+    empresa = await db.empresas.find_one({"id": project.get("empresa_id")}, {"_id": 0}) if project else None
+    client_doc = await db.clients.find_one({"id": movement.get("client_id")}, {"_id": 0}) if movement.get("client_id") else None
+    if client_doc:
+        client_doc = await recalc_client_financials(client_doc.get("id")) or client_doc
+    inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0}) if client_doc and client_doc.get("inventory_item_id") else None
+
+    lines = [
+        "RECIBO DE ABONO - QUANTUM",
+        f"Folio: {movement.get('id')}",
+        f"Fecha emisión: {to_tijuana(datetime.now(timezone.utc)).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Cliente: {client_doc.get('nombre') if client_doc else movement.get('customer_name') or ''}",
+        f"Empresa: {empresa.get('nombre') if empresa else ''}",
+        f"Proyecto: {project.get('code') if project else ''} - {project.get('name') if project else ''}",
+        f"Inventario: {get_inventory_clave(inventory_item) or ''}",
+        f"Partida: {movement.get('partida_codigo')}",
+        f"Referencia: {movement.get('reference')}",
+        f"Moneda: {movement.get('currency')}",
+        f"Monto original: {movement.get('amount_original')}",
+        f"Tipo cambio: {movement.get('exchange_rate')}",
+        f"Monto MXN: {movement.get('amount_mxn')}",
+        f"Descripción: {movement.get('description') or ''}",
+        f"Valor total MXN: {client_doc.get('precio_venta_snapshot') if client_doc else ''}",
+        f"Abonos acumulados MXN: {client_doc.get('abonos_total_mxn') if client_doc else ''}",
+        f"Saldo restante MXN: {client_doc.get('saldo_restante') if client_doc else ''}",
+    ]
+    pdf_bytes = render_basic_pdf(lines)
+    await log_audit(current_user, "RECEIPT_PDF", "movements", movement_id, {"reference": movement.get("reference")})
+    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=recibo_{movement_id}.pdf"})
+
+
+# Include router
+app.include_router(api_router)
