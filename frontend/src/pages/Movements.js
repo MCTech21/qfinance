@@ -491,6 +491,11 @@ const Movements = () => {
             </DialogContent>
           </Dialog>
           
+          <Button variant="outline" onClick={exportToExcel}>
+                          <FileSpreadsheet className="h-4 w-4 mr-2" />
+                          Exportar Excel
+                        </Button>
+
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild>
               <Button variant="outline" onClick={exportToExcel}>
@@ -501,6 +506,10 @@ const Movements = () => {
                 <Plus className="h-4 w-4 mr-2" />
                 Nuevo Movimiento
               </Button>
+              <Button data-testid="add-movement-btn">
+                              <Plus className="h-4 w-4 mr-2" />
+                              Nuevo Movimiento
+                            </Button>
             </DialogTrigger>
             <DialogContent className="max-w-xl">
               <DialogHeader>
