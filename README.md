@@ -125,6 +125,58 @@ No se incluyen credenciales preconfiguradas por defecto.
 - 🔴 **Rojo**: Ejercido > 100% (requiere autorización)
 
 
+
+## Smoke test por usuario/contraseña (sin JWT manual)
+
+Si quieres validar en EC2 usando tu cuenta real, usa:
+
+```bash
+bash smoke_test_with_login.sh \
+  --base-url http://52.53.215.40:8088 \
+  --email encargado.finanzas@quantumgrupo.mx \
+  --password 'TU_PASSWORD'
+```
+
+El script hace login en `/api/auth/login`, obtiene el token automáticamente y valida endpoints clave.
+
+### Error común: `No such file or directory`
+
+Si ves `bash scripts/smoke_test_with_login.sh: No such file or directory`, ejecuta desde la raíz del repo y actualiza:
+
+```bash
+cd /opt/qfinance_git
+git fetch --all --prune
+git pull --ff-only
+find . -maxdepth 3 -name 'smoke_test_with_login.sh'
+```
+
+Luego corre el wrapper desde raíz:
+
+```bash
+bash smoke_test_with_login.sh --base-url http://52.53.215.40:8088 --email TU_EMAIL --password 'TU_PASSWORD'
+```
+
+
+### Error EC2: `insufficient permission for adding an object to repository database .git/objects`
+
+Si al hacer `git fetch`/`git pull` en EC2 sale ese error, corrige ownership/permisos del repo y reintenta:
+
+```bash
+cd /opt/qfinance_git
+bash scripts/fix_repo_permissions.sh /opt/qfinance_git
+git fetch --all --prune
+git pull --ff-only
+```
+
+Después ejecuta el smoke test desde raíz:
+
+```bash
+bash smoke_test_with_login.sh \
+  --base-url http://52.53.215.40:8088 \
+  --email encargado.finanzas@quantumgrupo.mx \
+  --password 'TU_PASSWORD'
+```
+
 ## EC2-first deploy (CloudShell ligero)
 
 Desde ahora, CloudShell **no debe clonar/buildar local**. Solo orquesta deploy en EC2.
