@@ -503,6 +503,7 @@ const Movements = () => {
           </Button>
 
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+            {/* Keep exactly one child inside DialogTrigger when using asChild to avoid Radix runtime crashes. */}
             <DialogTrigger asChild>
               <Button variant="outline" onClick={exportToExcel}>
                 <FileSpreadsheet className="h-4 w-4 mr-2" />
