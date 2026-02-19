@@ -498,9 +498,9 @@ const Movements = () => {
           </Dialog>
           
           <Button variant="outline" onClick={exportToExcel}>
-                          <FileSpreadsheet className="h-4 w-4 mr-2" />
-                          Exportar Excel
-                        </Button>
+            <FileSpreadsheet className="h-4 w-4 mr-2" />
+            Exportar Excel
+          </Button>
 
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild>
