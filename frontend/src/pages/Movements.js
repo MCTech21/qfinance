@@ -174,7 +174,10 @@ const Movements = () => {
       fetchData();
       resetForm();
     } catch (error) {
-      const message = error.response?.data?.detail || "Error al crear movimiento";
+      const detail = error?.response?.data?.detail;
+      const message = typeof detail === "string"
+        ? detail
+        : (detail?.message || detail?.code || "Error al crear movimiento");
       toast.error(message);
     } finally {
       setIsSaving(false);
@@ -282,23 +285,26 @@ const Movements = () => {
   const handleApiError = (error, fallbackMessage) => {
     const status = error?.response?.status;
     const detail = error?.response?.data?.detail;
+    const detailText = typeof detail === "string"
+      ? detail
+      : (detail?.message || detail?.code || fallbackMessage);
     if (status === 403) {
       toast.error("No autorizado");
       return;
     }
     if (status === 409) {
-      toast.error(typeof detail === "string" ? detail : "Conflicto al procesar la solicitud");
+      toast.error(detailText || "Conflicto al procesar la solicitud");
       return;
     }
     if (status === 422) {
       if (Array.isArray(detail)) {
         toast.error(detail.map((item) => item?.msg).filter(Boolean).join(" | "));
       } else {
-        toast.error(typeof detail === "string" ? detail : "Datos inválidos");
+        toast.error(detailText || "Datos inválidos");
       }
       return;
     }
-    toast.error(typeof detail === "string" ? detail : fallbackMessage);
+    toast.error(detailText || fallbackMessage);
   };
 
   const openEditDialog = (movement) => {
