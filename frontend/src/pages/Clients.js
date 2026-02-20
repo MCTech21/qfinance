@@ -86,6 +86,14 @@ export default function Clients() {
     setOpen(true);
   };
 
+  const getApiErrorMessage = (error, fallback) => {
+    const detail = error?.response?.data?.detail;
+    if (typeof detail === "string") return detail;
+    if (detail?.message) return detail.message;
+    if (detail?.code) return detail.code;
+    return fallback;
+  };
+
   const onSubmit = async (e) => {
     e.preventDefault();
     if (!form.nombre.trim()) return toast.error("Nombre es obligatorio");
@@ -115,7 +123,7 @@ export default function Clients() {
       setEditing(null);
       fetchData();
     } catch (error) {
-      toast.error(error?.response?.data?.detail?.message || error?.response?.data?.detail || "Error al guardar cliente");
+      toast.error(getApiErrorMessage(error, "Error al guardar cliente"));
     }
   };
 
@@ -127,7 +135,7 @@ export default function Clients() {
       setDeleteTarget(null);
       fetchData();
     } catch (error) {
-      toast.error(error?.response?.data?.detail || "No se pudo eliminar cliente");
+      toast.error(getApiErrorMessage(error, "No se pudo eliminar cliente"));
     }
   };
 

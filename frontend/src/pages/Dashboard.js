@@ -42,19 +42,25 @@ const Dashboard = () => {
     setIsLoading(true);
     try {
       const endpointByPeriod = { total: "/dashboard/total", monthly: "/dashboard/monthly", quarterly: "/dashboard/quarterly", annual: "/dashboard/annual" };
-      const [dashboardRes, empresasRes, projectsRes] = await Promise.all([
-        api().get(endpointByPeriod[selectedPeriod] || "/dashboard/monthly", {
-          params: {
-            empresa_id: selectedEmpresa !== "all" ? selectedEmpresa : undefined,
-            project_id: selectedProject !== "all" ? selectedProject : undefined,
-            year: selectedYear,
-            month: selectedMonth
-          }
-        }),
+      const params = {
+        empresa_id: selectedEmpresa !== "all" ? selectedEmpresa : undefined,
+        project_id: selectedProject !== "all" ? selectedProject : undefined,
+        year: selectedYear,
+        month: selectedMonth,
+      };
+      const [periodRes, reportsRes, empresasRes, projectsRes] = await Promise.all([
+        api().get(endpointByPeriod[selectedPeriod] || "/dashboard/monthly", { params }),
+        api().get("/reports/dashboard", { params }),
         api().get("/empresas"),
         api().get("/projects")
       ]);
-      setDashboardData(dashboardRes.data);
+
+      setDashboardData({
+        ...reportsRes.data,
+        totals: periodRes.data?.totals || reportsRes.data?.totals,
+        by_partida: periodRes.data?.by_partida || reportsRes.data?.by_partida || [],
+        period: periodRes.data?.period || selectedPeriod,
+      });
       setEmpresas(empresasRes.data);
       setProjects(projectsRes.data);
     } catch (error) {
