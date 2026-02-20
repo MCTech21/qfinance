@@ -78,6 +78,10 @@ class FakeDB:
         self.catalogo_partidas = FakeCollection([
             {"id": "cp1", "codigo": "401", "nombre": "Ingresos", "grupo": "ingresos", "is_active": True},
             {"id": "cp2", "codigo": "205", "nombre": "Egresos", "grupo": "obra", "is_active": True},
+            {"id": "cp3", "codigo": "103", "nombre": "Obra 103", "grupo": "obra", "is_active": True},
+            {"id": "cp4", "codigo": "301", "nombre": "Otros", "grupo": "obra", "is_active": True},
+            {"id": "cp5", "codigo": "402", "nombre": "Ingreso 402", "grupo": "ingresos", "is_active": True},
+            {"id": "cp6", "codigo": "403", "nombre": "Ingreso 403", "grupo": "ingresos", "is_active": True},
         ])
         self.projects = FakeCollection([{"id": "pr1", "code": "P1", "name": "Proyecto", "empresa_id": "e1", "is_active": True}])
         self.providers = FakeCollection([{"id": "pv1", "code": "PV", "name": "Proveedor", "is_active": True}])
@@ -98,6 +102,10 @@ class FakeDB:
         self.authorizations = FakeCollection([])
         self.audit_logs = FakeCollection([])
         self.budget_requests = FakeCollection([])
+        self.clients = FakeCollection([{"id": "cl1", "company_id": "e1", "project_id": "pr1", "nombre": "CLIENTE UNO", "inventory_item_id": "inv1", "saldo_restante": 500000.0}])
+        self.inventory_items = FakeCollection([{"id": "inv1", "company_id": "e1", "project_id": "pr1", "lote_edificio": "L1", "manzana_departamento": "M3", "precio_total": 500000.0}])
+        self.import_export_logs = FakeCollection([])
+        self.empresas = FakeCollection([{"id": "e1", "nombre": "Empresa 1"}])
 
     def __getitem__(self, name):
         return getattr(self, name)
@@ -107,7 +115,7 @@ def client_for_role(role: str):
     server.db = FakeDB()
 
     async def fake_user():
-        return {"user_id": "u1", "email": "u@test.com", "role": role, "must_change_password": False}
+        return {"user_id": "u1", "email": "u@test.com", "role": role, "empresa_id": "e1", "must_change_password": False}
 
     server.app.dependency_overrides[server.get_current_user] = fake_user
     return TestClient(server.app)
@@ -151,7 +159,7 @@ def test_captura_ingresos_only_4xx():
 
 def test_captura_role_restricted_to_specific_budget_codes():
     client = client_for_role("captura")
-    allowed = client.post("/api/movements", json=movement_payload("402", provider_id=None, customer_name="Cliente Uno"))
+    allowed = client.post("/api/movements", json=movement_payload("402", provider_id=None, client_id="cl1"))
     forbidden = client.post("/api/movements", json=movement_payload("401"))
     assert allowed.status_code == 200
     assert forbidden.status_code == 403
@@ -159,7 +167,7 @@ def test_captura_role_restricted_to_specific_budget_codes():
 
 def test_requires_budget_ranges_only_100_199_and_200_299():
     client = client_for_role("admin")
-    no_budget_4xx = client.post("/api/movements", json=movement_payload("402", provider_id=None, customer_name="Cliente Libre"))
+    no_budget_4xx = client.post("/api/movements", json=movement_payload("402", provider_id=None, client_id="cl1"))
     no_budget_3xx = client.post("/api/movements", json=movement_payload("301"))
     needs_budget_1xx = client.post("/api/movements", json=movement_payload("103"))
     assert no_budget_4xx.status_code == 200
@@ -167,16 +175,16 @@ def test_requires_budget_ranges_only_100_199_and_200_299():
     assert needs_budget_1xx.status_code == 422
 
 
-def test_402_403_require_customer_name_and_no_provider():
+def test_402_403_require_client_and_no_provider():
     client = client_for_role("admin")
-    bad_provider = client.post("/api/movements", json=movement_payload("402", provider_id="pv1", customer_name="Cliente X"))
-    bad_customer = client.post("/api/movements", json=movement_payload("403", provider_id=None, customer_name="  "))
-    ok = client.post("/api/movements", json=movement_payload("403", provider_id=None, customer_name="Cliente Y"))
+    bad_provider = client.post("/api/movements", json=movement_payload("402", provider_id="pv1", client_id="cl1"))
+    bad_client = client.post("/api/movements", json=movement_payload("403", provider_id=None))
+    ok = client.post("/api/movements", json=movement_payload("403", provider_id=None, client_id="cl1"))
     assert bad_provider.status_code == 422
-    assert bad_customer.status_code == 422
+    assert bad_client.status_code == 422
     assert ok.status_code == 200
     assert ok.json()["movement"]["provider_id"] is None
-    assert ok.json()["movement"]["customer_name"] == "Cliente Y"
+    assert ok.json()["movement"]["reference"] == "L1-M3"
 
 
 def test_finanzas_pending_budget_request_visible_to_admin_and_approvable():
@@ -347,7 +355,7 @@ def test_login_requires_force_change_flag_and_flow():
 
 def test_non_admin_cannot_admin_delete_movements():
     client = client_for_role("finanzas")
-    res = client.delete("/api/movements/m1", json={"reason": "cleanup"})
+    res = client.request("DELETE", "/api/movements/m1", json={"reason": "cleanup"})
     assert res.status_code == 403
 
 
@@ -381,7 +389,7 @@ def test_soft_delete_hidden_from_movements_and_dashboard_and_audited():
     assert before_list.status_code == 200
     assert len(before_list.json()) == 1
 
-    deleted = client.delete("/api/movements/m1", json={"reason": "bad row"})
+    deleted = client.request("DELETE", "/api/movements/m1", json={"reason": "bad row"})
     assert deleted.status_code == 200
 
     after_list = client.get("/api/movements")

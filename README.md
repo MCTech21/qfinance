@@ -112,6 +112,33 @@ yarn install
 yarn start
 ```
 
+### Ejecutar pruebas backend (canónico)
+
+```bash
+bash scripts/run_backend_tests.sh
+```
+
+Para un archivo específico:
+
+```bash
+bash scripts/run_backend_tests.sh tests/test_required_scope.py
+```
+
+> Nota (sandbox/offline): en ambientes sin red (ej. sandbox Codex) la instalación puede fallar por proxy/firewall.
+> Puedes usar:
+>
+> ```bash
+> SKIP_INSTALL=1 bash scripts/run_backend_tests.sh tests/test_required_scope.py
+> ```
+>
+> o
+>
+> ```bash
+> ALLOW_INSTALL_FAILURE=1 bash scripts/run_backend_tests.sh tests/test_required_scope.py
+> ```
+>
+> En esos casos, toma CI (GitHub Actions) como fuente de verdad.
+
 ## Usuarios
 
 No se incluyen credenciales preconfiguradas por defecto.
@@ -124,6 +151,58 @@ No se incluyen credenciales preconfiguradas por defecto.
 - 🟡 **Amarillo**: Ejercido entre 90% y 100%
 - 🔴 **Rojo**: Ejercido > 100% (requiere autorización)
 
+
+
+## Smoke test por usuario/contraseña (sin JWT manual)
+
+Si quieres validar en EC2 usando tu cuenta real, usa:
+
+```bash
+bash smoke_test_with_login.sh \
+  --base-url http://52.53.215.40:8088 \
+  --email encargado.finanzas@quantumgrupo.mx \
+  --password 'TU_PASSWORD'
+```
+
+El script hace login en `/api/auth/login`, obtiene el token automáticamente y valida endpoints clave.
+
+### Error común: `No such file or directory`
+
+Si ves `bash scripts/smoke_test_with_login.sh: No such file or directory`, ejecuta desde la raíz del repo y actualiza:
+
+```bash
+cd /opt/qfinance_git
+git fetch --all --prune
+git pull --ff-only
+find . -maxdepth 3 -name 'smoke_test_with_login.sh'
+```
+
+Luego corre el wrapper desde raíz:
+
+```bash
+bash smoke_test_with_login.sh --base-url http://52.53.215.40:8088 --email TU_EMAIL --password 'TU_PASSWORD'
+```
+
+
+### Error EC2: `insufficient permission for adding an object to repository database .git/objects`
+
+Si al hacer `git fetch`/`git pull` en EC2 sale ese error, corrige ownership/permisos del repo y reintenta:
+
+```bash
+cd /opt/qfinance_git
+bash scripts/fix_repo_permissions.sh /opt/qfinance_git
+git fetch --all --prune
+git pull --ff-only
+```
+
+Después ejecuta el smoke test desde raíz:
+
+```bash
+bash smoke_test_with_login.sh \
+  --base-url http://52.53.215.40:8088 \
+  --email encargado.finanzas@quantumgrupo.mx \
+  --password 'TU_PASSWORD'
+```
 
 ## EC2-first deploy (CloudShell ligero)
 

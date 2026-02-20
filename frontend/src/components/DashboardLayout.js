@@ -14,7 +14,9 @@ import {
   LogOut,
   Menu,
   X,
-  Bell
+  Bell,
+  Users,
+  Building2
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Avatar, AvatarFallback } from "./ui/avatar";
@@ -52,9 +54,11 @@ const DashboardLayout = ({ children }) => {
     { path: "/movements", icon: ArrowRightLeft, label: "Movimientos", roles: ["admin", "finanzas", "captura_ingresos"] },
     { path: "/authorizations", icon: CheckSquare, label: "Autorizaciones", roles: ["admin", "autorizador"] },
     { path: "/reports", icon: BarChart3, label: "Reportes", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos"] },
+    { path: "/clientes", icon: Users, label: "Clientes", roles: ["admin", "finanzas", "captura_ingresos"] },
+    { path: "/inventarios", icon: Building2, label: "Inventarios", roles: ["admin", "finanzas", "captura_ingresos"] },
     { path: "/catalogs", icon: FolderOpen, label: "Proveedores", roles: ["admin"] },
     { path: "/audit", icon: ScrollText, label: "Bitácora", roles: ["admin", "autorizador"] },
-    { path: "/admin", icon: Shield, label: "Admin Console", roles: ["admin"] },
+    { path: "/admin", icon: Shield, label: "Consola Admin", roles: ["admin"] },
     { path: "/settings", icon: Settings, label: "Mi Cuenta", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos"] },
   ];
 
