@@ -145,10 +145,15 @@ const Movements = () => {
     
     try {
       const payload = {
-        ...formData,
+        project_id: formData.project_id,
+        partida_codigo: formData.partida_codigo,
+        provider_id: isIngresoNoProvider ? null : (formData.provider_id || null),
+        date: formData.date,
+        currency: formData.currency,
         amount_original: parseFloat(formData.amount_original),
         exchange_rate: parseFloat(formData.exchange_rate),
-        provider_id: isIngresoNoProvider ? null : formData.provider_id,
+        reference: (formData.reference || "").trim(),
+        description: formData.description,
         customer_name: undefined,
         client_id: isIngresoNoProvider ? (formData.client_id || undefined) : undefined,
       };
