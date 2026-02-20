@@ -532,10 +532,18 @@ const Movements = () => {
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             {/* Keep exactly one child inside DialogTrigger when using asChild to avoid Radix runtime crashes. */}
             <DialogTrigger asChild>
+              <Button variant="outline" onClick={exportToExcel}>
+                <FileSpreadsheet className="h-4 w-4 mr-2" />
+                Exportar Excel
+              </Button>
               <Button data-testid="add-movement-btn">
                 <Plus className="h-4 w-4 mr-2" />
                 Nuevo Movimiento
               </Button>
+              <Button data-testid="add-movement-btn">
+                              <Plus className="h-4 w-4 mr-2" />
+                              Nuevo Movimiento
+                            </Button>
             </DialogTrigger>
             <DialogContent className="max-w-xl">
               <DialogHeader>
