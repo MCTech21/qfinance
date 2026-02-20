@@ -320,3 +320,46 @@ def test_smoke_post_movement_402_with_client():
     r = c.post("/api/movements", json=payload)
     assert r.status_code == 200
     assert r.json()["movement"]["partida_codigo"] == "402"
+
+
+def test_dashboard_period_company_with_no_projects_returns_zero_totals():
+    c, db = make_client()
+    db.empresas.rows.append({"id": "c3", "nombre": "C3"})
+    db.budgets.rows.append({"id": "b-global", "project_id": "p1", "partida_codigo": "205", "year": 2026, "month": 1, "amount_mxn": 9999})
+    db.movements.rows.append({"id": "m-global", "project_id": "p1", "partida_codigo": "205", "status": "posted", "date": "2026-01-10T00:00:00+00:00", "amount_mxn": 7777})
+
+    r = c.get('/api/dashboard/monthly', params={"empresa_id": "c3", "year": 2026, "month": 1})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["totals"]["budget"] == 0.0
+    assert body["totals"]["real"] == 0.0
+    assert body["by_partida"] == []
+
+
+def test_dashboard_period_real_uses_abs_for_legacy_negative_amounts():
+    c, db = make_client()
+    db.budgets.rows.append({"id": "b1", "project_id": "p1", "partida_codigo": "205", "year": 2026, "month": 1, "amount_mxn": 5000})
+    db.movements.rows.append({"id": "m-neg", "project_id": "p1", "partida_codigo": "205", "status": "posted", "date": "2026-01-10T00:00:00+00:00", "amount_mxn": -1000})
+
+    r = c.get('/api/dashboard/monthly', params={"empresa_id": "c1", "year": 2026, "month": 1})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["totals"]["real"] == 1000.0
+
+
+def test_update_client_inventory_rejects_already_linked_inventory():
+    c, db = make_client()
+    db.clients.rows.append({"id": "cl2", "company_id": "c1", "project_id": "p1", "nombre": "MARIA", "inventory_item_id": None, "saldo_restante": 0.0})
+
+    r = c.put('/api/clients/cl2', json={"inventory_item_id": "inv1"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "inventory_already_linked"
+
+
+def test_update_client_inventory_rejects_scope_mismatch():
+    c, db = make_client()
+    db.inventory_items.rows.append({"id": "inv-c2", "company_id": "c2", "project_id": "p2", "lote_edificio": "L2", "manzana_departamento": "M2", "precio_total": 90000})
+
+    r = c.put('/api/clients/cl1', json={"inventory_item_id": "inv-c2"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "inventory_scope_mismatch"

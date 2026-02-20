@@ -3547,14 +3547,13 @@ async def _dashboard_period_data(current_user: dict, empresa_id: Optional[str], 
         raise HTTPException(status_code=403, detail="Proyecto fuera de alcance")
     project_ids = [p["id"] for p in projects]
 
-    budget_query = {}
-    if project_ids:
-        budget_query["project_id"] = {"$in": project_ids}
+    budget_query = {"project_id": {"$in": project_ids}}
     budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(5000)
 
-    mov_query = {"status": MovementStatus.POSTED.value}
-    if project_ids:
-        mov_query["project_id"] = {"$in": project_ids}
+    mov_query = {
+        "status": MovementStatus.POSTED.value,
+        "project_id": {"$in": project_ids},
+    }
     movements = await db.movements.find(movement_active_query(extra=mov_query), {"_id": 0}).to_list(5000)
 
     by_partida = {}
@@ -3576,8 +3575,9 @@ async def _dashboard_period_data(current_user: dict, empresa_id: Optional[str], 
         if _period_match(dt, year, month, period):
             key = mv.get("partida_codigo")
             by_partida.setdefault(key, {"partida_codigo": key, "budget": 0.0, "real": 0.0})
-            by_partida[key]["real"] += float(mv.get("amount_mxn", 0))
-            total_real += float(mv.get("amount_mxn", 0))
+            real_amount = abs(float(mv.get("amount_mxn", 0)))
+            by_partida[key]["real"] += real_amount
+            total_real += real_amount
 
     out_partidas = []
     for _, item in by_partida.items():
@@ -3867,7 +3867,12 @@ async def update_client(client_id: str, payload: ClientUpdate, current_user: dic
         if payload.inventory_item_id:
             inventory_item = await db.inventory_items.find_one({"id": payload.inventory_item_id}, {"_id": 0})
             if not inventory_item:
-                raise HTTPException(status_code=422, detail="inventory_item_id inválido")
+                raise HTTPException(status_code=422, detail={"code": "inventory_not_found", "message": "inventory_item_id inválido"})
+            if inventory_item.get("company_id") != client_doc.get("company_id") or inventory_item.get("project_id") != client_doc.get("project_id"):
+                raise HTTPException(status_code=422, detail={"code": "inventory_scope_mismatch", "message": "El inventario no pertenece a la misma empresa/proyecto del cliente"})
+            existing_for_inventory = await db.clients.find_one({"inventory_item_id": payload.inventory_item_id}, {"_id": 0})
+            if existing_for_inventory and existing_for_inventory.get("id") != client_id:
+                raise HTTPException(status_code=422, detail={"code": "inventory_already_linked", "message": "El inventario seleccionado ya está ligado a otro cliente"})
             update_data["inventory_item_id"] = payload.inventory_item_id
             snapshot = decimal_from_value(inventory_item.get("precio_total", 0), "precio_total")
             update_data["precio_venta_snapshot"] = float(snapshot)
