@@ -923,7 +923,10 @@ async def recalc_client_financials(client_id: str):
 
     matched_movements = await get_client_abono_movements(client_doc)
     abonos_total = sum(decimal_from_value(m.get("amount_mxn", 0), "amount_mxn") for m in matched_movements)
-    valor_total = decimal_from_value(client_doc.get("precio_venta_snapshot", 0), "precio_venta_snapshot")
+    valor_total_raw = client_doc.get("precio_venta_snapshot")
+    if valor_total_raw in (None, "", 0, 0.0):
+        valor_total_raw = client_doc.get("saldo_restante", 0)
+    valor_total = decimal_from_value(valor_total_raw, "precio_venta_snapshot")
     saldo = valor_total - abonos_total
     if saldo < Decimal("0"):
         saldo = Decimal("0")
@@ -941,7 +944,10 @@ async def validate_client_abono_limit(client_id: str, delta_amount_mxn: Decimal,
     client_doc = await db.clients.find_one({"id": client_id}, {"_id": 0})
     if not client_doc:
         raise HTTPException(status_code=422, detail={"code": "client_not_found", "message": "Cliente no válido"})
-    valor_total = decimal_from_value(client_doc.get("precio_venta_snapshot", 0), "precio_venta_snapshot")
+    valor_total_raw = client_doc.get("precio_venta_snapshot")
+    if valor_total_raw in (None, "", 0, 0.0):
+        valor_total_raw = client_doc.get("saldo_restante", 0)
+    valor_total = decimal_from_value(valor_total_raw, "precio_venta_snapshot")
     movements = await get_client_abono_movements(client_doc, exclude_movement_id=exclude_movement_id)
     abonos_total = Decimal("0")
     for mov in movements:

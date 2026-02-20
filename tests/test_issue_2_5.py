@@ -115,7 +115,7 @@ def client_for_role(role: str):
     server.db = FakeDB()
 
     async def fake_user():
-        return {"user_id": "u1", "email": "u@test.com", "role": role, "must_change_password": False}
+        return {"user_id": "u1", "email": "u@test.com", "role": role, "empresa_id": "e1", "must_change_password": False}
 
     server.app.dependency_overrides[server.get_current_user] = fake_user
     return TestClient(server.app)
