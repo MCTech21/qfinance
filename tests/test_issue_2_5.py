@@ -78,6 +78,10 @@ class FakeDB:
         self.catalogo_partidas = FakeCollection([
             {"id": "cp1", "codigo": "401", "nombre": "Ingresos", "grupo": "ingresos", "is_active": True},
             {"id": "cp2", "codigo": "205", "nombre": "Egresos", "grupo": "obra", "is_active": True},
+            {"id": "cp3", "codigo": "103", "nombre": "Obra 103", "grupo": "obra", "is_active": True},
+            {"id": "cp4", "codigo": "301", "nombre": "Otros", "grupo": "obra", "is_active": True},
+            {"id": "cp5", "codigo": "402", "nombre": "Ingreso 402", "grupo": "ingresos", "is_active": True},
+            {"id": "cp6", "codigo": "403", "nombre": "Ingreso 403", "grupo": "ingresos", "is_active": True},
         ])
         self.projects = FakeCollection([{"id": "pr1", "code": "P1", "name": "Proyecto", "empresa_id": "e1", "is_active": True}])
         self.providers = FakeCollection([{"id": "pv1", "code": "PV", "name": "Proveedor", "is_active": True}])
@@ -111,7 +115,7 @@ def client_for_role(role: str):
     server.db = FakeDB()
 
     async def fake_user():
-        return {"user_id": "u1", "email": "u@test.com", "role": role, "must_change_password": False}
+        return {"user_id": "u1", "email": "u@test.com", "role": role, "empresa_id": "e1", "must_change_password": False}
 
     server.app.dependency_overrides[server.get_current_user] = fake_user
     return TestClient(server.app)
@@ -351,7 +355,7 @@ def test_login_requires_force_change_flag_and_flow():
 
 def test_non_admin_cannot_admin_delete_movements():
     client = client_for_role("finanzas")
-    res = client.delete("/api/movements/m1", json={"reason": "cleanup"})
+    res = client.request("DELETE", "/api/movements/m1", json={"reason": "cleanup"})
     assert res.status_code == 403
 
 
@@ -385,7 +389,7 @@ def test_soft_delete_hidden_from_movements_and_dashboard_and_audited():
     assert before_list.status_code == 200
     assert len(before_list.json()) == 1
 
-    deleted = client.delete("/api/movements/m1", json={"reason": "bad row"})
+    deleted = client.request("DELETE", "/api/movements/m1", json={"reason": "bad row"})
     assert deleted.status_code == 200
 
     after_list = client.get("/api/movements")
