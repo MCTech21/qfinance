@@ -718,9 +718,12 @@ def to_json_safe(value: Any):
 def normalize_role_input(role: Optional[str]) -> Optional[str]:
     if role is None:
         return None
-    role_normalized = str(role).strip().lower()
-    if role_normalized == UserRole.CAPTURA.value:
+    role_normalized = str(role).strip().lower().replace("-", "_").replace(" ", "_")
+    compact = role_normalized.replace("_", "")
+    if compact in {"capturaingresos", "captura_ingresos".replace("_", "")}: 
         return UserRole.CAPTURA_INGRESOS.value
+    if compact == "captura":
+        return UserRole.CAPTURA.value
     return role_normalized
 
 
@@ -897,21 +900,20 @@ def resolve_inventory_reference(item: Optional[dict]) -> Optional[str]:
     if not item:
         return None
 
-    clave = get_inventory_clave(item)
-    if clave:
-        return clave
+    lote_edificio = to_optional_str(item.get("lote_edificio"))
+    if lote_edificio and "-" in lote_edificio:
+        return lote_edificio
 
-    for key in ("reference", "ref"):
-        value = to_optional_str(item.get(key))
-        if value:
-            return value
+    manzana_departamento = to_optional_str(item.get("manzana_departamento"))
+    if lote_edificio and manzana_departamento:
+        return f"{lote_edificio}-{manzana_departamento}"
 
     lote = to_optional_str(item.get("lote"))
-    edificio_o_manzana = to_optional_str(item.get("edificio") or item.get("manzana") or item.get("manzana_departamento"))
-    if lote and edificio_o_manzana:
-        return f"{lote}-{edificio_o_manzana}"
+    manzana = to_optional_str(item.get("manzana") or item.get("mz") or item.get("manzana_edificio") or item.get("edificio"))
+    if lote and manzana:
+        return f"{lote}-{manzana}"
 
-    for key in ("code", "inventory_code"):
+    for key in ("code", "inventory_code", "ref", "reference"):
         value = to_optional_str(item.get(key))
         if value:
             return value
@@ -4047,11 +4049,41 @@ async def delete_inventory(item_id: str, request: Request, current_user: dict = 
     await db.inventory_items.delete_one({"id": item_id})
     await log_admin_action(request, current_user, "ADMIN_HARD_DELETE", "inventory", item_id, True, before=item_doc, after=None, message="delete inventory")
     return {"message": "Inventario eliminado"}
+
+
+async def find_movement_for_receipt(movement_id: str) -> Optional[dict]:
+    lookup_id = to_optional_str(movement_id)
+    if not lookup_id:
+        return None
+
+    exact = await db.movements.find_one({"id": lookup_id}, {"_id": 0})
+    if exact:
+        return exact
+
+    prefix = lookup_id.split("_", 1)[0].strip()
+    if prefix and prefix != lookup_id:
+        prefixed = await db.movements.find_one({"id": prefix}, {"_id": 0})
+        if prefixed:
+            return prefixed
+
+    candidates = await db.movements.find({}, {"_id": 0}).to_list(5000)
+    for mov in candidates:
+        mov_id = to_optional_str(mov.get("id"))
+        if not mov_id:
+            continue
+        if mov_id == lookup_id:
+            return mov
+        if mov_id.startswith(f"{prefix}_") and prefix:
+            return mov
+        if lookup_id.startswith(f"{mov_id}_"):
+            return mov
+    return None
+
 @api_router.get("/movements/{movement_id}/receipt.pdf")
 async def movement_receipt_pdf(movement_id: str, current_user: dict = Depends(require_permission(Permission.VIEW_MOVEMENTS))):
-    movement = await db.movements.find_one({"id": movement_id}, {"_id": 0})
+    movement = await find_movement_for_receipt(movement_id)
     if not movement:
-        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+        raise HTTPException(status_code=404, detail={"code": "movement_not_found", "message": "Movimiento no encontrado", "movement_id": movement_id})
     project = await db.projects.find_one({"id": movement.get("project_id")}, {"_id": 0})
     if project:
         enforce_company_access(current_user, project.get("empresa_id"))
@@ -4090,7 +4122,7 @@ async def movement_receipt_pdf(movement_id: str, current_user: dict = Depends(re
 
     if client_doc and client_doc.get("id") and movement.get("client_id") != client_doc.get("id"):
         movement["client_id"] = client_doc.get("id")
-        await db.movements.update_one({"id": movement_id}, {"$set": {"client_id": client_doc.get("id"), "updated_at": datetime.now(timezone.utc).isoformat()}})
+        await db.movements.update_one({"id": movement.get("id")}, {"$set": {"client_id": client_doc.get("id"), "updated_at": datetime.now(timezone.utc).isoformat()}})
 
     if client_doc:
         client_doc = await recalc_client_financials(client_doc.get("id")) or client_doc

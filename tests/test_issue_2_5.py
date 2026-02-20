@@ -559,3 +559,33 @@ def test_receipt_pdf_legacy_abono_without_client_id_returns_200_pdf():
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/pdf")
     assert response.content.startswith(b"%PDF")
+
+
+def test_receipt_id_with_suffix_is_resolved_without_422():
+    fake_db = FakeDB()
+    fake_db.movements.rows.append({
+        "id": "11382",
+        "project_id": "pr1",
+        "partida_codigo": "402",
+        "provider_id": None,
+        "client_id": "cl1",
+        "customer_name": "CLIENTE UNO",
+        "date": "2026-01-10T00:00:00+00:00",
+        "currency": "MXN",
+        "amount_original": 1000,
+        "exchange_rate": 1,
+        "amount_mxn": 1000,
+        "reference": "L1-M3",
+        "status": "posted",
+    })
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "adm1", "email": "a@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+
+    response = client.get("/api/movements/11382_5b533/receipt.pdf")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/pdf")
