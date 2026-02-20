@@ -450,6 +450,7 @@ async def get_current_user(request: Request, credentials: HTTPAuthorizationCrede
             allowed_paths = {"/api/auth/force-change-password", "/api/auth/logout", "/api/auth/me", "/api/auth/permissions"}
             if request.url.path not in allowed_paths:
                 raise HTTPException(status_code=403, detail="Debes cambiar tu contraseña para continuar")
+        payload["role"] = normalize_role_input(payload.get("role")) or payload.get("role")
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expirado")
@@ -558,7 +559,7 @@ ROLE_PERMISSIONS = {
 def require_permission(*permissions: Permission):
     """Check if user has at least one of the required permissions"""
     async def permission_checker(current_user: dict = Depends(get_current_user)):
-        user_role = current_user.get("role")
+        user_role = normalize_role_input(current_user.get("role")) or current_user.get("role")
         user_permissions = ROLE_PERMISSIONS.get(user_role, [])
         
         if not any(p.value in user_permissions for p in permissions):
@@ -1645,17 +1646,20 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
             raise HTTPException(status_code=422, detail={"code": "client_not_found", "message": "Cliente no válido"})
         if client_doc.get("project_id") and client_doc.get("project_id") != movement_data.project_id:
             raise HTTPException(status_code=422, detail={"code": "client_project_mismatch", "message": "El proyecto del movimiento no coincide con el proyecto del cliente"})
-        if not client_doc.get("inventory_item_id"):
-            raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Cliente no tiene inventario ligado"})
-        inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0})
-        if not inventory_item:
-            raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Inventario ligado no encontrado"})
+        inventory_item = None
+        inventory_reference = None
+        if client_doc.get("inventory_item_id"):
+            inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0})
+            if inventory_item:
+                inventory_reference = resolve_inventory_reference(inventory_item) or client_doc.get("inventory_item_id")
         enforce_company_access(current_user, client_doc.get("company_id"))
         customer_name = normalize_customer_name(client_doc.get("nombre"))
         if not customer_name:
             raise HTTPException(status_code=422, detail={"code": "client_name_required", "message": "Cliente sin nombre válido"})
-        inventory_reference = resolve_inventory_reference(inventory_item) or client_doc.get("inventory_item_id")
-        movement_data.reference = inventory_reference or f"ABONO-{client_doc.get('id')}"
+        if inventory_reference:
+            movement_data.reference = inventory_reference
+        elif not movement_data.reference:
+            movement_data.reference = f"ABONO-{client_doc.get('id')}"
         provider = None
     else:
         if not movement_data.provider_id:
@@ -1774,6 +1778,13 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     await db.movements.insert_one(doc)
 
     receipt_url = None
+    if no_provider_flow and client_doc and not client_doc.get("inventory_item_id"):
+        await log_audit(current_user, "MOVEMENT_402_403_MANUAL_REFERENCE", "movements", movement.id, {
+            "movement_id": movement.id,
+            "client_id": client_doc.get("id"),
+            "message": "Cliente sin inventario ligado; se conserva referencia manual para abono 402/403",
+            "reference": movement_data.reference,
+        })
     if no_provider_flow and client_doc and movement_counts_as_abono_doc(doc):
         updated_client = await recalc_client_financials(client_doc["id"])
         await log_audit(current_user, "MOVEMENT_402_403_BALANCE", "clients", client_doc["id"], {
@@ -3324,15 +3335,16 @@ async def admin_update_movimiento(
         if client_doc.get("project_id") and client_doc.get("project_id") != target_project_id:
             raise HTTPException(status_code=422, detail={"code": "client_project_mismatch", "message": "El proyecto del movimiento no coincide con el proyecto del cliente"})
         enforce_company_access(current_user, client_doc.get("company_id"))
-        if not client_doc.get("inventory_item_id"):
-            raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Cliente no tiene inventario ligado"})
-        inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0})
-        if not inventory_item:
-            raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Inventario ligado no encontrado"})
+        inventory_reference = None
+        if client_doc.get("inventory_item_id"):
+            inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0})
+            if inventory_item:
+                inventory_reference = resolve_inventory_reference(inventory_item) or client_doc.get("inventory_item_id")
         updates["provider_id"] = None
         updates["client_id"] = client_id
         updates["customer_name"] = normalize_customer_name(client_doc.get("nombre"))
-        updates["reference"] = f"{inventory_item.get('lote_edificio','')}-{inventory_item.get('manzana_departamento','')}"
+        if inventory_reference:
+            updates["reference"] = inventory_reference
     elif "provider_id" in updates:
         provider = await db.providers.find_one({"id": updates["provider_id"]}, {"_id": 0})
         if not provider:
@@ -4040,15 +4052,34 @@ async def movement_receipt_pdf(movement_id: str, current_user: dict = Depends(re
     movement = await db.movements.find_one({"id": movement_id}, {"_id": 0})
     if not movement:
         raise HTTPException(status_code=404, detail="Movimiento no encontrado")
-    if movement.get("is_deleted") is True or str(movement.get("partida_codigo")) not in ABONO_PARTIDAS or movement.get("status") != MovementStatus.POSTED.value:
-        raise HTTPException(status_code=422, detail={"code": "receipt_requires_posted_abono", "message": "Solo aplica a movimientos de abono 402/403 posted"})
-
     project = await db.projects.find_one({"id": movement.get("project_id")}, {"_id": 0})
     if project:
         enforce_company_access(current_user, project.get("empresa_id"))
     empresa = await db.empresas.find_one({"id": project.get("empresa_id")}, {"_id": 0}) if project else None
 
+    partida = str(movement.get("partida_codigo") or "")
+    is_ingreso = partida.startswith("4")
+    if current_user.get("role") == UserRole.CAPTURA_INGRESOS.value and not is_ingreso:
+        raise HTTPException(status_code=403, detail="Rol captura_ingresos solo puede imprimir recibos de ingresos (4xx)")
+
     client_doc = await db.clients.find_one({"id": movement.get("client_id")}, {"_id": 0}) if movement.get("client_id") else None
+    inventory_item = None
+
+    if not client_doc and partida in ABONO_PARTIDAS and movement.get("reference") and project:
+        ref_value = movement.get("reference")
+        inv_queries = [
+            {"id": ref_value, "company_id": project.get("empresa_id"), "project_id": movement.get("project_id")},
+            {"reference": ref_value, "company_id": project.get("empresa_id"), "project_id": movement.get("project_id")},
+            {"ref": ref_value, "company_id": project.get("empresa_id"), "project_id": movement.get("project_id")},
+            {"lote_edificio": ref_value, "company_id": project.get("empresa_id"), "project_id": movement.get("project_id")},
+        ]
+        for inv_query in inv_queries:
+            inventory_item = await db.inventory_items.find_one(inv_query, {"_id": 0})
+            if inventory_item:
+                client_doc = await db.clients.find_one({"inventory_item_id": inventory_item.get("id")}, {"_id": 0})
+                if client_doc:
+                    break
+
     if not client_doc:
         fallback_name = normalize_customer_name(movement.get("customer_name"))
         if fallback_name and movement.get("project_id"):
@@ -4056,24 +4087,24 @@ async def movement_receipt_pdf(movement_id: str, current_user: dict = Depends(re
             if project and project.get("empresa_id"):
                 legacy_query["company_id"] = project.get("empresa_id")
             client_doc = await db.clients.find_one(legacy_query, {"_id": 0})
-        if client_doc and client_doc.get("id"):
-            movement["client_id"] = client_doc.get("id")
-            await db.movements.update_one({"id": movement_id}, {"$set": {"client_id": client_doc.get("id"), "updated_at": datetime.now(timezone.utc).isoformat()}})
 
-    if not client_doc:
-        raise HTTPException(status_code=422, detail={"code": "missing_client_link", "message": "No se encontró cliente ligado para generar recibo", "movement_id": movement_id})
+    if client_doc and client_doc.get("id") and movement.get("client_id") != client_doc.get("id"):
+        movement["client_id"] = client_doc.get("id")
+        await db.movements.update_one({"id": movement_id}, {"$set": {"client_id": client_doc.get("id"), "updated_at": datetime.now(timezone.utc).isoformat()}})
 
-    client_doc = await recalc_client_financials(client_doc.get("id")) or client_doc
-    inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0}) if client_doc.get("inventory_item_id") else None
+    if client_doc:
+        client_doc = await recalc_client_financials(client_doc.get("id")) or client_doc
+    if not inventory_item and client_doc and client_doc.get("inventory_item_id"):
+        inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0})
 
     lines = [
         "RECIBO DE ABONO - QUANTUM",
         f"Folio: {movement.get('id')}",
         f"Fecha emisión: {to_tijuana(datetime.now(timezone.utc)).strftime('%Y-%m-%d %H:%M:%S')}",
-        f"Cliente: {client_doc.get('nombre') if client_doc else movement.get('customer_name') or ''}",
+        f"Cliente: {client_doc.get('nombre') if client_doc else movement.get('customer_name') or 'S/I'}",
         f"Empresa: {empresa.get('nombre') if empresa else ''}",
         f"Proyecto: {project.get('code') if project else ''} - {project.get('name') if project else ''}",
-        f"Inventario: {get_inventory_clave(inventory_item) or ''}",
+        f"Inventario: {get_inventory_clave(inventory_item) or (movement.get('reference') or 'N/A')}",
         f"Partida: {movement.get('partida_codigo')}",
         f"Referencia: {movement.get('reference')}",
         f"Moneda: {movement.get('currency')}",

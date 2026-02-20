@@ -89,7 +89,7 @@ const Movements = () => {
     setIsLoading(true);
     setClientsLoading(true);
     try {
-      const [movementsRes, empresasRes, projectsRes, partidasRes, providersRes, clientsRes] = await Promise.all([
+      const [movementsRes, empresasRes, projectsRes, partidasRes, providersRes, clientsRes] = await Promise.allSettled([
         api().get("/movements", {
           params: {
             project_id: filters.project_id !== "all" ? filters.project_id : undefined,
@@ -104,16 +104,30 @@ const Movements = () => {
         api().get("/providers"),
         api().get("/clients")
       ]);
-      setMovements(movementsRes.data);
-      setEmpresas(empresasRes.data);
-      setProjects(projectsRes.data);
-      setCatalogoPartidas(partidasRes.data);
-      setProviders(providersRes.data);
-      setClients(clientsRes.data || []);
-      setClientsError("");
-    } catch (error) {
-      setClientsError("No se pudo cargar la lista de clientes");
-      toast.error("Error al cargar movimientos");
+
+      if (movementsRes.status === "fulfilled") setMovements(movementsRes.value.data || []);
+      else toast.error("Error al cargar movimientos");
+
+      if (empresasRes.status === "fulfilled") setEmpresas(empresasRes.value.data || []);
+      if (projectsRes.status === "fulfilled") setProjects(projectsRes.value.data || []);
+      if (partidasRes.status === "fulfilled") setCatalogoPartidas(partidasRes.value.data || []);
+
+      if (providersRes.status === "fulfilled") {
+        setProviders(providersRes.value.data || []);
+      } else if (providersRes.reason?.response?.status === 403) {
+        toast.error("No tienes permisos para ver proveedores");
+        setProviders([]);
+      }
+
+      if (clientsRes.status === "fulfilled") {
+        setClients(clientsRes.value.data || []);
+        setClientsError("");
+      } else if (clientsRes.reason?.response?.status === 403) {
+        setClientsError("No tienes permisos para ver clientes");
+        setClients([]);
+      } else {
+        setClientsError("No se pudo cargar la lista de clientes");
+      }
     } finally {
       setIsLoading(false);
       setClientsLoading(false);

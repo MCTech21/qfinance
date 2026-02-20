@@ -495,3 +495,67 @@ def test_new_402_movement_recalculates_client_and_receipt_pdf_is_available():
     assert receipt.status_code == 200
     assert receipt.headers["content-type"].startswith("application/pdf")
     assert receipt.content.startswith(b"%PDF")
+
+
+def test_captura_ingresos_can_read_catalogs_but_cannot_modify_clients_or_inventory():
+    client = client_for_role("captura_ingresos")
+
+    list_clients = client.get("/api/clients")
+    list_inventory = client.get("/api/inventory")
+    list_providers = client.get("/api/providers")
+
+    assert list_clients.status_code == 200
+    assert list_inventory.status_code == 200
+    assert list_providers.status_code == 200
+
+    create_client = client.post("/api/clients", json={
+        "company_id": "e1",
+        "project_id": "pr1",
+        "nombre": "NUEVO",
+        "inventory_item_id": "inv1",
+    })
+    create_inventory = client.post("/api/inventory", json={
+        "company_id": "e1",
+        "project_id": "pr1",
+        "m2_superficie": 100,
+        "m2_construccion": 0,
+        "lote_edificio": "L9",
+        "manzana_departamento": "M9",
+        "precio_m2_superficie": 1000,
+        "precio_m2_construccion": 0,
+        "descuento_bonificacion": 0,
+    })
+
+    assert create_client.status_code == 403
+    assert create_inventory.status_code == 403
+
+
+def test_receipt_pdf_legacy_abono_without_client_id_returns_200_pdf():
+    fake_db = FakeDB()
+    fake_db.movements.rows.append({
+        "id": "m-legacy-r1",
+        "project_id": "pr1",
+        "partida_codigo": "402",
+        "provider_id": None,
+        "client_id": None,
+        "customer_name": "CLIENTE UNO",
+        "date": "2026-01-10T00:00:00+00:00",
+        "currency": "MXN",
+        "amount_original": 1000,
+        "exchange_rate": 1,
+        "amount_mxn": 1000,
+        "reference": "L1-M3",
+        "status": "posted",
+    })
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "adm1", "email": "a@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+
+    response = client.get("/api/movements/m-legacy-r1/receipt.pdf")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert response.content.startswith(b"%PDF")
