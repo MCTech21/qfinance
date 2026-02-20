@@ -859,6 +859,16 @@ def normalize_customer_name(name: Optional[str]) -> Optional[str]:
     return normalized or None
 
 
+def to_optional_str(value: Optional[object]) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    normalized = str(value).strip()
+    return normalized or None
+
+
 ABONO_PARTIDAS = {"402", "403"}
 
 def movement_counts_as_abono_doc(movement: dict) -> bool:
@@ -881,6 +891,33 @@ def get_inventory_clave(item: Optional[dict]) -> Optional[str]:
     if lote and manzana:
         return f"{lote}-{manzana}"
     return lote or manzana or None
+
+def resolve_inventory_reference(item: Optional[dict]) -> Optional[str]:
+    if not item:
+        return None
+
+    clave = get_inventory_clave(item)
+    if clave:
+        return clave
+
+    for key in ("reference", "ref"):
+        value = to_optional_str(item.get(key))
+        if value:
+            return value
+
+    lote = to_optional_str(item.get("lote"))
+    edificio_o_manzana = to_optional_str(item.get("edificio") or item.get("manzana") or item.get("manzana_departamento"))
+    if lote and edificio_o_manzana:
+        return f"{lote}-{edificio_o_manzana}"
+
+    for key in ("code", "inventory_code"):
+        value = to_optional_str(item.get(key))
+        if value:
+            return value
+
+    return to_optional_str(item.get("id") or item.get("_id"))
+
+
 
 
 async def get_client_abono_movements(client_doc: dict, exclude_movement_id: Optional[str] = None):
@@ -1593,10 +1630,14 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     if not project:
         raise HTTPException(status_code=400, detail="Proyecto no válido")
     
+    movement_data.provider_id = to_optional_str(movement_data.provider_id)
+    movement_data.client_id = to_optional_str(movement_data.client_id)
+    movement_data.reference = (movement_data.reference or "").strip()
+
     client_doc = None
     if no_provider_flow:
-        if movement_data.provider_id:
-            raise HTTPException(status_code=422, detail="Las partidas 402/403 no aceptan proveedor")
+        if movement_data.provider_id is not None:
+            raise HTTPException(status_code=422, detail={"code": "provider_not_allowed_for_abono", "message": "Las partidas 402/403 no aceptan proveedor"})
         if not movement_data.client_id:
             raise HTTPException(status_code=422, detail={"code": "client_required_for_partida_402_403", "message": "client_id es obligatorio para partidas 402/403"})
         client_doc = await db.clients.find_one({"id": movement_data.client_id}, {"_id": 0})
@@ -1613,15 +1654,18 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         customer_name = normalize_customer_name(client_doc.get("nombre"))
         if not customer_name:
             raise HTTPException(status_code=422, detail={"code": "client_name_required", "message": "Cliente sin nombre válido"})
-        movement_data.reference = f"{inventory_item.get('lote_edificio','')}-{inventory_item.get('manzana_departamento','')}"
+        inventory_reference = resolve_inventory_reference(inventory_item) or client_doc.get("inventory_item_id")
+        movement_data.reference = inventory_reference or f"ABONO-{client_doc.get('id')}"
         provider = None
     else:
+        if not movement_data.provider_id:
+            raise HTTPException(status_code=422, detail={"code": "provider_required", "message": "provider_id es obligatorio para partidas distintas a 402/403"})
         provider = await db.providers.find_one({"id": movement_data.provider_id}, {"_id": 0})
         if not provider:
-            raise HTTPException(status_code=400, detail="Proveedor no válido")
+            raise HTTPException(status_code=422, detail={"code": "provider_not_found", "message": "Proveedor no válido"})
     
     if movement_data.amount_original <= 0:
-        raise HTTPException(status_code=400, detail="Monto debe ser mayor a 0")
+        raise HTTPException(status_code=422, detail={"code": "invalid_amount", "message": "Monto debe ser mayor a 0"})
 
     if project:
         enforce_company_access(current_user, project.get("empresa_id"))
@@ -1643,7 +1687,7 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     }, {"_id": 0})
     
     if dup_check:
-        raise HTTPException(status_code=400, detail="Movimiento duplicado detectado")
+        raise HTTPException(status_code=422, detail={"code": "duplicate_movement", "message": "Movimiento duplicado detectado"})
     
     # Check budget status
     year = parsed_date.year
@@ -3295,7 +3339,7 @@ async def admin_update_movimiento(
             raise HTTPException(status_code=400, detail="Proveedor no válido")
 
     if "amount_original" in updates and updates["amount_original"] <= 0:
-        raise HTTPException(status_code=400, detail="Monto debe ser mayor a 0")
+        raise HTTPException(status_code=422, detail={"code": "invalid_amount", "message": "Monto debe ser mayor a 0"})
     if "exchange_rate" in updates and updates["exchange_rate"] <= 0:
         raise HTTPException(status_code=400, detail="Tipo de cambio debe ser mayor a 0")
 
@@ -3683,20 +3727,20 @@ async def list_inventory(company_id: Optional[str] = None, project_id: Optional[
 async def _resolve_company_id(raw_company: Optional[str]) -> str:
     company_value = (raw_company or "").strip()
     if not company_value:
-        raise HTTPException(status_code=422, detail="empresa/company_id es obligatorio")
+        raise HTTPException(status_code=422, detail={"code": "company_required", "message": "empresa/company_id es obligatorio"})
     empresa = await db.empresas.find_one({"id": company_value}, {"_id": 0})
     if empresa:
         return empresa.get("id")
     empresa = await db.empresas.find_one({"nombre": company_value}, {"_id": 0})
     if empresa:
         return empresa.get("id")
-    raise HTTPException(status_code=422, detail="empresa/company_id inválido")
+    raise HTTPException(status_code=422, detail={"code": "invalid_company", "message": "empresa/company_id inválido"})
 
 
 async def _resolve_project_id(raw_project: Optional[str], company_id: str) -> str:
     project_value = (raw_project or "").strip()
     if not project_value:
-        raise HTTPException(status_code=422, detail="proyecto/project_id es obligatorio")
+        raise HTTPException(status_code=422, detail={"code": "project_required", "message": "proyecto/project_id es obligatorio"})
     project = await db.projects.find_one({"id": project_value}, {"_id": 0})
     if not project:
         project = await db.projects.find_one({"code": project_value}, {"_id": 0})
@@ -3704,9 +3748,9 @@ async def _resolve_project_id(raw_project: Optional[str], company_id: str) -> st
         code = project_value.split("-", 1)[0].strip()
         project = await db.projects.find_one({"code": code}, {"_id": 0})
     if not project:
-        raise HTTPException(status_code=422, detail="project_id/proyecto inválido")
+        raise HTTPException(status_code=422, detail={"code": "invalid_project", "message": "project_id/proyecto inválido"})
     if project.get("empresa_id") != company_id:
-        raise HTTPException(status_code=422, detail="project_id no pertenece a company_id")
+        raise HTTPException(status_code=422, detail={"code": "project_company_mismatch", "message": "project_id no pertenece a company_id"})
     return project.get("id")
 
 
@@ -3723,11 +3767,11 @@ async def _resolve_inventory_item_id(raw_inventory: Optional[str], company_id: s
             lote, manzana = [part.strip() for part in value.split("-", 1)]
             item = await db.inventory_items.find_one({"lote_edificio": lote, "manzana_departamento": manzana, "company_id": company_id, "project_id": project_id}, {"_id": 0})
     if not item:
-        raise HTTPException(status_code=404, detail="Inventario no encontrado")
+        raise HTTPException(status_code=422, detail={"code": "inventory_not_found", "message": "Inventario no encontrado"})
     if item.get("company_id") != company_id:
-        raise HTTPException(status_code=422, detail="inventory_item_id no pertenece a la empresa seleccionada")
+        raise HTTPException(status_code=422, detail={"code": "inventory_company_mismatch", "message": "inventory_item_id no pertenece a la empresa seleccionada"})
     if item.get("project_id") != project_id:
-        raise HTTPException(status_code=422, detail="inventory_item_id no pertenece al proyecto seleccionado")
+        raise HTTPException(status_code=422, detail={"code": "inventory_project_mismatch", "message": "inventory_item_id no pertenece al proyecto seleccionado"})
     return item.get("id")
 
 
@@ -3738,7 +3782,7 @@ async def _normalize_client_create_payload(payload: ClientCreateRequest) -> Clie
 
     nombre = (payload.nombre or "").strip().upper()
     if not nombre:
-        raise HTTPException(status_code=422, detail="nombre es obligatorio")
+        raise HTTPException(status_code=422, detail={"code": "name_required", "message": "nombre es obligatorio"})
 
     return ClientBase(
         company_id=company_id,
@@ -3771,10 +3815,10 @@ async def create_client(payload: ClientCreateRequest, current_user: dict = Depen
     if normalized.inventory_item_id:
         inventory_item = await db.inventory_items.find_one({"id": normalized.inventory_item_id}, {"_id": 0})
         if not inventory_item:
-            raise HTTPException(status_code=404, detail="Inventario no encontrado")
+            raise HTTPException(status_code=422, detail={"code": "inventory_not_found", "message": "Inventario no encontrado"})
         existing_for_inventory = await db.clients.find_one({"inventory_item_id": normalized.inventory_item_id}, {"_id": 0})
         if existing_for_inventory:
-            raise HTTPException(status_code=409, detail="El inventario seleccionado ya está ligado a otro cliente")
+            raise HTTPException(status_code=409, detail={"code": "inventory_already_linked", "message": "El inventario seleccionado ya está ligado a otro cliente"})
         snapshot = decimal_from_value(inventory_item.get("precio_total", 0), "precio_total")
 
     duplicate = await db.clients.find_one({
@@ -3784,7 +3828,7 @@ async def create_client(payload: ClientCreateRequest, current_user: dict = Depen
         "inventory_item_id": normalized.inventory_item_id,
     }, {"_id": 0})
     if duplicate:
-        raise HTTPException(status_code=409, detail="Cliente duplicado para la combinación empresa/proyecto/inventario")
+        raise HTTPException(status_code=422, detail={"code": "duplicate_client", "message": "Cliente duplicado para la combinación empresa/proyecto/inventario"})
 
     doc = Client(**normalized.model_dump(), precio_venta_snapshot=snapshot, saldo_restante=snapshot).model_dump()
     doc["created_at"] = doc["created_at"].isoformat(); doc["updated_at"] = doc["updated_at"].isoformat()
@@ -3794,12 +3838,12 @@ async def create_client(payload: ClientCreateRequest, current_user: dict = Depen
     try:
         await db.clients.insert_one(doc)
     except DuplicateKeyError:
-        raise HTTPException(status_code=409, detail="Conflicto al crear cliente (revisa inventario ligado o datos duplicados)")
+        raise HTTPException(status_code=422, detail={"code": "client_create_conflict", "message": "Conflicto al crear cliente (revisa inventario ligado o datos duplicados)"})
     except HTTPException:
         raise
     except Exception:
         logger.exception("Error creating client")
-        raise HTTPException(status_code=422, detail="No se pudo crear el cliente con los datos enviados")
+        raise HTTPException(status_code=422, detail={"code": "client_create_failed", "message": "No se pudo crear el cliente con los datos enviados"})
     await log_audit(current_user, "CREATE", "clients", doc["id"], {"data": doc})
     return sanitize_mongo_document(doc)
 
@@ -3887,7 +3931,7 @@ async def update_client(client_id: str, payload: ClientUpdate, current_user: dic
     if payload.nombre is not None:
         nombre = payload.nombre.strip().upper()
         if not nombre:
-            raise HTTPException(status_code=422, detail="nombre es obligatorio")
+            raise HTTPException(status_code=422, detail={"code": "name_required", "message": "nombre es obligatorio"})
         update_data["nombre"] = nombre
     if payload.telefono is not None:
         update_data["telefono"] = payload.telefono
@@ -3996,17 +4040,31 @@ async def movement_receipt_pdf(movement_id: str, current_user: dict = Depends(re
     movement = await db.movements.find_one({"id": movement_id}, {"_id": 0})
     if not movement:
         raise HTTPException(status_code=404, detail="Movimiento no encontrado")
-    if not movement_counts_as_abono_doc(movement):
-        raise HTTPException(status_code=422, detail="Solo aplica a movimientos de abono 402/403 posted")
+    if movement.get("is_deleted") is True or str(movement.get("partida_codigo")) not in ABONO_PARTIDAS or movement.get("status") != MovementStatus.POSTED.value:
+        raise HTTPException(status_code=422, detail={"code": "receipt_requires_posted_abono", "message": "Solo aplica a movimientos de abono 402/403 posted"})
 
     project = await db.projects.find_one({"id": movement.get("project_id")}, {"_id": 0})
     if project:
         enforce_company_access(current_user, project.get("empresa_id"))
     empresa = await db.empresas.find_one({"id": project.get("empresa_id")}, {"_id": 0}) if project else None
+
     client_doc = await db.clients.find_one({"id": movement.get("client_id")}, {"_id": 0}) if movement.get("client_id") else None
-    if client_doc:
-        client_doc = await recalc_client_financials(client_doc.get("id")) or client_doc
-    inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0}) if client_doc and client_doc.get("inventory_item_id") else None
+    if not client_doc:
+        fallback_name = normalize_customer_name(movement.get("customer_name"))
+        if fallback_name and movement.get("project_id"):
+            legacy_query = {"project_id": movement.get("project_id"), "nombre": fallback_name.upper()}
+            if project and project.get("empresa_id"):
+                legacy_query["company_id"] = project.get("empresa_id")
+            client_doc = await db.clients.find_one(legacy_query, {"_id": 0})
+        if client_doc and client_doc.get("id"):
+            movement["client_id"] = client_doc.get("id")
+            await db.movements.update_one({"id": movement_id}, {"$set": {"client_id": client_doc.get("id"), "updated_at": datetime.now(timezone.utc).isoformat()}})
+
+    if not client_doc:
+        raise HTTPException(status_code=422, detail={"code": "missing_client_link", "message": "No se encontró cliente ligado para generar recibo", "movement_id": movement_id})
+
+    client_doc = await recalc_client_financials(client_doc.get("id")) or client_doc
+    inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0}) if client_doc.get("inventory_item_id") else None
 
     lines = [
         "RECIBO DE ABONO - QUANTUM",

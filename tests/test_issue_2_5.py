@@ -181,7 +181,9 @@ def test_402_403_require_client_and_no_provider():
     bad_client = client.post("/api/movements", json=movement_payload("403", provider_id=None))
     ok = client.post("/api/movements", json=movement_payload("403", provider_id=None, client_id="cl1"))
     assert bad_provider.status_code == 422
+    assert bad_provider.json()["detail"]["code"] == "provider_not_allowed_for_abono"
     assert bad_client.status_code == 422
+    assert bad_client.json()["detail"]["code"] == "client_required_for_partida_402_403"
     assert ok.status_code == 200
     assert ok.json()["movement"]["provider_id"] is None
     assert ok.json()["movement"]["reference"] == "L1-M3"
@@ -435,3 +437,61 @@ def test_admin_patch_movement_creates_audit_with_reason():
     admin_updates = [a for a in fake_db.audit_logs.rows if a["action"] == "ADMIN_UPDATE" and a["entity_id"] == "m1"]
     assert len(admin_updates) == 1
     assert admin_updates[0]["changes"]["message"] == "corrección"
+
+
+def test_create_client_valid_inventory_returns_201_and_persists():
+    fake_db = FakeDB()
+    fake_db.inventory_items.rows.append({
+        "id": "inv2",
+        "company_id": "e1",
+        "project_id": "pr1",
+        "lote_edificio": "L2",
+        "manzana_departamento": "M1",
+        "precio_total": 250000.0,
+    })
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "adm1", "email": "a@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+
+    payload = {
+        "company_id": "e1",
+        "project_id": "pr1",
+        "nombre": "Cliente Nuevo",
+        "telefono": "555123",
+        "domicilio": "Calle 1",
+        "inventory_item_id": "inv2",
+    }
+    created = client.post("/api/clients", json=payload)
+    assert created.status_code == 201
+    assert created.json()["inventory_item_id"] == "inv2"
+
+
+def test_new_402_movement_recalculates_client_and_receipt_pdf_is_available():
+    fake_db = FakeDB()
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "adm1", "email": "a@test.com", "role": "admin", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+
+    payload = movement_payload("402", provider_id=None, client_id="cl1", reference="")
+    created = client.post("/api/movements", json=payload)
+    assert created.status_code == 200
+
+    movement = created.json()["movement"]
+    assert movement["client_id"] == "cl1"
+
+    client_doc = next(c for c in fake_db.clients.rows if c["id"] == "cl1")
+    assert client_doc["abonos_total_mxn"] == 1000.0
+    assert client_doc["saldo_restante"] == 499000.0
+
+    receipt = client.get(f"/api/movements/{movement['id']}/receipt.pdf")
+    assert receipt.status_code == 200
+    assert receipt.headers["content-type"].startswith("application/pdf")
+    assert receipt.content.startswith(b"%PDF")
