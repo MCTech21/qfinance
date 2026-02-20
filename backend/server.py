@@ -872,10 +872,9 @@ def get_inventory_clave(item: Optional[dict]) -> Optional[str]:
     return lote or manzana or None
 
 
-async def recalc_client_financials(client_id: str):
-    client_doc = await db.clients.find_one({"id": client_id}, {"_id": 0})
-    if not client_doc:
-        return None
+async def get_client_abono_movements(client_doc: dict, exclude_movement_id: Optional[str] = None):
+    if not client_doc or not client_doc.get("id"):
+        return []
 
     fallback_name = normalize_customer_name(client_doc.get("nombre"))
     query = movement_active_query(extra={
@@ -886,7 +885,9 @@ async def recalc_client_financials(client_id: str):
 
     matched_movements = []
     for mov in candidate_movements:
-        if mov.get("client_id") == client_id:
+        if exclude_movement_id and mov.get("id") == exclude_movement_id:
+            continue
+        if mov.get("client_id") == client_doc.get("id"):
             matched_movements.append(mov)
             continue
         if mov.get("client_id"):
@@ -894,14 +895,22 @@ async def recalc_client_financials(client_id: str):
         mov_name = normalize_customer_name(mov.get("customer_name"))
         if not mov_name or mov_name != fallback_name:
             continue
+        if client_doc.get("project_id") and mov.get("project_id") != client_doc.get("project_id"):
+            continue
         if client_doc.get("company_id"):
             project = await db.projects.find_one({"id": mov.get("project_id")}, {"_id": 0})
             if not project or project.get("empresa_id") != client_doc.get("company_id"):
                 continue
-        if client_doc.get("project_id") and mov.get("project_id") != client_doc.get("project_id"):
-            continue
         matched_movements.append(mov)
+    return matched_movements
 
+
+async def recalc_client_financials(client_id: str):
+    client_doc = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    if not client_doc:
+        return None
+
+    matched_movements = await get_client_abono_movements(client_doc)
     abonos_total = sum(decimal_from_value(m.get("amount_mxn", 0), "amount_mxn") for m in matched_movements)
     valor_total = decimal_from_value(client_doc.get("precio_venta_snapshot", 0), "precio_venta_snapshot")
     saldo = valor_total - abonos_total
@@ -922,12 +931,9 @@ async def validate_client_abono_limit(client_id: str, delta_amount_mxn: Decimal,
     if not client_doc:
         raise HTTPException(status_code=422, detail={"code": "client_not_found", "message": "Cliente no válido"})
     valor_total = decimal_from_value(client_doc.get("precio_venta_snapshot", 0), "precio_venta_snapshot")
-    query = {"client_id": client_id, "status": MovementStatus.POSTED.value, "partida_codigo": {"$in": list(ABONO_PARTIDAS)}}
-    movements = await db.movements.find(movement_active_query(extra=query), {"_id": 0}).to_list(5000)
+    movements = await get_client_abono_movements(client_doc, exclude_movement_id=exclude_movement_id)
     abonos_total = Decimal("0")
     for mov in movements:
-        if exclude_movement_id and mov.get("id") == exclude_movement_id:
-            continue
         abonos_total += decimal_from_value(mov.get("amount_mxn", 0), "amount_mxn")
     projected = abonos_total + delta_amount_mxn
     if projected > valor_total:
@@ -1579,6 +1585,8 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         client_doc = await db.clients.find_one({"id": movement_data.client_id}, {"_id": 0})
         if not client_doc:
             raise HTTPException(status_code=422, detail={"code": "client_not_found", "message": "Cliente no válido"})
+        if client_doc.get("project_id") and client_doc.get("project_id") != movement_data.project_id:
+            raise HTTPException(status_code=422, detail={"code": "client_project_mismatch", "message": "El proyecto del movimiento no coincide con el proyecto del cliente"})
         if not client_doc.get("inventory_item_id"):
             raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Cliente no tiene inventario ligado"})
         inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0})
@@ -3252,6 +3260,8 @@ async def admin_update_movimiento(
         client_doc = await db.clients.find_one({"id": client_id}, {"_id": 0})
         if not client_doc:
             raise HTTPException(status_code=422, detail={"code": "client_not_found", "message": "Cliente no válido"})
+        if client_doc.get("project_id") and client_doc.get("project_id") != target_project_id:
+            raise HTTPException(status_code=422, detail={"code": "client_project_mismatch", "message": "El proyecto del movimiento no coincide con el proyecto del cliente"})
         enforce_company_access(current_user, client_doc.get("company_id"))
         if not client_doc.get("inventory_item_id"):
             raise HTTPException(status_code=422, detail={"code": "client_missing_inventory_link", "message": "Cliente no tiene inventario ligado"})

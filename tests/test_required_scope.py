@@ -100,6 +100,53 @@ def test_mov_402_forces_reference_and_adjusts_balance():
     assert cl["saldo_restante"] == 50000.0
 
 
+def test_mov_402_project_mismatch_422():
+    c, _ = make_client()
+    payload = {
+        "project_id": "p2",
+        "partida_codigo": "402",
+        "provider_id": None,
+        "client_id": "cl1",
+        "date": "2026-01-01",
+        "currency": "MXN",
+        "amount_original": 1000,
+        "exchange_rate": 1,
+        "reference": "R",
+    }
+    r = c.post("/api/movements", json=payload)
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "client_project_mismatch"
+
+
+def test_validate_abono_limit_counts_legacy_without_client_id():
+    c, db = make_client()
+    db.clients.rows[0].update({"nombre": "JUAN", "precio_venta_snapshot": 100000.0, "saldo_restante": 100000.0})
+    db.movements.rows.append({
+        "id": "m-legacy-1",
+        "project_id": "p1",
+        "partida_codigo": "402",
+        "customer_name": "JUAN",
+        "status": "posted",
+        "date": "2026-01-02T00:00:00+00:00",
+        "amount_mxn": 95000.0,
+    })
+
+    payload = {
+        "project_id": "p1",
+        "partida_codigo": "402",
+        "provider_id": None,
+        "client_id": "cl1",
+        "date": "2026-01-03",
+        "currency": "MXN",
+        "amount_original": 10000,
+        "exchange_rate": 1,
+        "reference": "R2",
+    }
+    r = c.post("/api/movements", json=payload)
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "payment_exceeds_balance"
+
+
 def test_rbac_cross_company_403():
     c, _ = make_client(role="captura", empresa_id="c1")
     r = c.get("/api/dashboard/total", params={"empresa_id": "c2"})
