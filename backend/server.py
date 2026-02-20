@@ -892,6 +892,20 @@ def get_inventory_clave(item: Optional[dict]) -> Optional[str]:
         return f"{lote}-{manzana}"
     return lote or manzana or None
 
+def resolve_inventory_reference(item: Optional[dict]) -> Optional[str]:
+    if not item:
+        return None
+    for key in ("code", "inventory_code", "ref", "reference", "lote", "lote_edificio"):
+        value = to_optional_str(item.get(key))
+        if value:
+            return value
+    clave = get_inventory_clave(item)
+    if clave:
+        return clave
+    return to_optional_str(item.get("id"))
+
+
+
 
 async def get_client_abono_movements(client_doc: dict, exclude_movement_id: Optional[str] = None):
     if not client_doc or not client_doc.get("id"):
@@ -1627,9 +1641,8 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         customer_name = normalize_customer_name(client_doc.get("nombre"))
         if not customer_name:
             raise HTTPException(status_code=422, detail={"code": "client_name_required", "message": "Cliente sin nombre válido"})
-        inventory_clave = get_inventory_clave(inventory_item) or client_doc.get("inventory_item_id")
-        if not movement_data.reference:
-            movement_data.reference = inventory_clave or f"ABONO-{client_doc.get('id')}"
+        inventory_reference = resolve_inventory_reference(inventory_item) or client_doc.get("inventory_item_id")
+        movement_data.reference = inventory_reference or f"ABONO-{client_doc.get('id')}"
         provider = None
     else:
         if not movement_data.provider_id:
@@ -3792,7 +3805,7 @@ async def create_client(payload: ClientCreateRequest, current_user: dict = Depen
             raise HTTPException(status_code=422, detail={"code": "inventory_not_found", "message": "Inventario no encontrado"})
         existing_for_inventory = await db.clients.find_one({"inventory_item_id": normalized.inventory_item_id}, {"_id": 0})
         if existing_for_inventory:
-            raise HTTPException(status_code=422, detail={"code": "inventory_already_linked", "message": "El inventario seleccionado ya está ligado a otro cliente"})
+            raise HTTPException(status_code=409, detail={"code": "inventory_already_linked", "message": "El inventario seleccionado ya está ligado a otro cliente"})
         snapshot = decimal_from_value(inventory_item.get("precio_total", 0), "precio_total")
 
     duplicate = await db.clients.find_one({
