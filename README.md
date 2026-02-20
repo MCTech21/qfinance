@@ -112,6 +112,18 @@ yarn install
 yarn start
 ```
 
+### Ejecutar pruebas backend (canónico)
+
+```bash
+bash scripts/run_backend_tests.sh
+```
+
+Para un archivo específico:
+
+```bash
+bash scripts/run_backend_tests.sh tests/test_required_scope.py
+```
+
 ## Usuarios
 
 No se incluyen credenciales preconfiguradas por defecto.
