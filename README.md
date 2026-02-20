@@ -112,6 +112,33 @@ yarn install
 yarn start
 ```
 
+### Ejecutar pruebas backend (canónico)
+
+```bash
+bash scripts/run_backend_tests.sh
+```
+
+Para un archivo específico:
+
+```bash
+bash scripts/run_backend_tests.sh tests/test_required_scope.py
+```
+
+> Nota (sandbox/offline): en ambientes sin red (ej. sandbox Codex) la instalación puede fallar por proxy/firewall.
+> Puedes usar:
+>
+> ```bash
+> SKIP_INSTALL=1 bash scripts/run_backend_tests.sh tests/test_required_scope.py
+> ```
+>
+> o
+>
+> ```bash
+> ALLOW_INSTALL_FAILURE=1 bash scripts/run_backend_tests.sh tests/test_required_scope.py
+> ```
+>
+> En esos casos, toma CI (GitHub Actions) como fuente de verdad.
+
 ## Usuarios
 
 No se incluyen credenciales preconfiguradas por defecto.

@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "../components/ui/dialog";
 import { Badge } from "../components/ui/badge";
-import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle, Pencil, Trash2 } from "lucide-react";
+import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle, Pencil, Trash2, Printer } from "lucide-react";
 import { buildYearOptions } from "../lib/yearRange";
 import { useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
@@ -166,8 +166,8 @@ const Movements = () => {
       } else {
         toast.success("Movimiento creado correctamente");
       }
-      if (response.data.receipt_url) {
-        window.open(response.data.receipt_url, "_blank");
+      if (response.data.receipt_url && response.data.movement?.id) {
+        await openReceiptPdf(response.data.movement.id, { autoPrint: true });
       }
       
       setDialogOpen(false);
@@ -254,6 +254,33 @@ const Movements = () => {
     return p ? `${p.codigo} - ${p.nombre}` : codigo;
   };
   const getProviderName = (id) => providers.find(p => p.id === id)?.name || "N/A";
+
+  const openReceiptPdf = async (movementId, options = {}) => {
+    if (!movementId) return;
+    const { autoPrint = false } = options;
+    try {
+      const response = await api().get(`/movements/${movementId}/receipt.pdf`, {
+        responseType: "blob",
+        headers: { Accept: "application/pdf" },
+      });
+      const blobUrl = window.URL.createObjectURL(new Blob([response.data], { type: "application/pdf" }));
+      const newWindow = window.open(blobUrl, "_blank", "noopener,noreferrer");
+      if (!newWindow) {
+        toast.error("El navegador bloqueó la ventana del recibo. Permite popups para continuar.");
+      } else if (autoPrint) {
+        newWindow.onload = () => {
+          try {
+            newWindow.print();
+          } catch {
+            // no-op: at least PDF stays open.
+          }
+        };
+      }
+      setTimeout(() => window.URL.revokeObjectURL(blobUrl), 60_000);
+    } catch (error) {
+      handleApiError(error, "No se pudo abrir el recibo PDF");
+    }
+  };
 
   const exportToExcel = () => {
     const rows = movements.map((mov) => {
@@ -503,6 +530,7 @@ const Movements = () => {
           </Button>
 
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+            {/* Keep exactly one child inside DialogTrigger when using asChild to avoid Radix runtime crashes. */}
             <DialogTrigger asChild>
               <Button data-testid="add-movement-btn">
                 <Plus className="h-4 w-4 mr-2" />
@@ -957,7 +985,7 @@ const Movements = () => {
                     <th className="text-right">Monto Original</th>
                     <th className="text-right">Monto MXN</th>
                     <th>Estado</th>
-                    {isAdmin && <th>Acciones</th>}
+                    {(isAdmin || movements.some((mov) => ["402", "403"].includes(String(mov.partida_codigo)) && mov.status === "posted")) && <th>Acciones</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -980,17 +1008,27 @@ const Movements = () => {
                           {statusLabels[mov.status]?.label || mov.status}
                         </Badge>
                       </td>
-                      {isAdmin && (
+                      {(isAdmin || (["402", "403"].includes(String(mov.partida_codigo)) && mov.status === "posted")) && (
                         <td>
                           <div className="flex gap-2">
-                            <Button size="sm" variant="outline" onClick={() => openEditDialog(mov)} data-testid={`movement-edit-btn-${mov.id}`}>
-                              <Pencil className="h-3 w-3 mr-1" />
-                              Editar
-                            </Button>
-                            <Button size="sm" variant="destructive" onClick={() => openDeleteDialog(mov)} data-testid={`movement-delete-btn-${mov.id}`}>
-                              <Trash2 className="h-3 w-3 mr-1" />
-                              Eliminar
-                            </Button>
+                            {["402", "403"].includes(String(mov.partida_codigo)) && mov.status === "posted" && (
+                              <Button size="sm" variant="secondary" onClick={() => openReceiptPdf(mov.id)} data-testid={`movement-receipt-btn-${mov.id}`}>
+                                <Printer className="h-3 w-3 mr-1" />
+                                Recibo
+                              </Button>
+                            )}
+                            {isAdmin && (
+                              <>
+                                <Button size="sm" variant="outline" onClick={() => openEditDialog(mov)} data-testid={`movement-edit-btn-${mov.id}`}>
+                                  <Pencil className="h-3 w-3 mr-1" />
+                                  Editar
+                                </Button>
+                                <Button size="sm" variant="destructive" onClick={() => openDeleteDialog(mov)} data-testid={`movement-delete-btn-${mov.id}`}>
+                                  <Trash2 className="h-3 w-3 mr-1" />
+                                  Eliminar
+                                </Button>
+                              </>
+                            )}
                           </div>
                         </td>
                       )}
