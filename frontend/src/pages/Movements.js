@@ -6,7 +6,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "../components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../components/ui/dialog";
 import { Badge } from "../components/ui/badge";
 import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle, Pencil, Trash2, Printer } from "lucide-react";
 import { buildYearOptions } from "../lib/yearRange";
@@ -451,13 +451,16 @@ const Movements = () => {
         </div>
         
         <div className="flex gap-2">
+          <Button
+            variant="outline"
+            data-testid="import-movements-btn"
+            onClick={() => setImportDialogOpen(true)}
+          >
+            <Upload className="h-4 w-4 mr-2" />
+            Importar CSV
+          </Button>
+
           <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
-            <DialogTrigger asChild>
-              <Button variant="outline" data-testid="import-movements-btn">
-                <Upload className="h-4 w-4 mr-2" />
-                Importar CSV
-              </Button>
-            </DialogTrigger>
             <DialogContent className="max-w-2xl">
               <DialogHeader>
                 <DialogTitle>Importar Movimientos desde CSV</DialogTitle>
@@ -529,22 +532,12 @@ const Movements = () => {
             Exportar Excel
           </Button>
 
+          <Button data-testid="add-movement-btn" onClick={() => setDialogOpen(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            Nuevo Movimiento
+          </Button>
+
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-            {/* Keep exactly one child inside DialogTrigger when using asChild to avoid Radix runtime crashes. */}
-            <DialogTrigger asChild>
-              <Button variant="outline" onClick={exportToExcel}>
-                <FileSpreadsheet className="h-4 w-4 mr-2" />
-                Exportar Excel
-              </Button>
-              <Button data-testid="add-movement-btn">
-                <Plus className="h-4 w-4 mr-2" />
-                Nuevo Movimiento
-              </Button>
-              <Button data-testid="add-movement-btn">
-                              <Plus className="h-4 w-4 mr-2" />
-                              Nuevo Movimiento
-                            </Button>
-            </DialogTrigger>
             <DialogContent className="max-w-xl">
               <DialogHeader>
                 <DialogTitle>Nuevo Movimiento</DialogTitle>
