@@ -100,9 +100,12 @@ export default function Clients() {
     if (!form.company_id || !form.project_id) return toast.error("Empresa y proyecto son obligatorios");
 
     const payload = {
-      ...form,
+      company_id: form.company_id,
+      project_id: form.project_id,
+      nombre: form.nombre.trim(),
+      telefono: form.telefono?.trim() || null,
+      domicilio: form.domicilio?.trim() || null,
       inventory_item_id: form.inventory_item_id || null,
-      nombre: form.nombre,
     };
 
     try {
