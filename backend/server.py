@@ -895,14 +895,27 @@ def get_inventory_clave(item: Optional[dict]) -> Optional[str]:
 def resolve_inventory_reference(item: Optional[dict]) -> Optional[str]:
     if not item:
         return None
-    for key in ("code", "inventory_code", "ref", "reference", "lote", "lote_edificio"):
-        value = to_optional_str(item.get(key))
-        if value:
-            return value
+
     clave = get_inventory_clave(item)
     if clave:
         return clave
-    return to_optional_str(item.get("id"))
+
+    for key in ("reference", "ref"):
+        value = to_optional_str(item.get(key))
+        if value:
+            return value
+
+    lote = to_optional_str(item.get("lote"))
+    edificio_o_manzana = to_optional_str(item.get("edificio") or item.get("manzana") or item.get("manzana_departamento"))
+    if lote and edificio_o_manzana:
+        return f"{lote}-{edificio_o_manzana}"
+
+    for key in ("code", "inventory_code"):
+        value = to_optional_str(item.get(key))
+        if value:
+            return value
+
+    return to_optional_str(item.get("id") or item.get("_id"))
 
 
 
@@ -4027,17 +4040,31 @@ async def movement_receipt_pdf(movement_id: str, current_user: dict = Depends(re
     movement = await db.movements.find_one({"id": movement_id}, {"_id": 0})
     if not movement:
         raise HTTPException(status_code=404, detail="Movimiento no encontrado")
-    if not movement_counts_as_abono_doc(movement):
+    if movement.get("is_deleted") is True or str(movement.get("partida_codigo")) not in ABONO_PARTIDAS or movement.get("status") != MovementStatus.POSTED.value:
         raise HTTPException(status_code=422, detail={"code": "receipt_requires_posted_abono", "message": "Solo aplica a movimientos de abono 402/403 posted"})
 
     project = await db.projects.find_one({"id": movement.get("project_id")}, {"_id": 0})
     if project:
         enforce_company_access(current_user, project.get("empresa_id"))
     empresa = await db.empresas.find_one({"id": project.get("empresa_id")}, {"_id": 0}) if project else None
+
     client_doc = await db.clients.find_one({"id": movement.get("client_id")}, {"_id": 0}) if movement.get("client_id") else None
-    if client_doc:
-        client_doc = await recalc_client_financials(client_doc.get("id")) or client_doc
-    inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0}) if client_doc and client_doc.get("inventory_item_id") else None
+    if not client_doc:
+        fallback_name = normalize_customer_name(movement.get("customer_name"))
+        if fallback_name and movement.get("project_id"):
+            legacy_query = {"project_id": movement.get("project_id"), "nombre": fallback_name.upper()}
+            if project and project.get("empresa_id"):
+                legacy_query["company_id"] = project.get("empresa_id")
+            client_doc = await db.clients.find_one(legacy_query, {"_id": 0})
+        if client_doc and client_doc.get("id"):
+            movement["client_id"] = client_doc.get("id")
+            await db.movements.update_one({"id": movement_id}, {"$set": {"client_id": client_doc.get("id"), "updated_at": datetime.now(timezone.utc).isoformat()}})
+
+    if not client_doc:
+        raise HTTPException(status_code=422, detail={"code": "missing_client_link", "message": "No se encontró cliente ligado para generar recibo", "movement_id": movement_id})
+
+    client_doc = await recalc_client_financials(client_doc.get("id")) or client_doc
+    inventory_item = await db.inventory_items.find_one({"id": client_doc.get("inventory_item_id")}, {"_id": 0}) if client_doc.get("inventory_item_id") else None
 
     lines = [
         "RECIBO DE ABONO - QUANTUM",
