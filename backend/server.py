@@ -222,6 +222,7 @@ class MovementBase(BaseModel):
     project_id: str
     partida_codigo: str  # Código del catálogo (100, 101, etc.)
     provider_id: Optional[str] = None
+    client_id: Optional[str] = None
     customer_name: Optional[str] = None
     date: datetime
     currency: Currency
@@ -684,6 +685,11 @@ CAPTURA_ALLOWED_BUDGET_CODES = {"103", "203", "206", "402", "403"}
 NO_PROVIDER_BUDGET_CODES = {"402", "403"}
 
 
+def _is_ingresos_code(code: str) -> bool:
+    normalized = str(code or "").strip()
+    return normalized.startswith("4")
+
+
 def sanitize_mongo_document(doc: dict) -> dict:
     if not doc:
         return doc
@@ -723,7 +729,12 @@ def is_capture_role(role: Optional[str]) -> bool:
 
 def enforce_capture_budget_scope(current_user: dict, budget_code: str):
     normalized = str(budget_code)
-    if is_capture_role(current_user.get("role")) and normalized not in CAPTURA_ALLOWED_BUDGET_CODES:
+    role = current_user.get("role")
+    if role == UserRole.CAPTURA_INGRESOS.value:
+        if not _is_ingresos_code(normalized):
+            raise HTTPException(status_code=403, detail="Rol captura_ingresos solo puede operar partidas de ingresos (400)")
+        return
+    if role in {UserRole.CAPTURA.value, "captura"} and normalized not in CAPTURA_ALLOWED_BUDGET_CODES:
         raise HTTPException(
             status_code=403,
             detail=f"Rol captura solo puede operar partidas: {', '.join(sorted(CAPTURA_ALLOWED_BUDGET_CODES))}",
@@ -2441,7 +2452,7 @@ async def get_partida_detail(
     
     # Enrich movements
     for m in movements:
-        prov = provider_map.get(m['provider_id'], {})
+        prov = provider_map.get(m.get('provider_id'), {})
         proj = project_map.get(m['project_id'], {})
         m['provider_name'] = prov.get('name', 'N/A')
         m['project_name'] = proj.get('name', 'N/A')
@@ -2554,7 +2565,7 @@ async def get_export_data(
         enriched_movements = []
         for mov in partida_movements:
             proj = project_map.get(mov['project_id'], {})
-            prov = provider_map.get(mov['provider_id'], {})
+            prov = provider_map.get(mov.get('provider_id'), {})
             mov_date = date_parser.parse(mov['date'])
             mov_date_tj = to_tijuana(mov_date)
             
