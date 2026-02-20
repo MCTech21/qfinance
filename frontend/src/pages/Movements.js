@@ -6,19 +6,26 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "../components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../components/ui/dialog";
 import { Badge } from "../components/ui/badge";
-import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle, Pencil, Trash2 } from "lucide-react";
+import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle, Pencil, Trash2, Printer } from "lucide-react";
 import { buildYearOptions } from "../lib/yearRange";
+import { useNavigate } from "react-router-dom";
+import * as XLSX from "xlsx";
+import { saveAs } from "file-saver";
 
 const Movements = () => {
   const { api, user } = useAuth();
+  const navigate = useNavigate();
   const [movements, setMovements] = useState([]);
   const [empresas, setEmpresas] = useState([]);
   const [projects, setProjects] = useState([]);
   const [filteredProjects, setFilteredProjects] = useState([]);
   const [catalogoPartidas, setCatalogoPartidas] = useState([]);
   const [providers, setProviders] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [clientsLoading, setClientsLoading] = useState(false);
+  const [clientsError, setClientsError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
@@ -43,7 +50,9 @@ const Movements = () => {
     amount_original: "",
     exchange_rate: "1",
     reference: "",
-    description: ""
+    description: "",
+    client_id: "",
+    customer_name: "",
   });
 
   const yearOptions = buildYearOptions();
@@ -78,8 +87,9 @@ const Movements = () => {
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
+    setClientsLoading(true);
     try {
-      const [movementsRes, empresasRes, projectsRes, partidasRes, providersRes] = await Promise.all([
+      const [movementsRes, empresasRes, projectsRes, partidasRes, providersRes, clientsRes] = await Promise.all([
         api().get("/movements", {
           params: {
             project_id: filters.project_id !== "all" ? filters.project_id : undefined,
@@ -91,17 +101,22 @@ const Movements = () => {
         api().get("/empresas"),
         api().get("/projects"),
         api().get("/catalogo-partidas"),
-        api().get("/providers")
+        api().get("/providers"),
+        api().get("/clients")
       ]);
       setMovements(movementsRes.data);
       setEmpresas(empresasRes.data);
       setProjects(projectsRes.data);
       setCatalogoPartidas(partidasRes.data);
       setProviders(providersRes.data);
+      setClients(clientsRes.data || []);
+      setClientsError("");
     } catch (error) {
+      setClientsError("No se pudo cargar la lista de clientes");
       toast.error("Error al cargar movimientos");
     } finally {
       setIsLoading(false);
+      setClientsLoading(false);
     }
   }, [api, filters]);
 
@@ -118,6 +133,12 @@ const Movements = () => {
     }
   }, [filters.empresa_id, projects]);
 
+
+  const movementClients = clients.filter((c) => {
+    if (formData.project_id) return c.project_id === formData.project_id;
+    return true;
+  });
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setIsSaving(true);
@@ -128,11 +149,12 @@ const Movements = () => {
         amount_original: parseFloat(formData.amount_original),
         exchange_rate: parseFloat(formData.exchange_rate),
         provider_id: isIngresoNoProvider ? null : formData.provider_id,
-        customer_name: isIngresoNoProvider ? String(formData.customer_name || "").trim() : undefined,
+        customer_name: undefined,
+        client_id: isIngresoNoProvider ? (formData.client_id || undefined) : undefined,
       };
 
-      if (isIngresoNoProvider && !payload.customer_name) {
-        toast.error("Nombre del cliente es obligatorio para partidas 402/403");
+      if (isIngresoNoProvider && !payload.client_id) {
+        toast.error("Cliente es obligatorio para partidas 402/403");
         setIsSaving(false);
         return;
       }
@@ -144,12 +166,18 @@ const Movements = () => {
       } else {
         toast.success("Movimiento creado correctamente");
       }
+      if (response.data.receipt_url && response.data.movement?.id) {
+        await openReceiptPdf(response.data.movement.id, { autoPrint: true });
+      }
       
       setDialogOpen(false);
       fetchData();
       resetForm();
     } catch (error) {
-      const message = error.response?.data?.detail || "Error al crear movimiento";
+      const detail = error?.response?.data?.detail;
+      const message = typeof detail === "string"
+        ? detail
+        : (detail?.message || detail?.code || "Error al crear movimiento");
       toast.error(message);
     } finally {
       setIsSaving(false);
@@ -194,6 +222,7 @@ const Movements = () => {
       partida_codigo: "",
       provider_id: "",
       customer_name: "",
+      client_id: "",
       date: new Date().toISOString().split("T")[0],
       currency: "MXN",
       amount_original: "",
@@ -226,26 +255,83 @@ const Movements = () => {
   };
   const getProviderName = (id) => providers.find(p => p.id === id)?.name || "N/A";
 
+  const openReceiptPdf = async (movementId, options = {}) => {
+    if (!movementId) return;
+    const { autoPrint = false } = options;
+    try {
+      const response = await api().get(`/movements/${movementId}/receipt.pdf`, {
+        responseType: "blob",
+        headers: { Accept: "application/pdf" },
+      });
+      const blobUrl = window.URL.createObjectURL(new Blob([response.data], { type: "application/pdf" }));
+      const newWindow = window.open(blobUrl, "_blank", "noopener,noreferrer");
+      if (!newWindow) {
+        toast.error("El navegador bloqueó la ventana del recibo. Permite popups para continuar.");
+      } else if (autoPrint) {
+        newWindow.onload = () => {
+          try {
+            newWindow.print();
+          } catch {
+            // no-op: at least PDF stays open.
+          }
+        };
+      }
+      setTimeout(() => window.URL.revokeObjectURL(blobUrl), 60_000);
+    } catch (error) {
+      handleApiError(error, "No se pudo abrir el recibo PDF");
+    }
+  };
+
+  const exportToExcel = () => {
+    const rows = movements.map((mov) => {
+      const project = projects.find((p) => p.id === mov.project_id);
+      const empresa = empresas.find((e) => e.id === project?.empresa_id);
+      return {
+        fecha: mov.date,
+        empresa: empresa?.nombre || project?.empresa_id || "",
+        proyecto: project ? `${project.code} - ${project.name}` : mov.project_id,
+        partida: mov.partida_codigo,
+        proveedor_cliente: mov.provider_id ? getProviderName(mov.provider_id) : (mov.customer_name || mov.client_id || ""),
+        moneda: mov.currency,
+        monto_original: mov.amount_original,
+        tipo_cambio: mov.exchange_rate,
+        monto_mxn: mov.amount_mxn,
+        referencia: mov.reference,
+        descripcion: mov.description || "",
+        estado: mov.status,
+      };
+    });
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
+    const buffer = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+    saveAs(new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), `movimientos_${filters.year}_${filters.month}.xlsx`);
+  };
+
+
   const handleApiError = (error, fallbackMessage) => {
     const status = error?.response?.status;
     const detail = error?.response?.data?.detail;
+    const detailText = typeof detail === "string"
+      ? detail
+      : (detail?.message || detail?.code || fallbackMessage);
     if (status === 403) {
       toast.error("No autorizado");
       return;
     }
     if (status === 409) {
-      toast.error(typeof detail === "string" ? detail : "Conflicto al procesar la solicitud");
+      toast.error(detailText || "Conflicto al procesar la solicitud");
       return;
     }
     if (status === 422) {
       if (Array.isArray(detail)) {
         toast.error(detail.map((item) => item?.msg).filter(Boolean).join(" | "));
       } else {
-        toast.error(typeof detail === "string" ? detail : "Datos inválidos");
+        toast.error(detailText || "Datos inválidos");
       }
       return;
     }
-    toast.error(typeof detail === "string" ? detail : fallbackMessage);
+    toast.error(detailText || fallbackMessage);
   };
 
   const openEditDialog = (movement) => {
@@ -255,6 +341,7 @@ const Movements = () => {
       project_id: movement?.project_id || "",
       partida_codigo: movement?.partida_codigo || "",
       provider_id: movement?.provider_id || "",
+      client_id: movement?.client_id || "",
       customer_name: movement?.customer_name || "",
       date: dateValue,
       currency: movement?.currency || "MXN",
@@ -276,6 +363,11 @@ const Movements = () => {
   };
 
   const isEditIngresoNoProvider = ["402", "403"].includes(String(editFormData.partida_codigo || ""));
+  const editMovementClients = clients.filter((c) => {
+    if (editFormData.project_id) return c.project_id === editFormData.project_id;
+    return true;
+  });
+
 
   const handleEditMovement = async (e) => {
     e.preventDefault();
@@ -289,12 +381,13 @@ const Movements = () => {
       amount_original: parseFloat(editFormData.amount_original),
       exchange_rate: parseFloat(editFormData.exchange_rate),
       provider_id: isEditIngresoNoProvider ? null : editFormData.provider_id,
-      customer_name: isEditIngresoNoProvider ? String(editFormData.customer_name || "").trim() : undefined,
+      client_id: isEditIngresoNoProvider ? (editFormData.client_id || undefined) : undefined,
+      customer_name: undefined,
       reason: editReason.trim(),
     };
 
-    if (isEditIngresoNoProvider && !payload.customer_name) {
-      toast.error("Nombre del cliente es obligatorio para partidas 402/403");
+    if (isEditIngresoNoProvider && !payload.client_id) {
+      toast.error("Cliente es obligatorio para partidas 402/403");
       return;
     }
 
@@ -358,13 +451,16 @@ const Movements = () => {
         </div>
         
         <div className="flex gap-2">
+          <Button
+            variant="outline"
+            data-testid="import-movements-btn"
+            onClick={() => setImportDialogOpen(true)}
+          >
+            <Upload className="h-4 w-4 mr-2" />
+            Importar CSV
+          </Button>
+
           <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
-            <DialogTrigger asChild>
-              <Button variant="outline" data-testid="import-movements-btn">
-                <Upload className="h-4 w-4 mr-2" />
-                Importar CSV
-              </Button>
-            </DialogTrigger>
             <DialogContent className="max-w-2xl">
               <DialogHeader>
                 <DialogTitle>Importar Movimientos desde CSV</DialogTitle>
@@ -431,13 +527,17 @@ const Movements = () => {
             </DialogContent>
           </Dialog>
           
+          <Button variant="outline" onClick={exportToExcel}>
+            <FileSpreadsheet className="h-4 w-4 mr-2" />
+            Exportar Excel
+          </Button>
+
+          <Button data-testid="add-movement-btn" onClick={() => setDialogOpen(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            Nuevo Movimiento
+          </Button>
+
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-            <DialogTrigger asChild>
-              <Button data-testid="add-movement-btn">
-                <Plus className="h-4 w-4 mr-2" />
-                Nuevo Movimiento
-              </Button>
-            </DialogTrigger>
             <DialogContent className="max-w-xl">
               <DialogHeader>
                 <DialogTitle>Nuevo Movimiento</DialogTitle>
@@ -483,14 +583,34 @@ const Movements = () => {
                 {isIngresoNoProvider ? (
                   <div className="space-y-2">
                     <Label>Cliente</Label>
-                    <Input
-                      value={formData.customer_name || ""}
-                      onChange={(e) => setFormData(prev => ({ ...prev, customer_name: e.target.value }))}
-                      placeholder="Nombre del cliente"
-                      required
-                      minLength={2}
-                      data-testid="movement-customer-name-input"
-                    />
+                    {clientsError && (
+                      <div className="text-xs text-red-400 flex items-center justify-between">
+                        <span>{clientsError}</span>
+                        <Button type="button" size="sm" variant="outline" onClick={fetchData}>Reintentar</Button>
+                      </div>
+                    )}
+                    {movementClients.length === 0 ? (
+                      <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
+                        No hay clientes registrados.
+                        <Button type="button" variant="link" className="px-1" onClick={() => { setDialogOpen(false); navigate('/clientes'); }}>
+                          Crear cliente
+                        </Button>
+                      </div>
+                    ) : (
+                      <Select value={formData.client_id || ""} onValueChange={(v) => {
+                        const selected = movementClients.find((c) => c.id === v);
+                        setFormData((prev) => ({ ...prev, client_id: v, customer_name: selected?.nombre || "" }));
+                      }}>
+                        <SelectTrigger data-testid="movement-client-select">
+                          <SelectValue placeholder={clientsLoading ? "Cargando clientes..." : "Seleccionar cliente..."} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {movementClients.map((client) => (
+                            <SelectItem key={client.id} value={client.id}>{client.nombre}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -527,8 +647,9 @@ const Movements = () => {
                     <Input
                       value={formData.reference}
                       onChange={(e) => setFormData(prev => ({ ...prev, reference: e.target.value }))}
-                      placeholder="FAC-001, OC-123..."
+                      placeholder={isIngresoNoProvider ? "Se genera automáticamente" : "FAC-001, OC-123..."}
                       required
+                      disabled={isIngresoNoProvider}
                       data-testid="movement-reference-input"
                     />
                   </div>
@@ -633,7 +754,17 @@ const Movements = () => {
                 {isEditIngresoNoProvider ? (
                   <div className="space-y-2">
                     <Label>Cliente</Label>
-                    <Input value={editFormData.customer_name || ""} onChange={(e) => setEditFormData(prev => ({ ...prev, customer_name: e.target.value }))} placeholder="Nombre del cliente" required />
+                    <Select value={editFormData.client_id || ""} onValueChange={(v) => {
+                      const selected = clients.find((c) => c.id === v);
+                      setEditFormData((prev) => ({ ...prev, client_id: v, customer_name: selected?.nombre || "" }));
+                    }}>
+                      <SelectTrigger><SelectValue placeholder="Selecciona cliente" /></SelectTrigger>
+                      <SelectContent>
+                        {editMovementClients.map((client) => (
+                          <SelectItem key={client.id} value={client.id}>{client.nombre}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -855,7 +986,7 @@ const Movements = () => {
                     <th className="text-right">Monto Original</th>
                     <th className="text-right">Monto MXN</th>
                     <th>Estado</th>
-                    {isAdmin && <th>Acciones</th>}
+                    {(isAdmin || movements.some((mov) => ["402", "403"].includes(String(mov.partida_codigo)) && mov.status === "posted")) && <th>Acciones</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -878,17 +1009,27 @@ const Movements = () => {
                           {statusLabels[mov.status]?.label || mov.status}
                         </Badge>
                       </td>
-                      {isAdmin && (
+                      {(isAdmin || (["402", "403"].includes(String(mov.partida_codigo)) && mov.status === "posted")) && (
                         <td>
                           <div className="flex gap-2">
-                            <Button size="sm" variant="outline" onClick={() => openEditDialog(mov)} data-testid={`movement-edit-btn-${mov.id}`}>
-                              <Pencil className="h-3 w-3 mr-1" />
-                              Editar
-                            </Button>
-                            <Button size="sm" variant="destructive" onClick={() => openDeleteDialog(mov)} data-testid={`movement-delete-btn-${mov.id}`}>
-                              <Trash2 className="h-3 w-3 mr-1" />
-                              Eliminar
-                            </Button>
+                            {["402", "403"].includes(String(mov.partida_codigo)) && mov.status === "posted" && (
+                              <Button size="sm" variant="secondary" onClick={() => openReceiptPdf(mov.id)} data-testid={`movement-receipt-btn-${mov.id}`}>
+                                <Printer className="h-3 w-3 mr-1" />
+                                Recibo
+                              </Button>
+                            )}
+                            {isAdmin && (
+                              <>
+                                <Button size="sm" variant="outline" onClick={() => openEditDialog(mov)} data-testid={`movement-edit-btn-${mov.id}`}>
+                                  <Pencil className="h-3 w-3 mr-1" />
+                                  Editar
+                                </Button>
+                                <Button size="sm" variant="destructive" onClick={() => openDeleteDialog(mov)} data-testid={`movement-delete-btn-${mov.id}`}>
+                                  <Trash2 className="h-3 w-3 mr-1" />
+                                  Eliminar
+                                </Button>
+                              </>
+                            )}
                           </div>
                         </td>
                       )}
