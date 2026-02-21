@@ -497,8 +497,23 @@ def test_new_402_movement_recalculates_client_and_receipt_pdf_is_available():
     assert receipt.content.startswith(b"%PDF")
 
 
-def test_captura_ingresos_can_read_catalogs_but_cannot_modify_clients_or_inventory():
-    client = client_for_role("captura_ingresos")
+def test_captura_ingresos_can_read_catalogs_create_client_but_cannot_modify_inventory():
+    fake_db = FakeDB()
+    fake_db.inventory_items.rows.append({
+        "id": "inv2",
+        "company_id": "e1",
+        "project_id": "pr1",
+        "lote_edificio": "L2",
+        "manzana_departamento": "M9",
+        "precio_total": 100000.0,
+    })
+    server.db = fake_db
+
+    async def captura_ingresos_user():
+        return {"user_id": "cap1", "email": "c@test.com", "role": "captura_ingresos", "empresa_id": "e1", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = captura_ingresos_user
+    client = TestClient(server.app)
 
     list_clients = client.get("/api/clients")
     list_inventory = client.get("/api/inventory")
@@ -512,7 +527,7 @@ def test_captura_ingresos_can_read_catalogs_but_cannot_modify_clients_or_invento
         "company_id": "e1",
         "project_id": "pr1",
         "nombre": "NUEVO",
-        "inventory_item_id": "inv1",
+        "inventory_item_id": "inv2",
     })
     create_inventory = client.post("/api/inventory", json={
         "company_id": "e1",
@@ -526,7 +541,7 @@ def test_captura_ingresos_can_read_catalogs_but_cannot_modify_clients_or_invento
         "descuento_bonificacion": 0,
     })
 
-    assert create_client.status_code == 403
+    assert create_client.status_code == 201
     assert create_inventory.status_code == 403
 
 
@@ -685,3 +700,93 @@ def test_admin_can_delete_client():
 
     deleted = client.delete("/api/clients/cl2")
     assert deleted.status_code == 200
+
+
+def test_captura_ingresos_with_null_empresa_id_can_read_catalogs_and_create_client():
+    fake_db = FakeDB()
+    fake_db.inventory_items.rows.append({
+        "id": "inv3",
+        "company_id": "e1",
+        "project_id": "pr1",
+        "lote_edificio": "L3",
+        "manzana_departamento": "M3",
+        "precio_total": 180000.0,
+    })
+    server.db = fake_db
+
+    async def captura_ingresos_user():
+        return {
+            "user_id": "cap2",
+            "email": "ci@test.com",
+            "role": "captura_ingresos",
+            "empresa_id": None,
+            "company_id": "e1",
+            "must_change_password": False,
+        }
+
+    server.app.dependency_overrides[server.get_current_user] = captura_ingresos_user
+    client = TestClient(server.app)
+
+    assert client.get("/api/clients").status_code == 200
+    assert client.get("/api/inventory").status_code == 200
+    assert client.get("/api/inventory/summary").status_code == 200
+    assert client.get("/api/providers").status_code == 200
+
+    created = client.post("/api/clients", json={
+        "company_id": "e1",
+        "project_id": "pr1",
+        "nombre": "CLIENTE CI",
+        "inventory_item_id": "inv3",
+    })
+    assert created.status_code == 201
+
+
+def test_captura_ingresos_receipt_scope_and_delete_forbidden():
+    fake_db = FakeDB()
+    fake_db.projects.rows.append({"id": "pr2", "code": "P2", "name": "Proyecto 2", "empresa_id": "e2", "is_active": True})
+    fake_db.empresas.rows.append({"id": "e2", "nombre": "Empresa 2"})
+    fake_db.movements.rows.append({
+        "id": "m-in",
+        "project_id": "pr1",
+        "partida_codigo": "402",
+        "client_id": "cl1",
+        "date": "2026-01-10T00:00:00+00:00",
+        "currency": "MXN",
+        "amount_original": 1000,
+        "exchange_rate": 1,
+        "amount_mxn": 1000,
+        "reference": "L1-M3",
+        "status": "posted",
+    })
+    fake_db.movements.rows.append({
+        "id": "m-out",
+        "project_id": "pr2",
+        "partida_codigo": "402",
+        "client_id": None,
+        "date": "2026-01-10T00:00:00+00:00",
+        "currency": "MXN",
+        "amount_original": 1000,
+        "exchange_rate": 1,
+        "amount_mxn": 1000,
+        "reference": "X",
+        "status": "posted",
+    })
+    server.db = fake_db
+
+    async def captura_ingresos_user():
+        return {
+            "user_id": "cap2",
+            "email": "ci@test.com",
+            "role": "captura_ingresos",
+            "empresa_id": None,
+            "company_id": "e1",
+            "must_change_password": False,
+        }
+
+    server.app.dependency_overrides[server.get_current_user] = captura_ingresos_user
+    client = TestClient(server.app)
+
+    assert client.get("/api/movements/m-in/receipt.pdf").status_code == 200
+    assert client.get("/api/movements/m-out/receipt.pdf").status_code == 403
+    assert client.delete("/api/clients/cl1").status_code == 403
+    assert client.delete("/api/inventory/inv1").status_code == 403

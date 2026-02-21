@@ -451,6 +451,7 @@ async def get_current_user(request: Request, credentials: HTTPAuthorizationCrede
             if request.url.path not in allowed_paths:
                 raise HTTPException(status_code=403, detail="Debes cambiar tu contraseña para continuar")
         payload["role"] = normalize_role_input(payload.get("role")) or payload.get("role")
+        payload["empresa_id"] = payload.get("empresa_id") or payload.get("company_id") or payload.get("company") or payload.get("empresa")
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expirado")
@@ -685,7 +686,7 @@ def is_ingresos_partida(codigo: str) -> bool:
 def require_client_write_access():
     async def checker(current_user: dict = Depends(get_current_user)):
         role = normalize_role_input(current_user.get("role")) or current_user.get("role")
-        if role in {UserRole.ADMIN.value, UserRole.FINANZAS.value, UserRole.CAPTURA.value}:
+        if role in {UserRole.ADMIN.value, UserRole.FINANZAS.value, UserRole.CAPTURA.value, UserRole.CAPTURA_INGRESOS.value}:
             current_user["role"] = role
             return current_user
         raise HTTPException(status_code=403, detail="Permisos insuficientes para gestionar clientes")
@@ -741,6 +742,15 @@ def is_capture_role(role: Optional[str]) -> bool:
     return role in {"captura", UserRole.CAPTURA_INGRESOS.value}
 
 
+def get_user_company_id(current_user: dict) -> Optional[str]:
+    return (
+        current_user.get("empresa_id")
+        or current_user.get("company_id")
+        or current_user.get("company")
+        or current_user.get("empresa")
+    )
+
+
 def enforce_capture_budget_scope(current_user: dict, budget_code: str):
     normalized = str(budget_code)
     role = current_user.get("role")
@@ -782,9 +792,9 @@ def user_company_scope_query(current_user: dict, company_field: str = "company_i
     role = current_user.get("role")
     if role in {UserRole.ADMIN.value, UserRole.FINANZAS.value}:
         return {}
-    company_id = current_user.get("empresa_id")
+    company_id = get_user_company_id(current_user)
     if not company_id:
-        raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
+        raise HTTPException(status_code=403, detail="empresa_id requerido")
     return {company_field: company_id}
 
 
@@ -792,7 +802,7 @@ def enforce_company_access(current_user: dict, company_id: Optional[str]):
     role = current_user.get("role")
     if role in {UserRole.ADMIN.value, UserRole.FINANZAS.value}:
         return
-    user_company_id = current_user.get("empresa_id")
+    user_company_id = get_user_company_id(current_user)
     if not company_id or user_company_id != company_id:
         raise HTTPException(status_code=403, detail="Acceso restringido a la empresa del usuario")
 
@@ -1086,7 +1096,7 @@ async def login(credentials: UserLogin):
         raise HTTPException(status_code=401, detail="Usuario desactivado")
     
     must_change_password = bool(user_doc.get('must_change_password', False))
-    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'], must_change_password=must_change_password, empresa_id=user_doc.get('empresa_id'))
+    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'], must_change_password=must_change_password, empresa_id=user_doc.get('empresa_id') or user_doc.get('company_id') or user_doc.get('company') or user_doc.get('empresa'))
     user = User(**{k: v for k, v in user_doc.items() if k != 'password_hash'})
     
     # Log successful login
