@@ -82,7 +82,7 @@ def test_overbudget_reject_and_request():
     }
     res = client.post("/api/movements", json=move)
     assert res.status_code == 422
-    assert res.json()["detail"]["code"] == "movement_over_budget"
+    assert res.json()["detail"]["code"] == "overbudget_rejected_and_requested"
     over = [a for a in db.authorizations.rows if a.get("approval_type") == "overbudget_exception"]
     assert len(over) == 1
 
@@ -92,3 +92,46 @@ def test_cross_company_budget_forbidden():
     payload = {"project_id": "pr2", "partida_codigo": "205", "total_amount": "1000.00"}
     res = client.post("/api/budgets", json=payload)
     assert res.status_code == 403
+
+
+
+def test_invalid_breakdown_json_returns_422_not_500():
+    client, _ = client_for("admin")
+    payload = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "total_amount": "1000.00",
+        "annual_breakdown": "{",
+    }
+    res = client.post("/api/budgets", json=payload)
+    assert res.status_code == 422
+    assert res.json()["detail"]["code"] == "invalid_breakdown_json"
+
+
+def test_invalid_breakdown_type_returns_422():
+    client, _ = client_for("admin")
+    payload = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "total_amount": "1000.00",
+        "monthly_breakdown": ["bad"],
+    }
+    res = client.post("/api/budgets", json=payload)
+    assert res.status_code == 422
+    assert res.json()["detail"]["code"] == "invalid_breakdown_type"
+
+
+def test_budgets_accept_all_filters_semantics():
+    client, _ = client_for("admin")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "1200.00", "monthly_breakdown": {"2026-01": "100.00", "2026-02": "150.00"}}).status_code == 201
+    all_mode = client.get("/api/budgets", params={"project_id": "pr1", "year": "all", "month": "all"})
+    assert all_mode.status_code == 200
+    assert all_mode.json()[0]["period_mode"] == "total"
+
+    annual_mode = client.get("/api/budgets", params={"project_id": "pr1", "year": "2026", "month": "all"})
+    assert annual_mode.status_code == 200
+    assert annual_mode.json()[0]["period_mode"] == "annual"
+
+    invalid = client.get("/api/budgets", params={"project_id": "pr1", "month": "2"})
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["code"] == "month_requires_year"

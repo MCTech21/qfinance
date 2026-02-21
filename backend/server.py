@@ -8,6 +8,8 @@ from pymongo.errors import DuplicateKeyError
 from pymongo import ASCENDING
 import os
 import logging
+import json
+import re
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
 from typing import List, Optional, Dict, Any
@@ -218,9 +220,9 @@ class BudgetPlanInput(BaseModel):
 class BudgetWriteInput(BaseModel):
     project_id: str
     partida_codigo: str
-    total_amount: Optional[Decimal] = Decimal("0")
-    annual_breakdown: Dict[str, Decimal] = Field(default_factory=dict)
-    monthly_breakdown: Dict[str, Decimal] = Field(default_factory=dict)
+    total_amount: Optional[Any] = Decimal("0")
+    annual_breakdown: Optional[Any] = Field(default_factory=dict)
+    monthly_breakdown: Optional[Any] = Field(default_factory=dict)
     notes: Optional[str] = None
 
 
@@ -1002,35 +1004,71 @@ async def evaluate_overbudget(project_id: str, partida_codigo: str, movement_dat
     return {"plan": plan, "metadata": metadata}
 
 
+def parse_breakdown_payload(raw_value: Any, field_name: str) -> Dict[str, Any]:
+    if raw_value is None:
+        return {}
+    parsed = raw_value
+    if isinstance(raw_value, str):
+        txt = raw_value.strip()
+        if txt == "":
+            return {}
+        try:
+            parsed = json.loads(txt)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_json", "message": f"{field_name} debe ser JSON válido"})
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_type", "message": f"{field_name} debe ser un objeto JSON"})
+    return parsed
+
+
+def parse_optional_budget_decimal(value: Optional[Any], field_name: str) -> Decimal:
+    if value is None:
+        return Decimal("0")
+    if isinstance(value, str) and value.strip() == "":
+        return Decimal("0")
+    return decimal_from_value(value, field_name)
+
+
 def normalize_budget_breakdown(payload: BudgetPlanInput):
     return normalize_budget_breakdown_values(payload.total, payload.annual_breakdown, payload.monthly_breakdown)
 
 
-def normalize_budget_breakdown_values(total_amount: Optional[Any], annual_breakdown: Optional[Dict[str, Any]], monthly_breakdown: Optional[Dict[str, Any]]):
-    total = decimal_from_value(total_amount if total_amount is not None else "0", "total_amount")
+def normalize_budget_breakdown_values(total_amount: Optional[Any], annual_breakdown: Optional[Any], monthly_breakdown: Optional[Any]):
+    total = parse_optional_budget_decimal(total_amount, "total_amount")
     ensure_non_negative(total, "total_amount")
+
+    annual_raw = parse_breakdown_payload(annual_breakdown, "annual_breakdown")
+    monthly_raw = parse_breakdown_payload(monthly_breakdown, "monthly_breakdown")
 
     annual: Dict[str, Decimal] = {}
     monthly: Dict[str, Decimal] = {}
 
-    for y, amount in (annual_breakdown or {}).items():
+    for y, amount in annual_raw.items():
         year_str = str(y)
+        if not re.fullmatch(r"\d{4}", year_str):
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_key", "message": f"Clave inválida en annual_breakdown: {year_str}", "meta": {"field": "annual_breakdown", "key": year_str}})
         year_int = int(year_str)
         validate_year_in_range(year_int)
-        dec = decimal_from_value(amount, f"annual_breakdown.{year_str}")
+        try:
+            dec = decimal_from_value(amount, f"annual_breakdown.{year_str}")
+        except HTTPException:
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_value", "message": f"Monto inválido en annual_breakdown para {year_str}", "meta": {"field": "annual_breakdown", "key": year_str}})
         ensure_non_negative(dec, f"annual_breakdown.{year_str}")
         annual[year_str] = dec
 
-    for ym, amount in (monthly_breakdown or {}).items():
+    for ym, amount in monthly_raw.items():
         ym_str = str(ym)
-        if len(ym_str) != 7 or ym_str[4] != '-':
-            raise HTTPException(status_code=422, detail={"code": "invalid_month_key", "message": f"Formato inválido para {ym_str}, usa YYYY-MM"})
+        if not re.fullmatch(r"\d{4}-\d{2}", ym_str):
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_key", "message": f"Clave inválida en monthly_breakdown: {ym_str}", "meta": {"field": "monthly_breakdown", "key": ym_str}})
         year_str = ym_str[:4]
         month = int(ym_str[5:7])
         if month < 1 or month > 12:
-            raise HTTPException(status_code=422, detail={"code": "invalid_month_key", "message": f"Mes inválido en {ym_str}"})
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_key", "message": f"Mes inválido en monthly_breakdown: {ym_str}", "meta": {"field": "monthly_breakdown", "key": ym_str}})
         validate_year_in_range(int(year_str))
-        dec = decimal_from_value(amount, f"monthly_breakdown.{ym_str}")
+        try:
+            dec = decimal_from_value(amount, f"monthly_breakdown.{ym_str}")
+        except HTTPException:
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_value", "message": f"Monto inválido en monthly_breakdown para {ym_str}", "meta": {"field": "monthly_breakdown", "key": ym_str}})
         ensure_non_negative(dec, f"monthly_breakdown.{ym_str}")
         monthly[ym_str] = dec
 
@@ -1663,33 +1701,102 @@ async def import_providers(file: UploadFile = File(...), current_user: dict = De
 async def get_budgets(
     project_id: Optional[str] = None,
     partida_codigo: Optional[str] = None,
-    year: Optional[int] = None,
-    month: Optional[int] = None,
+    year: Optional[str] = None,
+    month: Optional[str] = None,
     current_user: dict = Depends(require_permission(Permission.VIEW_BUDGETS))
 ):
-    # Nueva vista (budget_plans) + compatibilidad con presupuestos legacy por mes.
+    normalized_year = None if year in (None, "", "all", "TODO", "todo") else int(year)
+    normalized_month = None if month in (None, "", "all", "TODO", "todo") else int(month)
+
+    if normalized_year:
+        validate_year_in_range(normalized_year)
+    if normalized_month and not normalized_year:
+        raise HTTPException(status_code=422, detail={"code": "month_requires_year", "message": "month requiere year"})
+
     query = {}
     if project_id:
         query["project_id"] = project_id
     if partida_codigo:
         query["partida_codigo"] = partida_codigo
 
-    plans = await db.budget_plans.find(query, {"_id": 0}).to_list(1000)
-    visible_plans = []
-    for plan in plans:
-        enforce_company_access(current_user, plan.get("company_id"))
-        visible_plans.append(normalize_plan_response(plan))
+    projects = await db.projects.find({}, {"_id": 0}).to_list(5000)
+    project_company_map = {p.get("id"): p.get("empresa_id") for p in projects}
 
-    if visible_plans:
-        return visible_plans
+    plans = await db.budget_plans.find(query, {"_id": 0}).to_list(1000)
+    plan_items = []
+    planned_pairs = set()
+    for plan in plans:
+        company_id = plan.get("company_id") or project_company_map.get(plan.get("project_id"))
+        enforce_company_access(current_user, company_id)
+
+        total_dec = decimal_from_value(plan.get("total_amount", "0"), "total_amount")
+        annual_map = plan.get("annual_breakdown") or {}
+        monthly_map = plan.get("monthly_breakdown") or {}
+
+        period_amount = total_dec
+        period_label = "total"
+        if normalized_year and not normalized_month:
+            period_label = "annual"
+            year_key = str(normalized_year)
+            if year_key in annual_map:
+                period_amount = decimal_from_value(annual_map.get(year_key), f"annual_breakdown.{year_key}")
+            else:
+                monthly_sum = sum(
+                    decimal_from_value(v, f"monthly_breakdown.{k}")
+                    for k, v in monthly_map.items()
+                    if str(k).startswith(f"{year_key}-")
+                )
+                period_amount = monthly_sum if monthly_sum > Decimal("0") else total_dec
+        elif normalized_year and normalized_month:
+            period_label = "monthly"
+            ym_key = f"{normalized_year:04d}-{normalized_month:02d}"
+            period_amount = decimal_from_value(monthly_map.get(ym_key, "0"), f"monthly_breakdown.{ym_key}")
+
+        normalized = normalize_plan_response(plan)
+        normalized["total_amount"] = str(period_amount)
+        normalized["source"] = "plan"
+        normalized["period_mode"] = period_label
+        normalized["year"] = normalized_year
+        normalized["month"] = normalized_month
+        plan_items.append(normalized)
+        planned_pairs.add((plan.get("project_id"), plan.get("partida_codigo")))
 
     legacy_query = query.copy()
-    if year:
-        legacy_query["year"] = year
-    if month:
-        legacy_query["month"] = month
-    budgets = await db.budgets.find(legacy_query, {"_id": 0}).to_list(1000)
-    return [sanitize_mongo_document(b) for b in budgets]
+    if normalized_year:
+        legacy_query["year"] = normalized_year
+    if normalized_month:
+        legacy_query["month"] = normalized_month
+
+    legacy_rows = await db.budgets.find(legacy_query, {"_id": 0}).to_list(5000)
+    grouped = {}
+    for row in legacy_rows:
+        pair = (row.get("project_id"), row.get("partida_codigo"))
+        if pair in planned_pairs:
+            continue
+        company_id = project_company_map.get(row.get("project_id"))
+        enforce_company_access(current_user, company_id)
+        key = pair if (not normalized_year or not normalized_month) else (pair[0], pair[1], normalized_year, normalized_month)
+        entry = grouped.setdefault(key, {
+            "id": row.get("id"),
+            "project_id": row.get("project_id"),
+            "partida_codigo": row.get("partida_codigo"),
+            "notes": row.get("notes"),
+            "approval_status": "legacy",
+            "source": "legacy",
+            "period_mode": "monthly" if (normalized_year and normalized_month) else ("annual" if normalized_year else "total"),
+            "year": normalized_year,
+            "month": normalized_month,
+            "total_amount": Decimal("0"),
+        })
+        entry["total_amount"] += decimal_from_value(row.get("amount_mxn", "0"), "amount_mxn")
+
+    legacy_items = []
+    for item in grouped.values():
+        final = dict(item)
+        final["total_amount"] = str(final["total_amount"])
+        legacy_items.append(sanitize_mongo_document(final))
+
+    return plan_items + legacy_items
 
 
 @api_router.get('/budgets/{budget_id}')
@@ -1701,6 +1808,8 @@ async def get_budget_by_id(budget_id: str, current_user: dict = Depends(require_
     budget = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
     if not budget:
         raise HTTPException(status_code=404, detail="Presupuesto no encontrado")
+    project = await db.projects.find_one({"id": budget.get("project_id")}, {"_id": 0})
+    enforce_company_access(current_user, project.get("empresa_id") if project else None)
     return sanitize_mongo_document(budget)
 
 
@@ -1715,6 +1824,7 @@ async def create_budget(budget_data: Dict[str, Any], current_user: dict = Depend
         company_id = project.get("empresa_id")
         enforce_company_access(current_user, company_id)
         await validate_partida(payload.partida_codigo)
+        enforce_capture_budget_scope(current_user, payload.partida_codigo)
         total, annual, monthly = normalize_budget_breakdown_values(payload.total_amount, payload.annual_breakdown, payload.monthly_breakdown)
 
         now = datetime.now(timezone.utc).isoformat()
@@ -1788,6 +1898,7 @@ async def update_budget(budget_id: str, updates: Dict[str, Any], current_user: d
         if payload.partida_codigo != plan.get("partida_codigo"):
             raise HTTPException(status_code=422, detail={"code": "partida_immutable", "message": "partida_codigo no puede cambiar"})
 
+        enforce_capture_budget_scope(current_user, payload.partida_codigo)
         total, annual, monthly = normalize_budget_breakdown_values(payload.total_amount, payload.annual_breakdown, payload.monthly_breakdown)
         set_data = {
             "total_amount": str(total),
@@ -2110,8 +2221,8 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
                         metadata=overbudget["metadata"],
                     )
                 raise HTTPException(status_code=422, detail={
-                    "code": "movement_over_budget",
-                    "message": "Movimiento excede presupuesto (total/anual/mensual). Se generó solicitud de aprobación.",
+                    "code": "overbudget_rejected_and_requested",
+                    "message": "Movement exceeds available budget and an exception approval request was generated.",
                     "meta": overbudget["metadata"],
                 })
             elif get_overbudget_approval_mode() == "pending_movement":

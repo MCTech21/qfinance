@@ -28,16 +28,16 @@ const Budgets = () => {
   const [filters, setFilters] = useState({
     empresa_id: "all",
     project_id: "all",
-    year: new Date().getFullYear(),
-    month: new Date().getMonth() + 1
+    year: "all",
+    month: "all"
   });
   
   const [formData, setFormData] = useState({
     project_id: "",
     partida_codigo: "",
     total_amount: "",
-    annual_json: "{}",
-    monthly_json: "{}",
+    annual_json: "",
+    monthly_json: "",
     notes: ""
   });
 
@@ -55,6 +55,8 @@ const Budgets = () => {
         api().get("/budgets", {
           params: {
             project_id: filters.project_id !== "all" ? filters.project_id : undefined,
+            year: filters.year !== "all" ? Number(filters.year) : undefined,
+            month: (filters.year !== "all" && filters.month !== "all") ? Number(filters.month) : undefined,
           }
         }),
         api().get("/projects", { params: { empresa_id: filters.empresa_id !== "all" ? filters.empresa_id : undefined } }),
@@ -85,8 +87,8 @@ const Budgets = () => {
         project_id: budget.project_id,
         partida_codigo: budget.partida_codigo,
         total_amount: budget.total_amount || "0",
-        annual_json: JSON.stringify(budget.annual_breakdown || {}, null, 2),
-        monthly_json: JSON.stringify(budget.monthly_breakdown || {}, null, 2),
+        annual_json: budget.annual_breakdown ? JSON.stringify(budget.annual_breakdown, null, 2) : "",
+        monthly_json: budget.monthly_breakdown ? JSON.stringify(budget.monthly_breakdown, null, 2) : "",
         notes: budget.notes || ""
       });
     } else {
@@ -95,12 +97,30 @@ const Budgets = () => {
         project_id: "",
         partida_codigo: "",
         total_amount: "",
-        annual_json: "{}",
-        monthly_json: "{}",
+        annual_json: "",
+        monthly_json: "",
         notes: ""
       });
     }
     setDialogOpen(true);
+  };
+
+  const parseBreakdownInput = (raw, fieldLabel) => {
+    const text = (raw || "").trim();
+    if (!text) return {};
+
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("type");
+      }
+      return parsed;
+    } catch (err) {
+      if (err.message === "type") {
+        throw new Error(`${fieldLabel} debe ser un objeto JSON (clave-valor).`);
+      }
+      throw new Error(`${fieldLabel} contiene JSON inválido.`);
+    }
   };
 
   const handleSubmit = async (e) => {
@@ -112,8 +132,8 @@ const Budgets = () => {
         project_id: formData.project_id,
         partida_codigo: formData.partida_codigo,
         total_amount: formData.total_amount || "0",
-        annual_breakdown: JSON.parse(formData.annual_json || "{}"),
-        monthly_breakdown: JSON.parse(formData.monthly_json || "{}"),
+        annual_breakdown: parseBreakdownInput(formData.annual_json, "Desglose anual"),
+        monthly_breakdown: parseBreakdownInput(formData.monthly_json, "Desglose mensual"),
         notes: formData.notes,
       };
 
@@ -130,8 +150,8 @@ const Budgets = () => {
     } catch (error) {
       const detail = error.response?.data?.detail;
       const code = detail?.code;
-      const codeMap = { annual_sum_exceeds_total: "La suma anual excede el total", monthly_sum_exceeds_annual: "La suma mensual excede el anual", monthly_sum_exceeds_total: "La suma mensual excede el total" };
-      toast.error(codeMap[code] || detail?.message || detail || "Error al guardar presupuesto");
+      const codeMap = { annual_sum_exceeds_total: "La suma anual excede el total", monthly_sum_exceeds_annual: "La suma mensual excede el anual", monthly_sum_exceeds_total: "La suma mensual excede el total", invalid_breakdown_json: "El desglose debe ser JSON válido.", invalid_breakdown_type: "El desglose debe ser un objeto JSON (clave-valor).", invalid_breakdown_key: "Hay una clave inválida en el desglose.", invalid_breakdown_value: "Hay un monto inválido en el desglose." };
+      toast.error(codeMap[code] || detail?.message || error?.message || detail || "Error al guardar presupuesto");
     } finally {
       setIsSaving(false);
     }
@@ -242,11 +262,11 @@ const Budgets = () => {
               </div>
               <div className="space-y-2">
                 <Label>Desglose anual (JSON)</Label>
-                <textarea className="w-full min-h-20 border rounded-md p-2 text-sm" value={formData.annual_json} onChange={(e) => setFormData(prev => ({ ...prev, annual_json: e.target.value }))} />
+                <textarea className="w-full min-h-20 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder={`{\n  "2026": "1000.00"\n}`} value={formData.annual_json} onChange={(e) => setFormData(prev => ({ ...prev, annual_json: e.target.value }))} />
               </div>
               <div className="space-y-2">
                 <Label>Desglose mensual (JSON)</Label>
-                <textarea className="w-full min-h-20 border rounded-md p-2 text-sm" value={formData.monthly_json} onChange={(e) => setFormData(prev => ({ ...prev, monthly_json: e.target.value }))} />
+                <textarea className="w-full min-h-20 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder={`{\n  "2026-01": "200.00"\n}`} value={formData.monthly_json} onChange={(e) => setFormData(prev => ({ ...prev, monthly_json: e.target.value }))} />
               </div>
               
               <div className="space-y-2">
@@ -307,12 +327,14 @@ const Budgets = () => {
             
             <Select
               value={String(filters.month)}
-              onValueChange={(v) => setFilters(prev => ({ ...prev, month: Number(v) }))}
+              onValueChange={(v) => setFilters(prev => ({ ...prev, month: v }))}
+              disabled={filters.year === "all"}
             >
               <SelectTrigger className="w-[140px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="all">TODO</SelectItem>
                 {months.map(m => (
                   <SelectItem key={m.value} value={String(m.value)}>{m.label}</SelectItem>
                 ))}
@@ -321,12 +343,13 @@ const Budgets = () => {
             
             <Select
               value={String(filters.year)}
-              onValueChange={(v) => setFilters(prev => ({ ...prev, year: Number(v) }))}
+              onValueChange={(v) => setFilters(prev => ({ ...prev, year: v, month: v === "all" ? "all" : prev.month }))}
             >
-              <SelectTrigger className="w-[100px]">
+              <SelectTrigger className="w-[120px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="all">TODO</SelectItem>
                 {yearOptions.map(y => (
                   <SelectItem key={y} value={String(y)}>{y}</SelectItem>
                 ))}
@@ -348,7 +371,7 @@ const Budgets = () => {
             </div>
           ) : budgets.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
-              No hay presupuestos para el período seleccionado
+              No hay presupuestos para el filtro seleccionado
             </div>
           ) : (
             <div className="overflow-x-auto">
