@@ -790,3 +790,128 @@ def test_captura_ingresos_receipt_scope_and_delete_forbidden():
     assert client.get("/api/movements/m-out/receipt.pdf").status_code == 403
     assert client.delete("/api/clients/cl1").status_code == 403
     assert client.delete("/api/inventory/inv1").status_code == 403
+
+
+def test_login_operativo_sin_empresas_devuelve_422_empresa_required():
+    fake_db = FakeDB()
+    fake_db.users.rows = [{
+        "id": "op1",
+        "email": "op@test.com",
+        "name": "Operativo",
+        "role": "captura_ingresos",
+        "is_active": True,
+        "must_change_password": False,
+        "password_hash": server.hash_password("Pass1234"),
+        "empresa_ids": [],
+    }]
+    server.db = fake_db
+    server.app.dependency_overrides = {}
+    client = TestClient(server.app)
+
+    res = client.post("/api/auth/login", json={"email": "op@test.com", "password": "Pass1234"})
+    assert res.status_code == 422
+    assert res.json()["detail"]["code"] == "empresa_required"
+
+
+def test_login_operativo_con_empresas_requiere_select_company_para_catalogos():
+    fake_db = FakeDB()
+    fake_db.users.rows = [{
+        "id": "op2",
+        "email": "op2@test.com",
+        "name": "Operativo 2",
+        "role": "captura_ingresos",
+        "is_active": True,
+        "must_change_password": False,
+        "password_hash": server.hash_password("Pass1234"),
+        "empresa_ids": ["e1", "e2"],
+    }]
+    fake_db.empresas.rows.append({"id": "e2", "nombre": "Empresa 2"})
+    server.db = fake_db
+    server.app.dependency_overrides = {}
+    client = TestClient(server.app)
+
+    login = client.post("/api/auth/login", json={"email": "op2@test.com", "password": "Pass1234"})
+    assert login.status_code == 200
+    token = login.json()["access_token"]
+
+    clients = client.get("/api/clients", headers={"Authorization": f"Bearer {token}"})
+    assert clients.status_code == 422
+    assert clients.json()["detail"]["code"] == "empresa_not_selected"
+
+
+def test_select_company_valido_emite_token_con_empresa():
+    fake_db = FakeDB()
+    fake_db.users.rows = [{
+        "id": "op3",
+        "email": "op3@test.com",
+        "name": "Operativo 3",
+        "role": "captura_ingresos",
+        "is_active": True,
+        "must_change_password": False,
+        "password_hash": server.hash_password("Pass1234"),
+        "empresa_ids": ["e1", "e2"],
+    }]
+    fake_db.empresas.rows.append({"id": "e2", "nombre": "Empresa 2"})
+    fake_db.inventory_items.rows.append({"id": "inv-e2", "company_id": "e2", "project_id": "pr1", "lote_edificio": "L9", "manzana_departamento": "M9", "precio_total": 99999})
+    server.db = fake_db
+    server.app.dependency_overrides = {}
+    client = TestClient(server.app)
+
+    login = client.post("/api/auth/login", json={"email": "op3@test.com", "password": "Pass1234"})
+    token = login.json()["access_token"]
+
+    selected = client.post("/api/auth/select-company", json={"empresa_id": "e1"}, headers={"Authorization": f"Bearer {token}"})
+    assert selected.status_code == 200
+    selected_token = selected.json()["access_token"]
+
+    clients = client.get("/api/clients", headers={"Authorization": f"Bearer {selected_token}"})
+    inventory = client.get("/api/inventory", headers={"Authorization": f"Bearer {selected_token}"})
+    summary = client.get("/api/inventory/summary", headers={"Authorization": f"Bearer {selected_token}"})
+    assert clients.status_code == 200
+    assert inventory.status_code == 200
+    assert summary.status_code == 200
+    assert all(it.get("company_id") == "e1" for it in inventory.json())
+
+
+def test_select_company_no_permitido_devuelve_403():
+    fake_db = FakeDB()
+    fake_db.users.rows = [{
+        "id": "op4",
+        "email": "op4@test.com",
+        "name": "Operativo 4",
+        "role": "captura_ingresos",
+        "is_active": True,
+        "must_change_password": False,
+        "password_hash": server.hash_password("Pass1234"),
+        "empresa_ids": ["e1"],
+    }]
+    server.db = fake_db
+    server.app.dependency_overrides = {}
+    client = TestClient(server.app)
+
+    login = client.post("/api/auth/login", json={"email": "op4@test.com", "password": "Pass1234"})
+    token = login.json()["access_token"]
+    bad = client.post("/api/auth/select-company", json={"empresa_id": "e2"}, headers={"Authorization": f"Bearer {token}"})
+    assert bad.status_code == 403
+
+
+def test_admin_puede_operar_sin_select_company():
+    fake_db = FakeDB()
+    fake_db.users.rows = [{
+        "id": "adm2",
+        "email": "adm@test.com",
+        "name": "Admin",
+        "role": "admin",
+        "is_active": True,
+        "must_change_password": False,
+        "password_hash": server.hash_password("Pass1234"),
+        "empresa_ids": [],
+    }]
+    server.db = fake_db
+    server.app.dependency_overrides = {}
+    client = TestClient(server.app)
+
+    login = client.post("/api/auth/login", json={"email": "adm@test.com", "password": "Pass1234"})
+    token = login.json()["access_token"]
+    clients = client.get("/api/clients", headers={"Authorization": f"Bearer {token}"})
+    assert clients.status_code == 200

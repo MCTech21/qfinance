@@ -106,6 +106,7 @@ class UserBase(BaseModel):
     name: str
     role: UserRole
     empresa_id: Optional[str] = None
+    empresa_ids: List[str] = Field(default_factory=list)
 
 class UserCreate(UserBase):
     password: str
@@ -431,12 +432,13 @@ def validate_password_policy(password: str):
         raise HTTPException(status_code=422, detail="La nueva contraseña debe contener letras y números")
 
 
-def create_token(user_id: str, email: str, role: str, must_change_password: bool = False, empresa_id: Optional[str] = None) -> str:
+def create_token(user_id: str, email: str, role: str, must_change_password: bool = False, empresa_id: Optional[str] = None, empresa_ids: Optional[List[str]] = None) -> str:
     payload = {
         "user_id": user_id,
         "email": email,
         "role": role,
         "empresa_id": empresa_id,
+        "empresa_ids": empresa_ids or [],
         "must_change_password": must_change_password,
         "exp": datetime.now(timezone.utc).timestamp() + 86400 * 7
     }
@@ -452,6 +454,7 @@ async def get_current_user(request: Request, credentials: HTTPAuthorizationCrede
                 raise HTTPException(status_code=403, detail="Debes cambiar tu contraseña para continuar")
         payload["role"] = normalize_role_input(payload.get("role")) or payload.get("role")
         payload["empresa_id"] = payload.get("empresa_id") or payload.get("company_id") or payload.get("company") or payload.get("empresa")
+        payload["empresa_ids"] = payload.get("empresa_ids") or []
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expirado")
@@ -742,6 +745,11 @@ def is_capture_role(role: Optional[str]) -> bool:
     return role in {"captura", UserRole.CAPTURA_INGRESOS.value}
 
 
+def is_operational_role(role: Optional[str]) -> bool:
+    normalized = normalize_role_input(role) or role
+    return normalized in {UserRole.CAPTURA.value, UserRole.CAPTURA_INGRESOS.value, UserRole.FINANZAS.value}
+
+
 def get_user_company_id(current_user: dict) -> Optional[str]:
     return (
         current_user.get("empresa_id")
@@ -794,7 +802,7 @@ def user_company_scope_query(current_user: dict, company_field: str = "company_i
         return {}
     company_id = get_user_company_id(current_user)
     if not company_id:
-        raise HTTPException(status_code=403, detail="empresa_id requerido")
+        raise HTTPException(status_code=422, detail={"code": "empresa_not_selected", "message": "Selecciona la empresa para operar"})
     return {company_field: company_id}
 
 
@@ -1096,8 +1104,14 @@ async def login(credentials: UserLogin):
         raise HTTPException(status_code=401, detail="Usuario desactivado")
     
     must_change_password = bool(user_doc.get('must_change_password', False))
-    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'], must_change_password=must_change_password, empresa_id=user_doc.get('empresa_id') or user_doc.get('company_id') or user_doc.get('company') or user_doc.get('empresa'))
-    user = User(**{k: v for k, v in user_doc.items() if k != 'password_hash'})
+    empresa_ids = list(user_doc.get("empresa_ids") or ([] if not user_doc.get("empresa_id") else [user_doc.get("empresa_id")]))
+    empresa_ids = [str(e) for e in empresa_ids if e]
+    if is_operational_role(user_doc.get("role")) and not empresa_ids:
+        raise HTTPException(status_code=422, detail={"code": "empresa_required", "message": "Asigna al menos una empresa al usuario en Consola Admin"})
+    token = create_token(user_doc['id'], user_doc['email'], user_doc['role'], must_change_password=must_change_password, empresa_id=None, empresa_ids=empresa_ids)
+    enriched_user = {k: v for k, v in user_doc.items() if k != 'password_hash'}
+    enriched_user["empresa_ids"] = empresa_ids
+    user = User(**enriched_user)
     
     # Log successful login
     await log_audit(
@@ -1134,7 +1148,7 @@ async def change_password(payload: ChangePasswordRequest, request: Request, curr
     }})
     await log_audit(current_user, "PASSWORD_CHANGED", "users", user_doc["id"], {"source": "settings"}, ip_address=request.client.host if request.client else None)
     fresh = await db.users.find_one({"id": user_doc["id"]}, {"_id": 0})
-    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False, empresa_id=fresh.get("empresa_id"))
+    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False, empresa_id=None if is_operational_role(fresh.get("role")) else (fresh.get("empresa_id") or fresh.get("company_id")), empresa_ids=list(fresh.get("empresa_ids") or ([] if not fresh.get("empresa_id") else [fresh.get("empresa_id")])) )
     user = User(**{k: v for k, v in fresh.items() if k != "password_hash"})
     return TokenResponse(access_token=token, user=user, must_change_password=False)
 
@@ -1157,7 +1171,7 @@ async def force_change_password(payload: ForceChangePasswordRequest, request: Re
     }})
     await log_audit(current_user, "PASSWORD_CHANGED", "users", user_doc["id"], {"source": "force_change"}, ip_address=request.client.host if request.client else None)
     fresh = await db.users.find_one({"id": user_doc["id"]}, {"_id": 0})
-    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False, empresa_id=fresh.get("empresa_id"))
+    token = create_token(fresh["id"], fresh["email"], fresh["role"], must_change_password=False, empresa_id=None if is_operational_role(fresh.get("role")) else (fresh.get("empresa_id") or fresh.get("company_id")), empresa_ids=list(fresh.get("empresa_ids") or ([] if not fresh.get("empresa_id") else [fresh.get("empresa_id")])) )
     user = User(**{k: v for k, v in fresh.items() if k != "password_hash"})
     return TokenResponse(access_token=token, user=user, must_change_password=False)
 
@@ -1166,7 +1180,46 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     user_doc = await db.users.find_one({"id": current_user["user_id"]}, {"_id": 0, "password_hash": 0})
     if not user_doc:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    empresa_ids = list(user_doc.get("empresa_ids") or ([] if not user_doc.get("empresa_id") else [user_doc.get("empresa_id")]))
+    user_doc["empresa_ids"] = [str(e) for e in empresa_ids if e]
+    user_doc["empresa_id"] = current_user.get("empresa_id")
     return User(**user_doc)
+
+
+
+@api_router.get("/auth/allowed-companies")
+async def auth_allowed_companies(current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") == UserRole.ADMIN.value:
+        rows = await db.empresas.find(active_query(), {"_id": 0}).to_list(500)
+        return [{"id": r.get("id"), "nombre": r.get("nombre")} for r in rows]
+    empresa_ids = list(current_user.get("empresa_ids") or [])
+    if not empresa_ids:
+        return []
+    rows = await db.empresas.find({"id": {"$in": empresa_ids}}, {"_id": 0}).to_list(500)
+    return [{"id": r.get("id"), "nombre": r.get("nombre")} for r in rows]
+
+
+class SelectCompanyRequest(BaseModel):
+    empresa_id: str
+
+
+@api_router.post("/auth/select-company")
+async def auth_select_company(payload: SelectCompanyRequest, current_user: dict = Depends(get_current_user)):
+    user_doc = await db.users.find_one({"id": current_user.get("user_id")}, {"_id": 0, "password_hash": 0})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    if current_user.get("role") == UserRole.ADMIN.value:
+        token = create_token(user_doc["id"], user_doc["email"], user_doc["role"], must_change_password=False, empresa_id=payload.empresa_id, empresa_ids=list(user_doc.get("empresa_ids") or []))
+        return {"access_token": token, "token_type": "bearer"}
+
+    empresa_ids = list(user_doc.get("empresa_ids") or ([] if not user_doc.get("empresa_id") else [user_doc.get("empresa_id")]))
+    empresa_ids = [str(e) for e in empresa_ids if e]
+    if payload.empresa_id not in empresa_ids:
+        raise HTTPException(status_code=403, detail={"code": "forbidden_company", "message": "La empresa seleccionada no está permitida para este usuario"})
+
+    token = create_token(user_doc["id"], user_doc["email"], user_doc["role"], must_change_password=False, empresa_id=payload.empresa_id, empresa_ids=empresa_ids)
+    return {"access_token": token, "token_type": "bearer"}
 
 @api_router.get("/auth/permissions")
 async def get_my_permissions(current_user: dict = Depends(get_current_user)):
@@ -2978,6 +3031,13 @@ async def admin_list_entity(
     return [sanitize_mongo_document(row) for row in rows]
 
 
+@api_router.get("/admin/empresas")
+async def admin_empresas(current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
+    ensure_admin(current_user)
+    rows = await db.empresas.find(active_query(include_inactive=True), {"_id": 0}).sort("nombre", 1).to_list(1000)
+    return [sanitize_mongo_document(r) for r in rows]
+
+
 @api_router.get("/admin/users")
 async def admin_list_users(
     include_inactive: bool = True,
@@ -2991,6 +3051,37 @@ async def admin_list_users(
 
 class AdminUserRoleUpdate(BaseModel):
     role: UserRole
+
+
+class AdminUserUpdate(BaseModel):
+    role: Optional[UserRole] = None
+    is_active: Optional[bool] = None
+    empresa_ids: Optional[List[str]] = None
+
+
+@api_router.put("/admin/users/{user_id}")
+async def admin_update_user(user_id: str, payload: AdminUserUpdate, request: Request, current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
+    ensure_admin(current_user)
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    update_data = {}
+    if payload.role is not None:
+        update_data["role"] = payload.role.value
+    if payload.is_active is not None:
+        update_data["is_active"] = payload.is_active
+    if payload.empresa_ids is not None:
+        update_data["empresa_ids"] = [str(e).strip() for e in payload.empresa_ids if str(e).strip()]
+
+    if not update_data:
+        return sanitize_mongo_document(user)
+
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.users.update_one({"id": user_id}, {"$set": update_data})
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    await log_admin_action(request, current_user, "ADMIN_UPDATE", "users", user_id, True, before=user, after=updated)
+    return sanitize_mongo_document(updated)
 
 
 @api_router.patch("/admin/users/{user_id}/role")
