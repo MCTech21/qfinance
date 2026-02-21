@@ -87,6 +87,98 @@ def test_overbudget_reject_and_request():
     assert len(over) == 1
 
 
+def test_total_only_budget_within_total_allows_movement():
+    client, _ = client_for("finanzas")
+    create_budget = client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "500.00"})
+    assert create_budget.status_code == 201
+
+    move = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-01-01",
+        "currency": "MXN",
+        "amount_original": 250,
+        "exchange_rate": 1,
+        "reference": "OK-1",
+    }
+    res = client.post("/api/movements", json=move)
+    assert res.status_code == 200
+    assert res.json()["movement"]["status"] == "posted"
+
+
+def test_admin_bypass_detail_overbudget_when_total_allows():
+    client, db = client_for("admin")
+    create_budget = client.post("/api/budgets", json={
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "total_amount": "1000.00",
+        "annual_breakdown": {"2026": "300.00"},
+    })
+    assert create_budget.status_code == 201
+
+    move = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-02-01",
+        "currency": "MXN",
+        "amount_original": 500,
+        "exchange_rate": 1,
+        "reference": "ADM-BYPASS",
+    }
+    res = client.post("/api/movements", json=move)
+    assert res.status_code == 200
+    bypass_logs = [l for l in db.audit_logs.rows if l.get("action") == "OVERBUDGET_ADMIN_BYPASS"]
+    assert len(bypass_logs) == 1
+
+
+def test_fallback_to_total_when_monthly_missing_and_total_sufficient():
+    client, _ = client_for("finanzas")
+    create_budget = client.post("/api/budgets", json={
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "total_amount": "900.00",
+        "annual_breakdown": {"2026": "900.00"},
+        "monthly_breakdown": {"2026-01": "100.00"},
+    })
+    assert create_budget.status_code == 201
+
+    move = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-05-01",
+        "currency": "MXN",
+        "amount_original": 200,
+        "exchange_rate": 1,
+        "reference": "FALLBACK-TOTAL",
+    }
+    res = client.post("/api/movements", json=move)
+    assert res.status_code == 200
+
+
+def test_overbudget_request_is_idempotent_for_same_payload():
+    client, db = client_for("finanzas")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "100.00"}).status_code == 201
+    move = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-01-01",
+        "currency": "MXN",
+        "amount_original": 150,
+        "exchange_rate": 1,
+        "reference": "DUP-OB",
+    }
+    first = client.post("/api/movements", json=move)
+    second = client.post("/api/movements", json=move)
+    assert first.status_code == 422
+    assert second.status_code == 422
+    over = [a for a in db.authorizations.rows if a.get("approval_type") == "overbudget_exception" and a.get("status") == "pending"]
+    assert len(over) == 1
+
+
 def test_cross_company_budget_forbidden():
     client, _ = client_for("captura", company_id="e1")
     payload = {"project_id": "pr2", "partida_codigo": "205", "total_amount": "1000.00"}
