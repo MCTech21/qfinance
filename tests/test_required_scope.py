@@ -363,3 +363,83 @@ def test_update_client_inventory_rejects_scope_mismatch():
     r = c.put('/api/clients/cl1', json={"inventory_item_id": "inv-c2"})
     assert r.status_code == 422
     assert r.json()["detail"]["code"] == "inventory_scope_mismatch"
+
+
+def test_captura_can_read_inventory_and_summary_but_cannot_modify_inventory():
+    c, _ = make_client(role="captura", empresa_id="c1")
+
+    listed = c.get("/api/inventory")
+    summary = c.get("/api/inventory/summary")
+    create = c.post("/api/inventory", json={
+        "company_id": "c1",
+        "project_id": "p1",
+        "m2_superficie": 100,
+        "m2_construccion": 0,
+        "lote_edificio": "L8",
+        "manzana_departamento": "M8",
+        "precio_m2_superficie": 1000,
+        "precio_m2_construccion": 0,
+        "descuento_bonificacion": 0,
+    })
+    delete = c.delete("/api/inventory/inv1")
+
+    assert listed.status_code == 200
+    assert summary.status_code == 200
+    assert create.status_code == 403
+    assert delete.status_code == 403
+
+
+def test_finanzas_can_create_inventory_but_cannot_delete_inventory():
+    c, _ = make_client(role="finanzas", empresa_id="c1")
+
+    create = c.post("/api/inventory", json={
+        "company_id": "c1",
+        "project_id": "p1",
+        "m2_superficie": 100,
+        "m2_construccion": 0,
+        "lote_edificio": "L10",
+        "manzana_departamento": "M10",
+        "precio_m2_superficie": 1000,
+        "precio_m2_construccion": 0,
+        "descuento_bonificacion": 0,
+    })
+    delete = c.delete("/api/inventory/inv1")
+
+    assert create.status_code in (200, 201)
+    assert delete.status_code == 403
+
+
+def test_captura_can_read_receipt_in_scope_and_forbidden_out_of_scope():
+    c, db = make_client(role="captura", empresa_id="c1")
+    db.movements.rows.append({
+        "id": "m4",
+        "project_id": "p1",
+        "partida_codigo": "402",
+        "client_id": "cl1",
+        "date": "2026-01-15T00:00:00+00:00",
+        "currency": "MXN",
+        "amount_original": 1000,
+        "exchange_rate": 1,
+        "amount_mxn": 1000,
+        "reference": "L1-M3",
+        "status": "posted",
+    })
+    db.movements.rows.append({
+        "id": "m5",
+        "project_id": "p2",
+        "partida_codigo": "402",
+        "client_id": None,
+        "date": "2026-01-15T00:00:00+00:00",
+        "currency": "MXN",
+        "amount_original": 1000,
+        "exchange_rate": 1,
+        "amount_mxn": 1000,
+        "reference": "X",
+        "status": "posted",
+    })
+
+    in_scope = c.get("/api/movements/m4/receipt.pdf")
+    out_scope = c.get("/api/movements/m5/receipt.pdf")
+
+    assert in_scope.status_code == 200
+    assert out_scope.status_code == 403

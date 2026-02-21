@@ -36,6 +36,7 @@ export default function Inventory() {
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [filters, setFilters] = useState({ company_id: "all", project_id: "all" });
   const isAdmin = user?.role === "admin";
+  const canManageInventory = isAdmin || user?.role === "finanzas";
 
   const filteredProjects = useMemo(() => {
     const company = form.company_id || (filters.company_id !== "all" ? filters.company_id : "");
@@ -166,22 +167,25 @@ export default function Inventory() {
         </div>
         <div className="flex gap-2">
           <Button variant="outline" onClick={exportExcel}><FileSpreadsheet className="h-4 w-4 mr-2" />Exportar Excel</Button>
-          <Dialog open={open} onOpenChange={setOpen}>
-            <DialogTrigger asChild><Button onClick={openCreate}><Plus className="h-4 w-4 mr-2" />Nuevo ítem</Button></DialogTrigger>
-            <DialogContent className="max-w-2xl">
-              <DialogHeader><DialogTitle>{editing ? "Editar inventario" : "Nuevo inventario"}</DialogTitle></DialogHeader>
-              <form onSubmit={onSubmit} className="space-y-3">
-                <div className="grid grid-cols-2 gap-3">
-                  <div><Label>Empresa</Label><Select value={form.company_id} onValueChange={(v) => setForm((p) => ({ ...p, company_id: v, project_id: "" }))}><SelectTrigger><SelectValue placeholder="Seleccionar" /></SelectTrigger><SelectContent>{empresas.map((e) => <SelectItem key={e.id} value={e.id}>{e.nombre}</SelectItem>)}</SelectContent></Select></div>
-                  <div><Label>Proyecto</Label><Select value={form.project_id} onValueChange={(v) => setForm((p) => ({ ...p, project_id: v }))}><SelectTrigger><SelectValue placeholder="Seleccionar" /></SelectTrigger><SelectContent>{filteredProjects.map((pr) => <SelectItem key={pr.id} value={pr.id}>{pr.code} - {pr.name}</SelectItem>)}</SelectContent></Select></div>
-                </div>
-                <div className="grid grid-cols-2 gap-3"><div><Label>m2 superficie</Label><Input type="number" step="0.01" value={form.m2_superficie} onChange={(e) => setForm((p) => ({ ...p, m2_superficie: e.target.value }))} /></div><div><Label>m2 construcción</Label><Input type="number" step="0.01" value={form.m2_construccion} onChange={(e) => setForm((p) => ({ ...p, m2_construccion: e.target.value }))} /></div></div>
-                <div className="grid grid-cols-2 gap-3"><div><Label>Lote/Edificio</Label><Input value={form.lote_edificio} onChange={(e) => setForm((p) => ({ ...p, lote_edificio: e.target.value }))} /></div><div><Label>Manzana/Departamento</Label><Input value={form.manzana_departamento} onChange={(e) => setForm((p) => ({ ...p, manzana_departamento: e.target.value }))} /></div></div>
-                <div className="grid grid-cols-3 gap-3"><div><Label>Precio m2 superficie</Label><Input type="number" step="0.01" value={form.precio_m2_superficie} onChange={(e) => setForm((p) => ({ ...p, precio_m2_superficie: e.target.value }))} /></div><div><Label>Precio m2 construcción</Label><Input type="number" step="0.01" value={form.precio_m2_construccion} onChange={(e) => setForm((p) => ({ ...p, precio_m2_construccion: e.target.value }))} /></div><div><Label>Descuento</Label><Input type="number" step="0.01" value={form.descuento_bonificacion} onChange={(e) => setForm((p) => ({ ...p, descuento_bonificacion: e.target.value }))} /></div></div>
-                <DialogFooter><Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancelar</Button><Button type="submit">Guardar</Button></DialogFooter>
-              </form>
-            </DialogContent>
-          </Dialog>
+          {canManageInventory && (
+            <Dialog open={open} onOpenChange={setOpen}>
+              <DialogTrigger asChild><Button onClick={openCreate}><Plus className="h-4 w-4 mr-2" />Nuevo ítem</Button></DialogTrigger>
+              <DialogContent className="max-w-2xl">
+                <DialogHeader><DialogTitle>{editing ? "Editar inventario" : "Nuevo inventario"}</DialogTitle></DialogHeader>
+                <form onSubmit={onSubmit} className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div><Label>Empresa</Label><Select value={form.company_id} onValueChange={(v) => setForm((p) => ({ ...p, company_id: v, project_id: "" }))}><SelectTrigger><SelectValue placeholder="Seleccionar" /></SelectTrigger><SelectContent>{empresas.map((e) => <SelectItem key={e.id} value={e.id}>{e.nombre}</SelectItem>)}</SelectContent></Select></div>
+                    <div><Label>Proyecto</Label><Select value={form.project_id} onValueChange={(v) => setForm((p) => ({ ...p, project_id: v }))}><SelectTrigger><SelectValue placeholder="Seleccionar" /></SelectTrigger><SelectContent>{filteredProjects.map((pr) => <SelectItem key={pr.id} value={pr.id}>{pr.code} - {pr.name}</SelectItem>)}</SelectContent></Select></div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3"><div><Label>m2 superficie</Label><Input type="number" step="0.01" value={form.m2_superficie} onChange={(e) => setForm((p) => ({ ...p, m2_superficie: e.target.value }))} /></div><div><Label>m2 construcción</Label><Input type="number" step="0.01" value={form.m2_construccion} onChange={(e) => setForm((p) => ({ ...p, m2_construccion: e.target.value }))} /></div></div>
+                  <div className="grid grid-cols-2 gap-3"><div><Label>Lote/Edificio</Label><Input value={form.lote_edificio} onChange={(e) => setForm((p) => ({ ...p, lote_edificio: e.target.value }))} /></div><div><Label>Manzana/Departamento</Label><Input value={form.manzana_departamento} onChange={(e) => setForm((p) => ({ ...p, manzana_departamento: e.target.value }))} /></div></div>
+                  <div className="grid grid-cols-3 gap-3"><div><Label>Precio m2 superficie</Label><Input type="number" step="0.01" value={form.precio_m2_superficie} onChange={(e) => setForm((p) => ({ ...p, precio_m2_superficie: e.target.value }))} /></div><div><Label>Precio m2 construcción</Label><Input type="number" step="0.01" value={form.precio_m2_construccion} onChange={(e) => setForm((p) => ({ ...p, precio_m2_construccion: e.target.value }))} /></div><div><Label>Descuento</Label><Input type="number" step="0.01" value={form.descuento_bonificacion} onChange={(e) => setForm((p) => ({ ...p, descuento_bonificacion: e.target.value }))} /></div></div>
+                  <DialogFooter><Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancelar</Button><Button type="submit">Guardar</Button></DialogFooter>
+                </form>
+              </DialogContent>
+            </Dialog>
+          )}
+
         </div>
       </div>
 
@@ -214,7 +218,7 @@ export default function Inventory() {
                       <td>{projects.find((p) => p.id === it.project_id)?.code || "-"}</td>
                       <td>{money(it.precio_venta)}</td>
                       <td>{money(it.precio_total)}</td>
-                      <td className="text-right space-x-2"><Button size="sm" variant="outline" onClick={() => openEdit(it)}>Editar</Button>{isAdmin && <Button size="sm" variant="destructive" onClick={() => setDeleteTarget(it)}><Trash2 className="h-4 w-4" /></Button>}</td>
+                      <td className="text-right space-x-2">{canManageInventory && <Button size="sm" variant="outline" onClick={() => openEdit(it)}>Editar</Button>}{isAdmin && <Button size="sm" variant="destructive" onClick={() => setDeleteTarget(it)}><Trash2 className="h-4 w-4" /></Button>}</td>
                     </tr>
                   ))}
                 </tbody>
