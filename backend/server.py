@@ -8,6 +8,8 @@ from pymongo.errors import DuplicateKeyError
 from pymongo import ASCENDING
 import os
 import logging
+import json
+import re
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
 from typing import List, Optional, Dict, Any
@@ -76,6 +78,19 @@ class AuthorizationStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+
+
+class BudgetApprovalStatus(str, Enum):
+    NOT_REQUIRED = "not_required"
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class ApprovalType(str, Enum):
+    MOVEMENT = "movement"
+    BUDGET_DEFINITION = "budget_definition"
+    OVERBUDGET_EXCEPTION = "overbudget_exception"
 
 class MovementStatus(str, Enum):
     POSTED = "posted"                    # Contabilizado (aprobado o no requirió autorización)
@@ -189,7 +204,7 @@ class BudgetBase(BaseModel):
     partida_codigo: str  # Código del catálogo (100, 101, etc.)
     year: int
     month: int
-    amount_mxn: float
+    amount_mxn: Decimal
     notes: Optional[str] = None
 
 
@@ -201,14 +216,30 @@ class BudgetPlanInput(BaseModel):
     monthly_breakdown: Dict[str, Decimal] = Field(default_factory=dict)
     notes: Optional[str] = None
 
+
+class BudgetWriteInput(BaseModel):
+    project_id: str
+    partida_codigo: str
+    total_amount: Optional[Any] = Decimal("0")
+    annual_breakdown: Optional[Any] = Field(default_factory=dict)
+    monthly_breakdown: Optional[Any] = Field(default_factory=dict)
+    notes: Optional[str] = None
+
+
+class ApprovalDecisionInput(BaseModel):
+    comment: Optional[str] = None
+
+
 class Budget(BudgetBase):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     created_by: str
 
+
 class BudgetRequestBase(BudgetBase):
     reason: Optional[str] = None
+
 
 class BudgetRequest(BudgetRequestBase):
     model_config = ConfigDict(extra="ignore")
@@ -724,6 +755,8 @@ def to_json_safe(value: Any):
         return [to_json_safe(v) for v in value]
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
@@ -815,31 +848,227 @@ def enforce_company_access(current_user: dict, company_id: Optional[str]):
         raise HTTPException(status_code=403, detail="Acceso restringido a la empresa del usuario")
 
 
+def get_budget_approval_mode() -> str:
+    return os.getenv("BUDGET_APPROVAL_MODE", "soft").strip().lower() or "soft"
+
+
+def get_overbudget_approval_mode() -> str:
+    return os.getenv("OVERBUDGET_APPROVAL_MODE", "reject_and_request").strip().lower() or "reject_and_request"
+
+
+def is_admin_or_bypass(current_user: dict) -> bool:
+    role = current_user.get("role")
+    return role in {UserRole.ADMIN.value}
+
+
+def decimal_map_to_strings(values: Dict[str, Decimal]) -> Dict[str, str]:
+    return {k: str(v) for k, v in values.items()}
+
+
+async def ensure_pending_approval(
+    *,
+    approval_type: ApprovalType,
+    company_id: str,
+    project_id: str,
+    requested_by: str,
+    budget_id: Optional[str] = None,
+    movement_id: Optional[str] = None,
+    dedupe_key: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+):
+    query = {
+        "approval_type": approval_type.value,
+        "status": AuthorizationStatus.PENDING.value,
+        "company_id": company_id,
+        "project_id": project_id,
+    }
+    if budget_id:
+        query["budget_id"] = budget_id
+    if movement_id:
+        query["movement_id"] = movement_id
+    if dedupe_key:
+        query["dedupe_key"] = dedupe_key
+
+    existing = await db.authorizations.find_one(query, {"_id": 0})
+    if existing:
+        return existing
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "approval_type": approval_type.value,
+        "status": AuthorizationStatus.PENDING.value,
+        "company_id": company_id,
+        "project_id": project_id,
+        "budget_id": budget_id,
+        "movement_id": movement_id,
+        "reason": "",
+        "requested_by": requested_by,
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "metadata": to_json_safe(metadata or {}),
+        "dedupe_key": dedupe_key,
+    }
+    await db.authorizations.insert_one(doc)
+    return doc
+
+
+async def get_budget_plan_with_scope(budget_id: str, current_user: dict) -> dict:
+    budget = await db.budget_plans.find_one({"id": budget_id}, {"_id": 0})
+    if not budget:
+        raise HTTPException(status_code=404, detail="Presupuesto no encontrado")
+    enforce_company_access(current_user, budget.get("company_id"))
+    return budget
+
+
+def normalize_plan_response(doc: dict) -> dict:
+    normalized = sanitize_mongo_document(doc)
+    for fld in ("total_amount",):
+        if fld in normalized and normalized[fld] is not None:
+            normalized[fld] = str(normalized[fld])
+    for fld in ("annual_breakdown", "monthly_breakdown"):
+        if fld in normalized and isinstance(normalized[fld], dict):
+            normalized[fld] = {k: str(v) for k, v in normalized[fld].items()}
+    return normalized
+
+
+def normalize_decimal_document(doc: dict) -> dict:
+    return sanitize_mongo_document(to_json_safe(doc))
+
+
+async def evaluate_overbudget(project_id: str, partida_codigo: str, movement_date: datetime, movement_amount: Decimal):
+    plan = await db.budget_plans.find_one({"project_id": project_id, "partida_codigo": partida_codigo}, {"_id": 0})
+    if not plan:
+        return None
+
+    year = str(movement_date.year)
+    ym = f"{movement_date.year:04d}-{movement_date.month:02d}"
+
+    posted_movements = await db.movements.find(movement_active_query(extra={
+        "project_id": project_id,
+        "partida_codigo": partida_codigo,
+        "status": MovementStatus.POSTED.value,
+    }), {"_id": 0}).to_list(5000)
+
+    total_executed = Decimal("0")
+    annual_executed = Decimal("0")
+    monthly_executed = Decimal("0")
+    for mov in posted_movements:
+        amount = decimal_from_value(mov.get("amount_mxn", 0), "amount_mxn")
+        mov_date = date_parser.parse(mov["date"]) if isinstance(mov.get("date"), str) else mov.get("date")
+        total_executed += amount
+        if mov_date.year == movement_date.year:
+            annual_executed += amount
+        if mov_date.year == movement_date.year and mov_date.month == movement_date.month:
+            monthly_executed += amount
+
+    total_budget = decimal_from_value(plan.get("total_amount", "0"), "total_amount") if plan.get("total_amount") is not None else Decimal("0")
+    annual_budget = decimal_from_value((plan.get("annual_breakdown") or {}).get(year, "0"), f"annual_breakdown.{year}") if (plan.get("annual_breakdown") or {}).get(year) is not None else None
+    monthly_budget = decimal_from_value((plan.get("monthly_breakdown") or {}).get(ym, "0"), f"monthly_breakdown.{ym}") if (plan.get("monthly_breakdown") or {}).get(ym) is not None else None
+
+    triggered = []
+    metadata = {"triggered_buckets": triggered, "project_id": project_id, "partida_codigo": partida_codigo}
+
+    if total_budget > Decimal("0") and (total_executed + movement_amount) > total_budget:
+        triggered.append("total")
+        metadata["total"] = {
+            "budget": str(total_budget),
+            "executed": str(total_executed),
+            "movement": str(movement_amount),
+            "excess": str((total_executed + movement_amount) - total_budget),
+        }
+
+    if annual_budget is not None and (annual_executed + movement_amount) > annual_budget:
+        triggered.append("annual")
+        metadata["annual"] = {
+            "year": movement_date.year,
+            "budget": str(annual_budget),
+            "executed": str(annual_executed),
+            "movement": str(movement_amount),
+            "excess": str((annual_executed + movement_amount) - annual_budget),
+        }
+
+    if monthly_budget is not None and (monthly_executed + movement_amount) > monthly_budget:
+        triggered.append("monthly")
+        metadata["monthly"] = {
+            "period": ym,
+            "budget": str(monthly_budget),
+            "executed": str(monthly_executed),
+            "movement": str(movement_amount),
+            "excess": str((monthly_executed + movement_amount) - monthly_budget),
+        }
+
+    if not triggered:
+        return None
+
+    metadata["budget_id"] = plan.get("id")
+    return {"plan": plan, "metadata": metadata}
+
+
+def parse_breakdown_payload(raw_value: Any, field_name: str) -> Dict[str, Any]:
+    if raw_value is None:
+        return {}
+    parsed = raw_value
+    if isinstance(raw_value, str):
+        txt = raw_value.strip()
+        if txt == "":
+            return {}
+        try:
+            parsed = json.loads(txt)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_json", "message": f"{field_name} debe ser JSON válido"})
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_type", "message": f"{field_name} debe ser un objeto JSON"})
+    return parsed
+
+
+def parse_optional_budget_decimal(value: Optional[Any], field_name: str) -> Decimal:
+    if value is None:
+        return Decimal("0")
+    if isinstance(value, str) and value.strip() == "":
+        return Decimal("0")
+    return decimal_from_value(value, field_name)
+
+
 def normalize_budget_breakdown(payload: BudgetPlanInput):
-    total = decimal_from_value(payload.total, "total")
-    ensure_non_negative(total, "total")
+    return normalize_budget_breakdown_values(payload.total, payload.annual_breakdown, payload.monthly_breakdown)
 
-    annual = {}
-    monthly = {}
 
-    for y, amount in (payload.annual_breakdown or {}).items():
+def normalize_budget_breakdown_values(total_amount: Optional[Any], annual_breakdown: Optional[Any], monthly_breakdown: Optional[Any]):
+    total = parse_optional_budget_decimal(total_amount, "total_amount")
+    ensure_non_negative(total, "total_amount")
+
+    annual_raw = parse_breakdown_payload(annual_breakdown, "annual_breakdown")
+    monthly_raw = parse_breakdown_payload(monthly_breakdown, "monthly_breakdown")
+
+    annual: Dict[str, Decimal] = {}
+    monthly: Dict[str, Decimal] = {}
+
+    for y, amount in annual_raw.items():
         year_str = str(y)
+        if not re.fullmatch(r"\d{4}", year_str):
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_key", "message": f"Clave inválida en annual_breakdown: {year_str}", "meta": {"field": "annual_breakdown", "key": year_str}})
         year_int = int(year_str)
         validate_year_in_range(year_int)
-        dec = decimal_from_value(amount, f"annual_breakdown.{year_str}")
+        try:
+            dec = decimal_from_value(amount, f"annual_breakdown.{year_str}")
+        except HTTPException:
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_value", "message": f"Monto inválido en annual_breakdown para {year_str}", "meta": {"field": "annual_breakdown", "key": year_str}})
         ensure_non_negative(dec, f"annual_breakdown.{year_str}")
         annual[year_str] = dec
 
-    for ym, amount in (payload.monthly_breakdown or {}).items():
+    for ym, amount in monthly_raw.items():
         ym_str = str(ym)
-        if len(ym_str) != 7 or ym_str[4] != '-':
-            raise HTTPException(status_code=422, detail={"code": "invalid_month_key", "message": f"Formato inválido para {ym_str}, usa YYYY-MM"})
+        if not re.fullmatch(r"\d{4}-\d{2}", ym_str):
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_key", "message": f"Clave inválida en monthly_breakdown: {ym_str}", "meta": {"field": "monthly_breakdown", "key": ym_str}})
         year_str = ym_str[:4]
         month = int(ym_str[5:7])
         if month < 1 or month > 12:
-            raise HTTPException(status_code=422, detail={"code": "invalid_month_key", "message": f"Mes inválido en {ym_str}"})
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_key", "message": f"Mes inválido en monthly_breakdown: {ym_str}", "meta": {"field": "monthly_breakdown", "key": ym_str}})
         validate_year_in_range(int(year_str))
-        dec = decimal_from_value(amount, f"monthly_breakdown.{ym_str}")
+        try:
+            dec = decimal_from_value(amount, f"monthly_breakdown.{ym_str}")
+        except HTTPException:
+            raise HTTPException(status_code=422, detail={"code": "invalid_breakdown_value", "message": f"Monto inválido en monthly_breakdown para {ym_str}", "meta": {"field": "monthly_breakdown", "key": ym_str}})
         ensure_non_negative(dec, f"monthly_breakdown.{ym_str}")
         monthly[ym_str] = dec
 
@@ -847,20 +1076,20 @@ def normalize_budget_breakdown(payload: BudgetPlanInput):
     monthly_sum = sum(monthly.values(), Decimal("0"))
 
     if annual_sum > total:
-        raise HTTPException(status_code=422, detail={"code": "annual_sum_exceeds_total", "message": "La suma anual excede el total"})
+        raise HTTPException(status_code=422, detail={"code": "annual_sum_exceeds_total", "message": "Annual sum exceeds total amount.", "meta": {"total": str(total), "annual_sum": str(annual_sum)}})
 
     if monthly_sum > total:
-        raise HTTPException(status_code=422, detail={"code": "monthly_sum_exceeds_total", "message": "La suma mensual excede el total"})
+        raise HTTPException(status_code=422, detail={"code": "monthly_sum_exceeds_total", "message": "Monthly sum exceeds total amount.", "meta": {"total": str(total), "monthly_sum": str(monthly_sum)}})
 
-    monthly_by_year = {}
+    monthly_by_year: Dict[str, Decimal] = {}
     for ym, amount in monthly.items():
         y = ym[:4]
         monthly_by_year[y] = monthly_by_year.get(y, Decimal("0")) + amount
 
     for y, monthly_total in monthly_by_year.items():
-        annual_total = annual.get(y, Decimal("0"))
-        if monthly_total > annual_total:
-            raise HTTPException(status_code=422, detail={"code": "monthly_sum_exceeds_annual", "message": f"La suma mensual de {y} excede el anual"})
+        annual_total = annual.get(y)
+        if annual_total is not None and monthly_total > annual_total:
+            raise HTTPException(status_code=422, detail={"code": "monthly_sum_exceeds_annual", "message": f"Monthly sum for year {y} exceeds annual allocation.", "meta": {"year": int(y), "annual": str(annual_total), "monthly_sum": str(monthly_total)}})
 
     return total, annual, monthly
 
@@ -1472,126 +1701,321 @@ async def import_providers(file: UploadFile = File(...), current_user: dict = De
 async def get_budgets(
     project_id: Optional[str] = None,
     partida_codigo: Optional[str] = None,
-    year: Optional[int] = None,
-    month: Optional[int] = None,
+    year: Optional[str] = None,
+    month: Optional[str] = None,
     current_user: dict = Depends(require_permission(Permission.VIEW_BUDGETS))
 ):
+    normalized_year = None if year in (None, "", "all", "TODO", "todo") else int(year)
+    normalized_month = None if month in (None, "", "all", "TODO", "todo") else int(month)
+
+    if normalized_year:
+        validate_year_in_range(normalized_year)
+    if normalized_month and not normalized_year:
+        raise HTTPException(status_code=422, detail={"code": "month_requires_year", "message": "month requiere year"})
+
     query = {}
     if project_id:
         query["project_id"] = project_id
     if partida_codigo:
         query["partida_codigo"] = partida_codigo
-    if year:
-        query["year"] = year
-    if month:
-        query["month"] = month
-    
-    budgets = await db.budgets.find(query, {"_id": 0}).to_list(1000)
-    return budgets
+
+    projects = await db.projects.find({}, {"_id": 0}).to_list(5000)
+    project_company_map = {p.get("id"): p.get("empresa_id") for p in projects}
+
+    plans = await db.budget_plans.find(query, {"_id": 0}).to_list(1000)
+    plan_items = []
+    planned_pairs = set()
+    for plan in plans:
+        company_id = plan.get("company_id") or project_company_map.get(plan.get("project_id"))
+        enforce_company_access(current_user, company_id)
+
+        total_dec = decimal_from_value(plan.get("total_amount", "0"), "total_amount")
+        annual_map = plan.get("annual_breakdown") or {}
+        monthly_map = plan.get("monthly_breakdown") or {}
+
+        period_amount = total_dec
+        period_label = "total"
+        if normalized_year and not normalized_month:
+            period_label = "annual"
+            year_key = str(normalized_year)
+            if year_key in annual_map:
+                period_amount = decimal_from_value(annual_map.get(year_key), f"annual_breakdown.{year_key}")
+            else:
+                monthly_sum = sum(
+                    decimal_from_value(v, f"monthly_breakdown.{k}")
+                    for k, v in monthly_map.items()
+                    if str(k).startswith(f"{year_key}-")
+                )
+                period_amount = monthly_sum if monthly_sum > Decimal("0") else total_dec
+        elif normalized_year and normalized_month:
+            period_label = "monthly"
+            ym_key = f"{normalized_year:04d}-{normalized_month:02d}"
+            period_amount = decimal_from_value(monthly_map.get(ym_key, "0"), f"monthly_breakdown.{ym_key}")
+
+        normalized = normalize_plan_response(plan)
+        normalized["total_amount"] = str(period_amount)
+        normalized["source"] = "plan"
+        normalized["period_mode"] = period_label
+        normalized["year"] = normalized_year
+        normalized["month"] = normalized_month
+        plan_items.append(normalized)
+        planned_pairs.add((plan.get("project_id"), plan.get("partida_codigo")))
+
+    legacy_query = query.copy()
+    if normalized_year:
+        legacy_query["year"] = normalized_year
+    if normalized_month:
+        legacy_query["month"] = normalized_month
+
+    legacy_rows = await db.budgets.find(legacy_query, {"_id": 0}).to_list(5000)
+    grouped = {}
+    for row in legacy_rows:
+        pair = (row.get("project_id"), row.get("partida_codigo"))
+        if pair in planned_pairs:
+            continue
+        company_id = project_company_map.get(row.get("project_id"))
+        enforce_company_access(current_user, company_id)
+        key = pair if (not normalized_year or not normalized_month) else (pair[0], pair[1], normalized_year, normalized_month)
+        entry = grouped.setdefault(key, {
+            "id": row.get("id"),
+            "project_id": row.get("project_id"),
+            "partida_codigo": row.get("partida_codigo"),
+            "notes": row.get("notes"),
+            "approval_status": "legacy",
+            "source": "legacy",
+            "period_mode": "monthly" if (normalized_year and normalized_month) else ("annual" if normalized_year else "total"),
+            "year": normalized_year,
+            "month": normalized_month,
+            "total_amount": Decimal("0"),
+        })
+        entry["total_amount"] += decimal_from_value(row.get("amount_mxn", "0"), "amount_mxn")
+
+    legacy_items = []
+    for item in grouped.values():
+        final = dict(item)
+        final["total_amount"] = str(final["total_amount"])
+        legacy_items.append(sanitize_mongo_document(final))
+
+    return plan_items + legacy_items
+
+
+@api_router.get('/budgets/{budget_id}')
+async def get_budget_by_id(budget_id: str, current_user: dict = Depends(require_permission(Permission.VIEW_BUDGETS))):
+    plan = await db.budget_plans.find_one({"id": budget_id}, {"_id": 0})
+    if plan:
+        enforce_company_access(current_user, plan.get("company_id"))
+        return normalize_plan_response(plan)
+    budget = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
+    if not budget:
+        raise HTTPException(status_code=404, detail="Presupuesto no encontrado")
+    project = await db.projects.find_one({"id": budget.get("project_id")}, {"_id": 0})
+    enforce_company_access(current_user, project.get("empresa_id") if project else None)
+    return sanitize_mongo_document(budget)
+
 
 @api_router.post("/budgets", status_code=201)
-async def create_budget(budget_data: BudgetBase, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
-    validate_year_in_range(budget_data.year)
+async def create_budget(budget_data: Dict[str, Any], current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS, Permission.REQUEST_BUDGETS))):
+    # Contrato nuevo (budget plan) detectado por total_amount/annual_breakdown/monthly_breakdown.
+    if any(key in budget_data for key in ["total_amount", "annual_breakdown", "monthly_breakdown"]):
+        payload = BudgetWriteInput(**budget_data)
+        project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
+        if not project:
+            raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+        company_id = project.get("empresa_id")
+        enforce_company_access(current_user, company_id)
+        await validate_partida(payload.partida_codigo)
+        enforce_capture_budget_scope(current_user, payload.partida_codigo)
+        total, annual, monthly = normalize_budget_breakdown_values(payload.total_amount, payload.annual_breakdown, payload.monthly_breakdown)
+
+        now = datetime.now(timezone.utc).isoformat()
+        doc = {
+            "id": str(uuid.uuid4()),
+            "company_id": company_id,
+            "project_id": payload.project_id,
+            "partida_codigo": payload.partida_codigo,
+            "total_amount": str(total),
+            "annual_breakdown": decimal_map_to_strings(annual),
+            "monthly_breakdown": decimal_map_to_strings(monthly),
+            "notes": payload.notes,
+            "created_by": current_user["user_id"],
+            "updated_by": current_user["user_id"],
+            "created_at": now,
+            "updated_at": now,
+            "approval_status": BudgetApprovalStatus.NOT_REQUIRED.value,
+        }
+
+        if get_budget_approval_mode() == "soft" and total > Decimal("0"):
+            if is_admin_or_bypass(current_user):
+                doc["approval_status"] = BudgetApprovalStatus.APPROVED.value
+            else:
+                doc["approval_status"] = BudgetApprovalStatus.PENDING.value
+
+        await db.budget_plans.insert_one(doc)
+
+        if doc["approval_status"] == BudgetApprovalStatus.PENDING.value:
+            await ensure_pending_approval(
+                approval_type=ApprovalType.BUDGET_DEFINITION,
+                company_id=company_id,
+                project_id=payload.project_id,
+                budget_id=doc["id"],
+                requested_by=current_user["user_id"],
+                dedupe_key=f"budget_definition:{doc['id']}",
+                metadata={"partida_codigo": payload.partida_codigo, "total_amount": str(total)},
+            )
+        await log_audit(current_user, "CREATE", "budget_plans", doc["id"], {"data": doc})
+        return normalize_plan_response(doc)
+
+    # Legacy path
+    payload = BudgetBase(**budget_data)
+    validate_year_in_range(payload.year)
     if current_user.get("role") != UserRole.ADMIN.value:
         raise HTTPException(status_code=403, detail="Solo admin puede crear presupuestos directamente")
-    # VALIDACIÓN BLOQUEANTE: partida debe existir en catálogo
-    await validate_partida(budget_data.partida_codigo)
-    enforce_capture_budget_scope(current_user, budget_data.partida_codigo)
-    
-    # Validar proyecto existe
-    project = await db.projects.find_one({"id": budget_data.project_id}, {"_id": 0})
+    await validate_partida(payload.partida_codigo)
+    enforce_capture_budget_scope(current_user, payload.partida_codigo)
+    project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
     if not project:
         raise HTTPException(status_code=400, detail="Proyecto no encontrado")
-    
-    existing = await db.budgets.find_one({
-        "project_id": budget_data.project_id,
-        "partida_codigo": budget_data.partida_codigo,
-        "year": budget_data.year,
-        "month": budget_data.month
-    }, {"_id": 0})
-    
+    existing = await db.budgets.find_one({"project_id": payload.project_id, "partida_codigo": payload.partida_codigo, "year": payload.year, "month": payload.month}, {"_id": 0})
     if existing:
         raise HTTPException(status_code=400, detail="Ya existe presupuesto para este proyecto/partida/mes")
-    
-    budget = Budget(**budget_data.model_dump(), created_by=current_user["user_id"])
+    budget = Budget(**payload.model_dump(), created_by=current_user["user_id"])
     doc = budget.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
+    doc['amount_mxn'] = str(doc['amount_mxn'])
     await db.budgets.insert_one(doc)
-    await log_audit(current_user, "CREATE", "budgets", budget.id, {
-        "data": {
-            "project_id": doc['project_id'],
-            "partida_codigo": doc['partida_codigo'],
-            "year": doc['year'],
-            "month": doc['month'],
-            "amount_mxn": doc['amount_mxn']
-        }
-    })
+    await log_audit(current_user, "CREATE", "budgets", budget.id, {"data": doc})
     return sanitize_mongo_document(doc)
 
+
 @api_router.put("/budgets/{budget_id}")
-async def update_budget(budget_id: str, updates: BudgetBase, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
-    validate_year_in_range(updates.year)
-    # VALIDACIÓN BLOQUEANTE: partida debe existir
-    await validate_partida(updates.partida_codigo)
-    enforce_capture_budget_scope(current_user, updates.partida_codigo)
-    
+async def update_budget(budget_id: str, updates: Dict[str, Any], current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS, Permission.REQUEST_BUDGETS))):
+    plan = await db.budget_plans.find_one({"id": budget_id}, {"_id": 0})
+    if plan:
+        enforce_company_access(current_user, plan.get("company_id"))
+        payload = BudgetWriteInput(**updates)
+        if payload.project_id != plan.get("project_id"):
+            raise HTTPException(status_code=422, detail={"code": "project_id_immutable", "message": "project_id no puede cambiar"})
+        if payload.partida_codigo != plan.get("partida_codigo"):
+            raise HTTPException(status_code=422, detail={"code": "partida_immutable", "message": "partida_codigo no puede cambiar"})
+
+        enforce_capture_budget_scope(current_user, payload.partida_codigo)
+        total, annual, monthly = normalize_budget_breakdown_values(payload.total_amount, payload.annual_breakdown, payload.monthly_breakdown)
+        set_data = {
+            "total_amount": str(total),
+            "annual_breakdown": decimal_map_to_strings(annual),
+            "monthly_breakdown": decimal_map_to_strings(monthly),
+            "notes": payload.notes,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": current_user["user_id"],
+        }
+
+        if get_budget_approval_mode() == "soft":
+            if total <= Decimal("0"):
+                set_data["approval_status"] = BudgetApprovalStatus.NOT_REQUIRED.value
+            elif is_admin_or_bypass(current_user):
+                set_data["approval_status"] = BudgetApprovalStatus.APPROVED.value
+            else:
+                set_data["approval_status"] = BudgetApprovalStatus.PENDING.value
+
+        await db.budget_plans.update_one({"id": budget_id}, {"$set": set_data})
+
+        if set_data.get("approval_status") == BudgetApprovalStatus.PENDING.value:
+            await ensure_pending_approval(
+                approval_type=ApprovalType.BUDGET_DEFINITION,
+                company_id=plan.get("company_id"),
+                project_id=plan.get("project_id"),
+                budget_id=budget_id,
+                requested_by=current_user["user_id"],
+                dedupe_key=f"budget_definition:{budget_id}",
+                metadata={"partida_codigo": plan.get("partida_codigo"), "total_amount": str(total)},
+            )
+
+        updated = await db.budget_plans.find_one({"id": budget_id}, {"_id": 0})
+        await log_audit(current_user, "UPDATE", "budget_plans", budget_id, {"after": updated})
+        return normalize_plan_response(updated)
+
+    payload = BudgetBase(**updates)
+    validate_year_in_range(payload.year)
+    await validate_partida(payload.partida_codigo)
+    enforce_capture_budget_scope(current_user, payload.partida_codigo)
     old_doc = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
     if not old_doc:
         raise HTTPException(status_code=404, detail="Presupuesto no encontrado")
-    
-    update_data = updates.model_dump()
+    update_data = payload.model_dump()
+    update_data["amount_mxn"] = str(update_data["amount_mxn"])
     await db.budgets.update_one({"id": budget_id}, {"$set": update_data})
-    await log_audit(current_user, "UPDATE", "budgets", budget_id, {
-        "before": {"amount_mxn": old_doc.get('amount_mxn')},
-        "after": {"amount_mxn": update_data.get('amount_mxn')}
-    })
-    
+    await log_audit(current_user, "UPDATE", "budgets", budget_id, {"before": old_doc, "after": update_data})
     updated = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
     return sanitize_mongo_document(updated)
 
+
 @api_router.delete("/budgets/{budget_id}")
 async def delete_budget(budget_id: str, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
-    old_doc = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
-    if not old_doc:
+    old_doc = await db.budget_plans.find_one({"id": budget_id}, {"_id": 0})
+    if old_doc:
+        enforce_company_access(current_user, old_doc.get("company_id"))
+        await db.budget_plans.delete_one({"id": budget_id})
+        await log_audit(current_user, "DELETE", "budget_plans", budget_id, {"deleted": old_doc})
+        return {"message": "Presupuesto eliminado"}
+
+    legacy = await db.budgets.find_one({"id": budget_id}, {"_id": 0})
+    if not legacy:
         raise HTTPException(status_code=404, detail="Presupuesto no encontrado")
-    
     await db.budgets.delete_one({"id": budget_id})
-    await log_audit(current_user, "DELETE", "budgets", budget_id, {
-        "deleted": {
-            "project_id": old_doc.get('project_id'),
-            "partida_codigo": old_doc.get('partida_codigo'),
-            "amount_mxn": old_doc.get('amount_mxn')
-        }
-    })
+    await log_audit(current_user, "DELETE", "budgets", budget_id, {"deleted": legacy})
     return {"message": "Presupuesto eliminado"}
 
+
+@api_router.post("/budgets/{budget_id}/request-approval")
+async def budget_request_approval(budget_id: str, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS, Permission.REQUEST_BUDGETS))):
+    budget = await get_budget_plan_with_scope(budget_id, current_user)
+    approval = await ensure_pending_approval(
+        approval_type=ApprovalType.BUDGET_DEFINITION,
+        company_id=budget.get("company_id"),
+        project_id=budget.get("project_id"),
+        budget_id=budget_id,
+        requested_by=current_user["user_id"],
+        dedupe_key=f"budget_definition:{budget_id}",
+        metadata={"partida_codigo": budget.get("partida_codigo"), "total_amount": budget.get("total_amount")},
+    )
+    await db.budget_plans.update_one({"id": budget_id}, {"$set": {"approval_status": BudgetApprovalStatus.PENDING.value, "updated_at": datetime.now(timezone.utc).isoformat(), "updated_by": current_user["user_id"]}})
+    return sanitize_mongo_document(approval)
+
+
+@api_router.post("/budgets/{budget_id}/approve")
+async def budget_approve(budget_id: str, payload: ApprovalDecisionInput, current_user: dict = Depends(require_permission(Permission.APPROVE_REJECT))):
+    budget = await get_budget_plan_with_scope(budget_id, current_user)
+    pending = await db.authorizations.find_one({"approval_type": ApprovalType.BUDGET_DEFINITION.value, "budget_id": budget_id, "status": AuthorizationStatus.PENDING.value}, {"_id": 0})
+    await db.budget_plans.update_one({"id": budget_id}, {"$set": {"approval_status": BudgetApprovalStatus.APPROVED.value, "updated_at": datetime.now(timezone.utc).isoformat(), "updated_by": current_user["user_id"]}})
+    if pending:
+        await db.authorizations.update_one({"id": pending["id"]}, {"$set": {"status": AuthorizationStatus.APPROVED.value, "decision_by": current_user["user_id"], "decision_at": datetime.now(timezone.utc).isoformat(), "comment": payload.comment}})
+    return {"message": "Presupuesto aprobado", "budget_id": budget_id}
+
+
+@api_router.post("/budgets/{budget_id}/reject")
+async def budget_reject(budget_id: str, payload: ApprovalDecisionInput, current_user: dict = Depends(require_permission(Permission.APPROVE_REJECT))):
+    budget = await get_budget_plan_with_scope(budget_id, current_user)
+    pending = await db.authorizations.find_one({"approval_type": ApprovalType.BUDGET_DEFINITION.value, "budget_id": budget_id, "status": AuthorizationStatus.PENDING.value}, {"_id": 0})
+    await db.budget_plans.update_one({"id": budget_id}, {"$set": {"approval_status": BudgetApprovalStatus.REJECTED.value, "updated_at": datetime.now(timezone.utc).isoformat(), "updated_by": current_user["user_id"]}})
+    if pending:
+        await db.authorizations.update_one({"id": pending["id"]}, {"$set": {"status": AuthorizationStatus.REJECTED.value, "decision_by": current_user["user_id"], "decision_at": datetime.now(timezone.utc).isoformat(), "comment": payload.comment}})
+    return {"message": "Presupuesto rechazado", "budget_id": budget_id}
 
 
 @api_router.post("/budgets/plan", status_code=201)
 async def create_budget_plan(payload: BudgetPlanInput, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
-    project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
-    if not project:
-        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
-    enforce_company_access(current_user, project.get("empresa_id"))
-    await validate_partida(payload.partida_codigo)
-
-    total, annual, monthly = normalize_budget_breakdown(payload)
-
-    doc = {
-        "id": str(uuid.uuid4()),
+    # compatibilidad: redirige al contrato nuevo.
+    req = {
         "project_id": payload.project_id,
         "partida_codigo": payload.partida_codigo,
-        "total": float(total),
-        "annual_breakdown": {k: float(v) for k, v in annual.items()},
-        "monthly_breakdown": {k: float(v) for k, v in monthly.items()},
+        "total_amount": payload.total,
+        "annual_breakdown": payload.annual_breakdown,
+        "monthly_breakdown": payload.monthly_breakdown,
         "notes": payload.notes,
-        "created_by": current_user["user_id"],
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    await db.budget_plans.insert_one(doc)
-    await log_audit(current_user, "CREATE", "budget_plans", doc["id"], {"data": doc})
-    return sanitize_mongo_document(doc)
+    return await create_budget(req, current_user)
+
+
 @api_router.get("/budget-requests")
 async def get_budget_requests(status: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_BUDGETS))):
     query = {}
@@ -1602,6 +2026,7 @@ async def get_budget_requests(status: Optional[str] = None, current_user: dict =
     rows = await db.budget_requests.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return [sanitize_mongo_document(r) for r in rows]
 
+
 @api_router.post("/budget-requests", status_code=201)
 async def create_budget_request(payload: BudgetRequestBase, current_user: dict = Depends(require_permission(Permission.REQUEST_BUDGETS, Permission.MANAGE_BUDGETS))):
     validate_year_in_range(payload.year)
@@ -1610,10 +2035,11 @@ async def create_budget_request(payload: BudgetRequestBase, current_user: dict =
     if current_user.get("role") not in [UserRole.FINANZAS.value, UserRole.ADMIN.value]:
         raise HTTPException(status_code=403, detail="Rol sin permisos para solicitar presupuesto")
     req = BudgetRequest(**payload.model_dump(), requested_by=current_user["user_id"])
-    doc = req.model_dump(); doc["created_at"] = doc["created_at"].isoformat()
+    doc = req.model_dump(); doc["created_at"] = doc["created_at"].isoformat(); doc["amount_mxn"] = str(doc["amount_mxn"])
     await db.budget_requests.insert_one(doc)
     await log_audit(current_user, "CREATE", "budget_requests", req.id, {"data": payload.model_dump()})
     return sanitize_mongo_document(doc)
+
 
 @api_router.put("/budget-requests/{request_id}/resolve")
 async def resolve_budget_request(request_id: str, resolution: AuthorizationResolve, current_user: dict = Depends(require_permission(Permission.MANAGE_BUDGETS))):
@@ -1630,7 +2056,7 @@ async def resolve_budget_request(request_id: str, resolution: AuthorizationResol
         existing = await db.budgets.find_one({"project_id": req["project_id"], "partida_codigo": req["partida_codigo"], "year": req["year"], "month": req["month"]}, {"_id":0})
         if not existing:
             budget = Budget(project_id=req["project_id"], partida_codigo=req["partida_codigo"], year=req["year"], month=req["month"], amount_mxn=req["amount_mxn"], notes=req.get("notes"), created_by=current_user["user_id"])
-            d=budget.model_dump(); d["created_at"]=d["created_at"].isoformat(); await db.budgets.insert_one(d)
+            d=budget.model_dump(); d["created_at"]=d["created_at"].isoformat(); d["amount_mxn"] = str(d["amount_mxn"]); await db.budgets.insert_one(d)
     await log_audit(current_user, f"BUDGET_REQUEST_{resolution.status.value.upper()}", "budget_requests", request_id, {"notes": resolution.notes})
     return {"message": f"Solicitud {resolution.status.value}"}
 
@@ -1743,7 +2169,9 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         if not provider:
             raise HTTPException(status_code=422, detail={"code": "provider_not_found", "message": "Proveedor no válido"})
     
-    if movement_data.amount_original <= 0:
+    amount_original_dec = decimal_from_value(movement_data.amount_original, "amount_original")
+    exchange_rate_dec = decimal_from_value(movement_data.exchange_rate, "exchange_rate")
+    if amount_original_dec <= 0:
         raise HTTPException(status_code=422, detail={"code": "invalid_amount", "message": "Monto debe ser mayor a 0"})
 
     if project:
@@ -1752,10 +2180,10 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     # Parse date
     parsed_date = parse_date_tijuana(movement_data.date)
     validate_date_in_range(parsed_date)
-    amount_mxn = movement_data.amount_original * movement_data.exchange_rate
+    amount_mxn_dec = amount_original_dec * exchange_rate_dec
 
     if no_provider_flow and movement_data.client_id:
-        await validate_client_abono_limit(movement_data.client_id, decimal_from_value(amount_mxn, "amount_mxn"))
+        await validate_client_abono_limit(movement_data.client_id, amount_mxn_dec)
     
     # Check for duplicates
     dup_check = await db.movements.find_one({
@@ -1773,40 +2201,55 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     month = parsed_date.month
     
     budget_enforced = requires_budget(movement_data.partida_codigo)
-    budget = None
-    current_spent = 0
-    budget_amount = 0
-    new_total = amount_mxn
     requires_auth = False
     auth_reason = ""
-    percentage_if_posted = 0
+    overbudget_context = None
     if budget_enforced:
-        budget = await db.budgets.find_one({
-            "project_id": movement_data.project_id,
-            "partida_codigo": movement_data.partida_codigo,
-            "year": year,
-            "month": month
-        }, {"_id": 0})
-
-        current_movements = await db.movements.find({
-            "project_id": movement_data.project_id,
-            "partida_codigo": movement_data.partida_codigo,
-            "status": MovementStatus.POSTED.value
-        }, {"_id": 0}).to_list(5000)
-
-        current_spent = sum(
-            m['amount_mxn'] for m in current_movements
-            if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
-        )
-
-        budget_amount = budget['amount_mxn'] if budget else 0
-        new_total = current_spent + amount_mxn
-        percentage_if_posted = (new_total / budget_amount * 100) if budget_amount > 0 else 0
-
-        if budget_amount == 0:
-            raise HTTPException(status_code=422, detail="Presupuesto requerido no definido para la partida y periodo")
-        if new_total > budget_amount:
-            raise HTTPException(status_code=422, detail="Saldo de presupuesto insuficiente para la partida y periodo")
+        overbudget = await evaluate_overbudget(movement_data.project_id, movement_data.partida_codigo, parsed_date, amount_mxn_dec)
+        if overbudget:
+            if get_overbudget_approval_mode() in {"reject", "reject_and_request"}:
+                movement_id = str(uuid.uuid4())
+                if get_overbudget_approval_mode() == "reject_and_request":
+                    await ensure_pending_approval(
+                        approval_type=ApprovalType.OVERBUDGET_EXCEPTION,
+                        company_id=project.get("empresa_id"),
+                        project_id=movement_data.project_id,
+                        budget_id=overbudget["plan"].get("id"),
+                        movement_id=movement_id,
+                        requested_by=current_user["user_id"],
+                        dedupe_key=f"overbudget:{movement_data.project_id}:{movement_data.partida_codigo}:{parsed_date.date().isoformat()}:{str(amount_mxn_dec)}:{','.join(overbudget['metadata'].get('triggered_buckets', []))}",
+                        metadata=overbudget["metadata"],
+                    )
+                raise HTTPException(status_code=422, detail={
+                    "code": "overbudget_rejected_and_requested",
+                    "message": "Movement exceeds available budget and an exception approval request was generated.",
+                    "meta": overbudget["metadata"],
+                })
+            elif get_overbudget_approval_mode() == "pending_movement":
+                requires_auth = True
+                auth_reason = "Movimiento excede presupuesto"
+                overbudget_context = overbudget
+        else:
+            budget = await db.budgets.find_one({
+                "project_id": movement_data.project_id,
+                "partida_codigo": movement_data.partida_codigo,
+                "year": year,
+                "month": month
+            }, {"_id": 0})
+            if not budget:
+                raise HTTPException(status_code=422, detail="Presupuesto requerido no definido para la partida y periodo")
+            current_movements = await db.movements.find({
+                "project_id": movement_data.project_id,
+                "partida_codigo": movement_data.partida_codigo,
+                "status": MovementStatus.POSTED.value
+            }, {"_id": 0}).to_list(5000)
+            current_spent = sum(
+                decimal_from_value(m.get('amount_mxn', 0), 'amount_mxn') for m in current_movements
+                if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
+            )
+            budget_amount = decimal_from_value(budget.get('amount_mxn', 0), 'amount_mxn')
+            if (current_spent + amount_mxn_dec) > budget_amount:
+                raise HTTPException(status_code=422, detail="Saldo de presupuesto insuficiente para la partida y periodo")
     
     movement = Movement(
         project_id=movement_data.project_id,
@@ -1817,7 +2260,7 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         currency=movement_data.currency,
         amount_original=movement_data.amount_original,
         exchange_rate=movement_data.exchange_rate,
-        amount_mxn=amount_mxn,
+        amount_mxn=float(amount_mxn_dec),
         reference=movement_data.reference,
         client_id=movement_data.client_id if no_provider_flow else None,
         description=movement_data.description,
@@ -1843,7 +2286,7 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
             'partida_codigo': movement_data.partida_codigo,
             'presupuesto': budget_amount,
             'ejecutado_actual': current_spent,
-            'monto_movimiento': amount_mxn,
+            'monto_movimiento': float(amount_mxn_dec),
             'porcentaje_actual': (current_spent / budget_amount * 100) if budget_amount > 0 else 0,
             'porcentaje_si_aprueba': percentage_if_posted
         }
@@ -3701,6 +4144,7 @@ app.add_middleware(
 async def setup_indexes():
     await db.users.create_index([("email", ASCENDING)], unique=True)
     await db.users.create_index([("name", ASCENDING)], unique=True)
+    await db.budget_plans.create_index([("project_id", ASCENDING), ("partida_codigo", ASCENDING)], unique=True)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
