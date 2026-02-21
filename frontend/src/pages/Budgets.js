@@ -11,6 +11,45 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, Dialog
 import { Plus, Pencil, Trash2, Loader2 } from "lucide-react";
 import { buildYearOptions } from "../lib/yearRange";
 
+const parseAnnualBreakdownToRows = (annualBreakdown = {}) => {
+  if (!annualBreakdown || typeof annualBreakdown !== "object") return [];
+  return Object.entries(annualBreakdown)
+    .map(([year, amount]) => ({ id: `${year}`, year: String(year), amount: String(amount ?? "") }))
+    .sort((a, b) => Number(a.year) - Number(b.year));
+};
+
+const parseMonthlyBreakdownToRows = (monthlyBreakdown = {}) => {
+  if (!monthlyBreakdown || typeof monthlyBreakdown !== "object") return [];
+  return Object.entries(monthlyBreakdown)
+    .map(([ym, amount]) => {
+      const [year = "", month = ""] = String(ym).split("-");
+      return { id: `${ym}`, year: String(year), month: String(Number(month) || ""), amount: String(amount ?? "") };
+    })
+    .filter((row) => row.year && row.month)
+    .sort((a, b) => {
+      const ay = Number(a.year); const by = Number(b.year);
+      if (ay !== by) return ay - by;
+      return Number(a.month) - Number(b.month);
+    });
+};
+
+const rowsToAnnualBreakdown = (rows = []) => {
+  const out = {};
+  rows.forEach((row) => {
+    out[String(row.year)] = String(row.amount);
+  });
+  return out;
+};
+
+const rowsToMonthlyBreakdown = (rows = []) => {
+  const out = {};
+  rows.forEach((row) => {
+    const key = `${String(row.year)}-${String(row.month).padStart(2, "0")}`;
+    out[key] = String(row.amount);
+  });
+  return out;
+};
+
 const Budgets = () => {
   const { api, canManage, user } = useAuth();
   const [budgets, setBudgets] = useState([]);
@@ -36,8 +75,8 @@ const Budgets = () => {
     project_id: "",
     partida_codigo: "",
     total_amount: "",
-    annual_json: "",
-    monthly_json: "",
+    annual_rows: [],
+    monthly_rows: [],
     notes: ""
   });
 
@@ -87,8 +126,8 @@ const Budgets = () => {
         project_id: budget.project_id,
         partida_codigo: budget.partida_codigo,
         total_amount: budget.total_amount || "0",
-        annual_json: budget.annual_breakdown ? JSON.stringify(budget.annual_breakdown, null, 2) : "",
-        monthly_json: budget.monthly_breakdown ? JSON.stringify(budget.monthly_breakdown, null, 2) : "",
+        annual_rows: parseAnnualBreakdownToRows(budget.annual_breakdown),
+        monthly_rows: parseMonthlyBreakdownToRows(budget.monthly_breakdown),
         notes: budget.notes || ""
       });
     } else {
@@ -97,29 +136,23 @@ const Budgets = () => {
         project_id: "",
         partida_codigo: "",
         total_amount: "",
-        annual_json: "",
-        monthly_json: "",
+        annual_rows: [],
+        monthly_rows: [],
         notes: ""
       });
     }
     setDialogOpen(true);
   };
 
-  const parseBreakdownInput = (raw, fieldLabel) => {
-    const text = (raw || "").trim();
-    if (!text) return {};
-
-    try {
-      const parsed = JSON.parse(text);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("type");
-      }
-      return parsed;
-    } catch (err) {
-      if (err.message === "type") {
-        throw new Error(`${fieldLabel} debe ser un objeto JSON (clave-valor).`);
-      }
-      throw new Error(`${fieldLabel} contiene JSON inválido.`);
+  const validateBreakdownRows = () => {
+    for (const row of formData.annual_rows) {
+      if (!row.year || Number.isNaN(Number(row.year))) throw new Error("Cada fila anual requiere año válido");
+      if (Number(row.amount) < 0 || Number.isNaN(Number(row.amount))) throw new Error("Cada fila anual requiere monto numérico >= 0");
+    }
+    for (const row of formData.monthly_rows) {
+      if (!row.year || Number.isNaN(Number(row.year))) throw new Error("Cada fila mensual requiere año válido");
+      if (!row.month || Number(row.month) < 1 || Number(row.month) > 12) throw new Error("Cada fila mensual requiere mes entre 1 y 12");
+      if (Number(row.amount) < 0 || Number.isNaN(Number(row.amount))) throw new Error("Cada fila mensual requiere monto numérico >= 0");
     }
   };
 
@@ -128,12 +161,13 @@ const Budgets = () => {
     setIsSaving(true);
     
     try {
+      validateBreakdownRows();
       const payload = {
         project_id: formData.project_id,
         partida_codigo: formData.partida_codigo,
         total_amount: formData.total_amount || "0",
-        annual_breakdown: parseBreakdownInput(formData.annual_json, "Desglose anual"),
-        monthly_breakdown: parseBreakdownInput(formData.monthly_json, "Desglose mensual"),
+        annual_breakdown: rowsToAnnualBreakdown(formData.annual_rows),
+        monthly_breakdown: rowsToMonthlyBreakdown(formData.monthly_rows),
         notes: formData.notes,
       };
 
@@ -193,6 +227,42 @@ const Budgets = () => {
   const getProjectName = (id) => projects.find(p => p.id === id)?.name || "N/A";
   const getPartidaName = (codigo) => partidas.find(p => p.codigo === codigo)?.nombre || "N/A";
   const getPartidaCode = (codigo) => partidas.find(p => p.codigo === codigo)?.codigo || "N/A";
+
+  const addAnnualRow = () => {
+    setFormData((prev) => ({
+      ...prev,
+      annual_rows: [...prev.annual_rows, { id: crypto.randomUUID(), year: String(yearOptions[0] || 2025), amount: "0" }],
+    }));
+  };
+
+  const updateAnnualRow = (id, patch) => {
+    setFormData((prev) => ({
+      ...prev,
+      annual_rows: prev.annual_rows.map((row) => (row.id === id ? { ...row, ...patch } : row)),
+    }));
+  };
+
+  const removeAnnualRow = (id) => {
+    setFormData((prev) => ({ ...prev, annual_rows: prev.annual_rows.filter((row) => row.id !== id) }));
+  };
+
+  const addMonthlyRow = () => {
+    setFormData((prev) => ({
+      ...prev,
+      monthly_rows: [...prev.monthly_rows, { id: crypto.randomUUID(), year: String(yearOptions[0] || 2025), month: "1", amount: "0" }],
+    }));
+  };
+
+  const updateMonthlyRow = (id, patch) => {
+    setFormData((prev) => ({
+      ...prev,
+      monthly_rows: prev.monthly_rows.map((row) => (row.id === id ? { ...row, ...patch } : row)),
+    }));
+  };
+
+  const removeMonthlyRow = (id) => {
+    setFormData((prev) => ({ ...prev, monthly_rows: prev.monthly_rows.filter((row) => row.id !== id) }));
+  };
 
   return (
     <div className="space-y-6" data-testid="budgets-page">
@@ -261,12 +331,42 @@ const Budgets = () => {
                 />
               </div>
               <div className="space-y-2">
-                <Label>Desglose anual (JSON)</Label>
-                <textarea className="w-full min-h-20 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder={`{\n  "2026": "1000.00"\n}`} value={formData.annual_json} onChange={(e) => setFormData(prev => ({ ...prev, annual_json: e.target.value }))} />
+                <div className="flex items-center justify-between">
+                  <Label>Desglose anual</Label>
+                  <Button type="button" variant="outline" size="sm" onClick={addAnnualRow}>Agregar año</Button>
+                </div>
+                <div className="space-y-2 rounded-md border border-border bg-card/60 p-3">
+                  {formData.annual_rows.length === 0 && <p className="text-xs text-muted-foreground">Sin desglose anual (se usará total).</p>}
+                  {formData.annual_rows.map((row) => (
+                    <div key={row.id} className="grid grid-cols-12 gap-2">
+                      <Input className="col-span-4" type="number" min="2000" max="2100" value={row.year} onChange={(e) => updateAnnualRow(row.id, { year: e.target.value })} placeholder="Año" />
+                      <Input className="col-span-6" type="number" min="0" step="0.01" value={row.amount} onChange={(e) => updateAnnualRow(row.id, { amount: e.target.value })} placeholder="Monto" />
+                      <Button className="col-span-2" type="button" variant="ghost" onClick={() => removeAnnualRow(row.id)}>X</Button>
+                    </div>
+                  ))}
+                </div>
               </div>
               <div className="space-y-2">
-                <Label>Desglose mensual (JSON)</Label>
-                <textarea className="w-full min-h-20 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder={`{\n  "2026-01": "200.00"\n}`} value={formData.monthly_json} onChange={(e) => setFormData(prev => ({ ...prev, monthly_json: e.target.value }))} />
+                <div className="flex items-center justify-between">
+                  <Label>Desglose mensual</Label>
+                  <Button type="button" variant="outline" size="sm" onClick={addMonthlyRow}>Agregar mes</Button>
+                </div>
+                <div className="space-y-2 rounded-md border border-border bg-card/60 p-3">
+                  {formData.monthly_rows.length === 0 && <p className="text-xs text-muted-foreground">Sin desglose mensual (fallback anual/total).</p>}
+                  {formData.monthly_rows.map((row) => (
+                    <div key={row.id} className="grid grid-cols-12 gap-2">
+                      <Input className="col-span-3" type="number" min="2000" max="2100" value={row.year} onChange={(e) => updateMonthlyRow(row.id, { year: e.target.value })} placeholder="Año" />
+                      <Select value={String(row.month)} onValueChange={(v) => updateMonthlyRow(row.id, { month: v })}>
+                        <SelectTrigger className="col-span-3"><SelectValue placeholder="Mes" /></SelectTrigger>
+                        <SelectContent>
+                          {months.map((m) => <SelectItem key={m.value} value={String(m.value)}>{m.label}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                      <Input className="col-span-4" type="number" min="0" step="0.01" value={row.amount} onChange={(e) => updateMonthlyRow(row.id, { amount: e.target.value })} placeholder="Monto" />
+                      <Button className="col-span-2" type="button" variant="ghost" onClick={() => removeMonthlyRow(row.id)}>X</Button>
+                    </div>
+                  ))}
+                </div>
               </div>
               
               <div className="space-y-2">

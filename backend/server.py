@@ -856,6 +856,11 @@ def get_overbudget_approval_mode() -> str:
     return os.getenv("OVERBUDGET_APPROVAL_MODE", "reject_and_request").strip().lower() or "reject_and_request"
 
 
+def get_overbudget_admin_bypass_enabled() -> bool:
+    raw = os.getenv("OVERBUDGET_ADMIN_BYPASS", "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def is_admin_or_bypass(current_user: dict) -> bool:
     role = current_user.get("role")
     return role in {UserRole.ADMIN.value}
@@ -962,46 +967,68 @@ async def evaluate_overbudget(project_id: str, partida_codigo: str, movement_dat
             monthly_executed += amount
 
     total_budget = decimal_from_value(plan.get("total_amount", "0"), "total_amount") if plan.get("total_amount") is not None else Decimal("0")
-    annual_budget = decimal_from_value((plan.get("annual_breakdown") or {}).get(year, "0"), f"annual_breakdown.{year}") if (plan.get("annual_breakdown") or {}).get(year) is not None else None
-    monthly_budget = decimal_from_value((plan.get("monthly_breakdown") or {}).get(ym, "0"), f"monthly_breakdown.{ym}") if (plan.get("monthly_breakdown") or {}).get(ym) is not None else None
+    annual_breakdown = plan.get("annual_breakdown") or {}
+    monthly_breakdown = plan.get("monthly_breakdown") or {}
+    annual_budget = decimal_from_value(annual_breakdown.get(year, "0"), f"annual_breakdown.{year}") if annual_breakdown.get(year) is not None else None
+    monthly_budget = decimal_from_value(monthly_breakdown.get(ym, "0"), f"monthly_breakdown.{ym}") if monthly_breakdown.get(ym) is not None else None
 
-    triggered = []
-    metadata = {"triggered_buckets": triggered, "project_id": project_id, "partida_codigo": partida_codigo}
+    has_detail = bool(annual_breakdown) or bool(monthly_breakdown)
+    effective_scope = "total"
+    scope_budget = total_budget
+    scope_executed = total_executed
+    if monthly_budget is not None:
+        effective_scope = "monthly"
+        scope_budget = monthly_budget
+        scope_executed = monthly_executed
+    elif annual_budget is not None:
+        effective_scope = "annual"
+        scope_budget = annual_budget
+        scope_executed = annual_executed
 
-    if total_budget > Decimal("0") and (total_executed + movement_amount) > total_budget:
-        triggered.append("total")
-        metadata["total"] = {
-            "budget": str(total_budget),
-            "executed": str(total_executed),
-            "movement": str(movement_amount),
-            "excess": str((total_executed + movement_amount) - total_budget),
-        }
+    total_available = total_budget - total_executed
+    scope_available = scope_budget - scope_executed
+    total_exceeded = total_budget > Decimal("0") and (total_executed + movement_amount) > total_budget
+    scope_exceeded = (scope_executed + movement_amount) > scope_budget
 
-    if annual_budget is not None and (annual_executed + movement_amount) > annual_budget:
-        triggered.append("annual")
-        metadata["annual"] = {
-            "year": movement_date.year,
-            "budget": str(annual_budget),
-            "executed": str(annual_executed),
-            "movement": str(movement_amount),
-            "excess": str((annual_executed + movement_amount) - annual_budget),
-        }
-
-    if monthly_budget is not None and (monthly_executed + movement_amount) > monthly_budget:
-        triggered.append("monthly")
-        metadata["monthly"] = {
-            "period": ym,
-            "budget": str(monthly_budget),
-            "executed": str(monthly_executed),
-            "movement": str(movement_amount),
-            "excess": str((monthly_executed + movement_amount) - monthly_budget),
-        }
-
-    if not triggered:
+    if not total_exceeded and not scope_exceeded:
         return None
 
-    metadata["budget_id"] = plan.get("id")
-    return {"plan": plan, "metadata": metadata}
+    triggered = []
+    if scope_exceeded:
+        triggered.append(effective_scope)
+    if total_exceeded and "total" not in triggered:
+        triggered.append("total")
+
+    metadata = {
+        "budget_id": plan.get("id"),
+        "triggered_buckets": triggered,
+        "project_id": project_id,
+        "partida_codigo": partida_codigo,
+        "scope": "total" if total_exceeded else effective_scope,
+        "year": movement_date.year,
+        "month": movement_date.month,
+        "requested": str(movement_amount),
+        "available": str(total_available if total_exceeded else scope_available),
+        "effective_scope": effective_scope,
+        "detail_present": has_detail,
+        "total": {
+            "budget": str(total_budget),
+            "executed": str(total_executed),
+            "available": str(total_available),
+        },
+        "scoped": {
+            "scope": effective_scope,
+            "budget": str(scope_budget),
+            "executed": str(scope_executed),
+            "available": str(scope_available),
+        },
+    }
+    return {
+        "plan": plan,
+        "metadata": metadata,
+        "scope_exceeded": scope_exceeded,
+        "total_exceeded": total_exceeded,
+    }
 
 
 def parse_breakdown_payload(raw_value: Any, field_name: str) -> Dict[str, Any]:
@@ -2205,31 +2232,61 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     auth_reason = ""
     overbudget_context = None
     if budget_enforced:
-        overbudget = await evaluate_overbudget(movement_data.project_id, movement_data.partida_codigo, parsed_date, amount_mxn_dec)
+        budget_plan = await db.budget_plans.find_one({"project_id": movement_data.project_id, "partida_codigo": movement_data.partida_codigo}, {"_id": 0})
+        overbudget = await evaluate_overbudget(movement_data.project_id, movement_data.partida_codigo, parsed_date, amount_mxn_dec) if budget_plan else None
         if overbudget:
-            if get_overbudget_approval_mode() in {"reject", "reject_and_request"}:
-                movement_id = str(uuid.uuid4())
-                if get_overbudget_approval_mode() == "reject_and_request":
-                    await ensure_pending_approval(
-                        approval_type=ApprovalType.OVERBUDGET_EXCEPTION,
-                        company_id=project.get("empresa_id"),
-                        project_id=movement_data.project_id,
-                        budget_id=overbudget["plan"].get("id"),
-                        movement_id=movement_id,
-                        requested_by=current_user["user_id"],
-                        dedupe_key=f"overbudget:{movement_data.project_id}:{movement_data.partida_codigo}:{parsed_date.date().isoformat()}:{str(amount_mxn_dec)}:{','.join(overbudget['metadata'].get('triggered_buckets', []))}",
-                        metadata=overbudget["metadata"],
-                    )
-                raise HTTPException(status_code=422, detail={
-                    "code": "overbudget_rejected_and_requested",
-                    "message": "Movement exceeds available budget and an exception approval request was generated.",
-                    "meta": overbudget["metadata"],
+            overbudget_meta = overbudget.get("metadata", {})
+            overbudget_meta.setdefault("project_id", movement_data.project_id)
+            overbudget_meta.setdefault("partida_code", movement_data.partida_codigo)
+            overbudget_meta.setdefault("requested", str(amount_mxn_dec))
+            overbudget_meta.setdefault("year", parsed_date.year)
+            overbudget_meta.setdefault("month", parsed_date.month)
+            if overbudget.get("total_exceeded"):
+                overbudget_meta["scope"] = "total"
+            elif overbudget.get("scope_exceeded"):
+                overbudget_meta["scope"] = overbudget_meta.get("scope") or overbudget_meta.get("effective_scope") or "total"
+
+            is_admin = current_user.get("role") == UserRole.ADMIN.value
+            admin_bypass_allowed = is_admin and get_overbudget_admin_bypass_enabled() and not overbudget.get("total_exceeded")
+
+            if admin_bypass_allowed:
+                await log_audit(current_user, "OVERBUDGET_ADMIN_BYPASS", "movements", "pending_create", {
+                    "code": "overbudget_admin_bypass",
+                    "project_id": movement_data.project_id,
+                    "partida_code": movement_data.partida_codigo,
+                    "meta": overbudget_meta,
                 })
-            elif get_overbudget_approval_mode() == "pending_movement":
-                requires_auth = True
-                auth_reason = "Movimiento excede presupuesto"
-                overbudget_context = overbudget
-        else:
+            else:
+                mode = get_overbudget_approval_mode()
+                if mode in {"reject", "reject_and_request"}:
+                    if mode == "reject_and_request":
+                        await ensure_pending_approval(
+                            approval_type=ApprovalType.OVERBUDGET_EXCEPTION,
+                            company_id=project.get("empresa_id"),
+                            project_id=movement_data.project_id,
+                            budget_id=overbudget["plan"].get("id"),
+                            requested_by=current_user["user_id"],
+                            dedupe_key=f"overbudget:{movement_data.project_id}:{movement_data.partida_codigo}:{parsed_date.date().isoformat()}:{str(amount_mxn_dec)}:{','.join(overbudget_meta.get('triggered_buckets', []))}",
+                            metadata=overbudget_meta,
+                        )
+                    raise HTTPException(status_code=422, detail={
+                        "code": "overbudget_rejected_and_requested",
+                        "message": "Movement exceeds available budget and an exception approval request was generated.",
+                        "meta": {
+                            "scope": overbudget_meta.get("scope") or "total",
+                            "project_id": movement_data.project_id,
+                            "partida_code": movement_data.partida_codigo,
+                            "requested": str(amount_mxn_dec),
+                            "available": overbudget_meta.get("available", "0"),
+                            "year": parsed_date.year,
+                            "month": parsed_date.month,
+                        },
+                    })
+                elif mode == "pending_movement":
+                    requires_auth = True
+                    auth_reason = "Movimiento excede presupuesto"
+                    overbudget_context = overbudget
+        elif not budget_plan:
             budget = await db.budgets.find_one({
                 "project_id": movement_data.project_id,
                 "partida_codigo": movement_data.partida_codigo,
