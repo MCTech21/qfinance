@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import {
@@ -38,7 +38,9 @@ const roleLabels = {
 };
 
 const DashboardLayout = ({ children }) => {
-  const { user, logout, hasRole } = useAuth();
+  const { user, logout, hasRole, tokenClaims, allowedCompanies, selectCompany } = useAuth();
+  const [selectedCompany, setSelectedCompany] = useState("");
+  const [isSelectingCompany, setIsSelectingCompany] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -65,6 +67,25 @@ const DashboardLayout = ({ children }) => {
   const filteredNav = navItems.filter(item => 
     item.roles.some(role => hasRole(role))
   );
+
+
+
+  const requiresCompanySelection = useMemo(() => {
+    if (!user || user.role === "admin") return false;
+    const selected = tokenClaims?.empresa_id || user?.empresa_id;
+    return !selected;
+  }, [user, tokenClaims]);
+
+  const handleSelectCompany = async () => {
+    if (!selectedCompany) return;
+    try {
+      setIsSelectingCompany(true);
+      await selectCompany(selectedCompany);
+      setSelectedCompany("");
+    } finally {
+      setIsSelectingCompany(false);
+    }
+  };
 
   const getInitials = (name) => {
     return name?.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2) || "??";
@@ -188,6 +209,33 @@ const DashboardLayout = ({ children }) => {
         <main className="p-6">
           {children}
         </main>
+
+        {requiresCompanySelection && (
+          <div className="fixed inset-0 z-[100] bg-black/50 flex items-center justify-center p-4">
+            <div className="w-full max-w-md rounded-lg border border-border bg-card p-4 space-y-3">
+              <h3 className="text-lg font-semibold">Selecciona empresa para operar</h3>
+              {allowedCompanies.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No tienes empresas asignadas; contacta al administrador.</p>
+              ) : (
+                <>
+                  <select
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    value={selectedCompany}
+                    onChange={(e) => setSelectedCompany(e.target.value)}
+                  >
+                    <option value="">Selecciona empresa...</option>
+                    {allowedCompanies.map((empresa) => (
+                      <option key={empresa.id} value={empresa.id}>{empresa.nombre}</option>
+                    ))}
+                  </select>
+                  <Button onClick={handleSelectCompany} disabled={!selectedCompany || isSelectingCompany}>
+                    Continuar
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

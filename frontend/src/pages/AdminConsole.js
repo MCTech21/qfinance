@@ -9,7 +9,7 @@ const entityConfig = {
   proyectos: { label: "Proyectos", fields: ["code", "name", "empresa_id", "description"] },
   catalogo_partidas: { label: "Partidas", fields: ["codigo", "nombre", "grupo"] },
   proveedores: { label: "Proveedores", fields: ["code", "name", "rfc"] },
-  usuarios: { label: "Usuarios", fields: ["email", "name", "role", "is_active"] },
+  usuarios: { label: "Usuarios", fields: ["email", "name", "role", "is_active", "empresa_ids"] },
 };
 
 
@@ -39,6 +39,9 @@ const AdminConsole = () => {
     if (tab === "proyectos") {
       api().get("/admin/catalogs/empresas", { params: { include_inactive: true } }).then((r) => setEmpresasCatalog(r.data || [])).catch(() => setEmpresasCatalog([]));
     }
+    if (tab === "usuarios") {
+      api().get("/admin/empresas").then((r) => setEmpresasCatalog(r.data || [])).catch(() => setEmpresasCatalog([]));
+    }
   }, [api, tab]);
 
   const filtered = useMemo(() => {
@@ -51,7 +54,15 @@ const AdminConsole = () => {
     e.preventDefault();
     try {
       if (editingId) {
-        await api().put(`/admin/catalogs/${tab}/${editingId}`, form);
+        if (tab === "usuarios") {
+          await api().put(`/admin/users/${editingId}`, {
+            role: form.role,
+            is_active: form.is_active,
+            empresa_ids: Array.isArray(form.empresa_ids) ? form.empresa_ids : [],
+          });
+        } else {
+          await api().put(`/admin/catalogs/${tab}/${editingId}`, form);
+        }
         toast.success("Actualizado");
       } else {
         await api().post(`/admin/catalogs/${tab}`, form);
@@ -173,6 +184,31 @@ const AdminConsole = () => {
               );
             }
 
+            if (tab === "usuarios" && field === "empresa_ids") {
+              const selected = Array.isArray(form.empresa_ids) ? form.empresa_ids : [];
+              return (
+                <div key={field} className="space-y-2 border border-border rounded p-2">
+                  <p className="text-sm font-medium">Empresas permitidas</p>
+                  {empresasCatalog.map((empresa) => (
+                    <label key={empresa.id} className="text-sm flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(empresa.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setForm((prev) => ({ ...prev, empresa_ids: [...selected, empresa.id] }));
+                          } else {
+                            setForm((prev) => ({ ...prev, empresa_ids: selected.filter((id) => id !== empresa.id) }));
+                          }
+                        }}
+                      />
+                      {empresa.nombre}
+                    </label>
+                  ))}
+                </div>
+              );
+            }
+
             return (
               <Input
                 key={field}
@@ -213,9 +249,9 @@ const AdminConsole = () => {
               {filtered.map((row) => (
                 <tr key={row.id}>
                   <td className="max-w-[120px] truncate">{row.id}</td>
-                  {columns.map((c) => <td key={c}>{String(row[c] ?? "")}</td>)}
+                  {columns.map((c) => <td key={c}>{c === "empresa_ids" && Array.isArray(row[c]) ? row[c].join(", ") : String(row[c] ?? "")}</td>)}
                   <td className="space-x-1 whitespace-nowrap">
-                    <Button size="sm" variant="outline" onClick={() => { setEditingId(row.id); setForm(Object.fromEntries(columns.map((c) => [c, c === "is_active" ? (row[c] !== false) : (row[c] ?? "")]))); }}>Editar</Button>
+                    <Button size="sm" variant="outline" onClick={() => { setEditingId(row.id); setForm(Object.fromEntries(columns.map((c) => [c, c === "is_active" ? (row[c] !== false) : (c === "empresa_ids" ? (row[c] || []) : (row[c] ?? ""))]))); }}>Editar</Button>
                     {row.is_active === false
                       ? <Button size="sm" onClick={() => restore(row)}>Restaurar</Button>
                       : <Button size="sm" variant="secondary" onClick={() => softDelete(row)}>Desactivar</Button>
