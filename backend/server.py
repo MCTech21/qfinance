@@ -682,6 +682,16 @@ def is_ingresos_partida(codigo: str) -> bool:
     return str(codigo).startswith("4")
 
 
+def require_client_write_access():
+    async def checker(current_user: dict = Depends(get_current_user)):
+        role = normalize_role_input(current_user.get("role")) or current_user.get("role")
+        if role in {UserRole.ADMIN.value, UserRole.FINANZAS.value, UserRole.CAPTURA.value}:
+            current_user["role"] = role
+            return current_user
+        raise HTTPException(status_code=403, detail="Permisos insuficientes para gestionar clientes")
+    return checker
+
+
 CAPTURA_ALLOWED_BUDGET_CODES = {"103", "203", "206", "402", "403"}
 NO_PROVIDER_BUDGET_CODES = {"402", "403"}
 
@@ -3809,7 +3819,7 @@ async def _normalize_client_create_payload(payload: ClientCreateRequest) -> Clie
 
 
 @api_router.post("/clients", status_code=201)
-async def create_client(payload: ClientCreateRequest, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+async def create_client(payload: ClientCreateRequest, current_user: dict = Depends(require_client_write_access())):
     logger.info("POST /api/clients payload=%s", {
         "company_id": payload.company_id,
         "empresa": payload.empresa,
@@ -3935,7 +3945,7 @@ async def update_inventory_item(item_id: str, payload: InventoryItemUpdate, curr
 
 
 @api_router.put("/clients/{client_id}")
-async def update_client(client_id: str, payload: ClientUpdate, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+async def update_client(client_id: str, payload: ClientUpdate, current_user: dict = Depends(require_client_write_access())):
     client_doc = await db.clients.find_one({"id": client_id}, {"_id": 0})
     if not client_doc:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")

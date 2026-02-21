@@ -589,3 +589,99 @@ def test_receipt_id_with_suffix_is_resolved_without_422():
     response = client.get("/api/movements/11382_5b533/receipt.pdf")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/pdf")
+
+
+def test_captura_can_get_and_create_clients_but_delete_is_forbidden():
+    fake_db = FakeDB()
+    fake_db.inventory_items.rows.append({
+        "id": "inv2",
+        "company_id": "e1",
+        "project_id": "pr1",
+        "lote_edificio": "L2",
+        "manzana_departamento": "M5",
+        "precio_total": 120000.0,
+    })
+    server.db = fake_db
+
+    async def captura_user():
+        return {"user_id": "cap1", "email": "c@test.com", "role": "captura", "empresa_id": "e1", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = captura_user
+    client = TestClient(server.app)
+
+    listed = client.get("/api/clients")
+    assert listed.status_code == 200
+
+    created = client.post("/api/clients", json={
+        "company_id": "e1",
+        "project_id": "pr1",
+        "nombre": "CLIENTE CAPTURA",
+        "inventory_item_id": "inv2",
+    })
+    assert created.status_code == 201
+
+    forbidden = client.delete(f"/api/clients/{created.json()['id']}")
+    assert forbidden.status_code == 403
+
+
+def test_finanzas_can_get_and_create_clients_but_delete_is_forbidden():
+    fake_db = FakeDB()
+    fake_db.inventory_items.rows.append({
+        "id": "inv2",
+        "company_id": "e1",
+        "project_id": "pr1",
+        "lote_edificio": "L2",
+        "manzana_departamento": "M6",
+        "precio_total": 125000.0,
+    })
+    server.db = fake_db
+
+    async def finanzas_user():
+        return {"user_id": "fin1", "email": "f@test.com", "role": "finanzas", "empresa_id": "e1", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = finanzas_user
+    client = TestClient(server.app)
+
+    listed = client.get("/api/clients")
+    assert listed.status_code == 200
+
+    created = client.post("/api/clients", json={
+        "company_id": "e1",
+        "project_id": "pr1",
+        "nombre": "CLIENTE FINANZAS",
+        "inventory_item_id": "inv2",
+    })
+    assert created.status_code == 201
+
+    forbidden = client.delete(f"/api/clients/{created.json()['id']}")
+    assert forbidden.status_code == 403
+
+
+def test_admin_can_delete_client():
+    fake_db = FakeDB()
+    fake_db.inventory_items.rows.append({
+        "id": "inv2",
+        "company_id": "e1",
+        "project_id": "pr1",
+        "lote_edificio": "L2",
+        "manzana_departamento": "M7",
+        "precio_total": 150000.0,
+    })
+    fake_db.clients.rows.append({
+        "id": "cl2",
+        "company_id": "e1",
+        "project_id": "pr1",
+        "nombre": "BORRABLE",
+        "inventory_item_id": "inv2",
+        "saldo_restante": 150000.0,
+    })
+    server.db = fake_db
+
+    async def admin_user():
+        return {"user_id": "adm1", "email": "a@test.com", "role": "admin", "empresa_id": "e1", "must_change_password": False}
+
+    server.app.dependency_overrides[server.get_current_user] = admin_user
+    client = TestClient(server.app)
+
+    deleted = client.delete("/api/clients/cl2")
+    assert deleted.status_code == 200
