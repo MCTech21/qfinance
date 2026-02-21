@@ -5,6 +5,7 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Badge } from "../components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "../components/ui/dialog";
 import { Plus, Pencil, Trash2, Loader2 } from "lucide-react";
@@ -34,9 +35,9 @@ const Budgets = () => {
   const [formData, setFormData] = useState({
     project_id: "",
     partida_codigo: "",
-    year: new Date().getFullYear(),
-    month: new Date().getMonth() + 1,
-    amount_mxn: "",
+    total_amount: "",
+    annual_json: "{}",
+    monthly_json: "{}",
     notes: ""
   });
 
@@ -54,8 +55,6 @@ const Budgets = () => {
         api().get("/budgets", {
           params: {
             project_id: filters.project_id !== "all" ? filters.project_id : undefined,
-            year: filters.year,
-            month: filters.month
           }
         }),
         api().get("/projects", { params: { empresa_id: filters.empresa_id !== "all" ? filters.empresa_id : undefined } }),
@@ -85,9 +84,9 @@ const Budgets = () => {
       setFormData({
         project_id: budget.project_id,
         partida_codigo: budget.partida_codigo,
-        year: budget.year,
-        month: budget.month,
-        amount_mxn: budget.amount_mxn,
+        total_amount: budget.total_amount || "0",
+        annual_json: JSON.stringify(budget.annual_breakdown || {}, null, 2),
+        monthly_json: JSON.stringify(budget.monthly_breakdown || {}, null, 2),
         notes: budget.notes || ""
       });
     } else {
@@ -95,9 +94,9 @@ const Budgets = () => {
       setFormData({
         project_id: "",
         partida_codigo: "",
-        year: filters.year,
-        month: filters.month,
-        amount_mxn: "",
+        total_amount: "",
+        annual_json: "{}",
+        monthly_json: "{}",
         notes: ""
       });
     }
@@ -110,24 +109,29 @@ const Budgets = () => {
     
     try {
       const payload = {
-        ...formData,
-        amount_mxn: parseFloat(formData.amount_mxn)
+        project_id: formData.project_id,
+        partida_codigo: formData.partida_codigo,
+        total_amount: formData.total_amount || "0",
+        annual_breakdown: JSON.parse(formData.annual_json || "{}"),
+        monthly_breakdown: JSON.parse(formData.monthly_json || "{}"),
+        notes: formData.notes,
       };
-      
-      const endpoint = user?.role === "finanzas" && !editingBudget ? "/budget-requests" : "/budgets";
+
       if (editingBudget) {
         await api().put(`/budgets/${editingBudget.id}`, payload);
         toast.success("Presupuesto actualizado");
       } else {
-        await api().post(endpoint, payload);
-        toast.success(endpoint === "/budgets" ? "Presupuesto creado" : "Solicitud de presupuesto creada");
+        await api().post('/budgets', payload);
+        toast.success("Presupuesto creado");
       }
       
       setDialogOpen(false);
       fetchData();
     } catch (error) {
-      const message = error.response?.data?.detail || "Error al guardar presupuesto";
-      toast.error(message);
+      const detail = error.response?.data?.detail;
+      const code = detail?.code;
+      const codeMap = { annual_sum_exceeds_total: "La suma anual excede el total", monthly_sum_exceeds_annual: "La suma mensual excede el anual", monthly_sum_exceeds_total: "La suma mensual excede el total" };
+      toast.error(codeMap[code] || detail?.message || detail || "Error al guardar presupuesto");
     } finally {
       setIsSaving(false);
     }
@@ -225,53 +229,24 @@ const Budgets = () => {
                 </div>
               </div>
               
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label>Año</Label>
-                  <Select
-                    value={String(formData.year)}
-                    onValueChange={(v) => setFormData(prev => ({ ...prev, year: Number(v) }))}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {yearOptions.map(y => (
-                        <SelectItem key={y} value={String(y)}>{y}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>Mes</Label>
-                  <Select
-                    value={String(formData.month)}
-                    onValueChange={(v) => setFormData(prev => ({ ...prev, month: Number(v) }))}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {months.map(m => (
-                        <SelectItem key={m.value} value={String(m.value)}>{m.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              
               <div className="space-y-2">
-                <Label>Monto (MXN)</Label>
+                <Label>Total</Label>
                 <Input
-                  type="number"
-                  value={formData.amount_mxn}
-                  onChange={(e) => setFormData(prev => ({ ...prev, amount_mxn: e.target.value }))}
+                  type="text"
+                  value={formData.total_amount}
+                  onChange={(e) => setFormData(prev => ({ ...prev, total_amount: e.target.value }))}
                   placeholder="0.00"
-                  min="0"
-                  step="0.01"
                   required
-                  data-testid="budget-amount-input"
+                  data-testid="budget-total-input"
                 />
+              </div>
+              <div className="space-y-2">
+                <Label>Desglose anual (JSON)</Label>
+                <textarea className="w-full min-h-20 border rounded-md p-2 text-sm" value={formData.annual_json} onChange={(e) => setFormData(prev => ({ ...prev, annual_json: e.target.value }))} />
+              </div>
+              <div className="space-y-2">
+                <Label>Desglose mensual (JSON)</Label>
+                <textarea className="w-full min-h-20 border rounded-md p-2 text-sm" value={formData.monthly_json} onChange={(e) => setFormData(prev => ({ ...prev, monthly_json: e.target.value }))} />
               </div>
               
               <div className="space-y-2">
@@ -382,8 +357,8 @@ const Budgets = () => {
                   <tr>
                     <th>Proyecto</th>
                     <th>Partida</th>
-                    <th>Período</th>
-                    <th className="text-right">Monto</th>
+                    <th>Estado</th>
+                    <th className="text-right">Total</th>
                     <th>Notas</th>
                     <th className="text-right">Acciones</th>
                   </tr>
@@ -398,8 +373,8 @@ const Budgets = () => {
                         </span>
                         {getPartidaName(budget.partida_codigo)}
                       </td>
-                      <td>{months.find(m => m.value === budget.month)?.label} {budget.year}</td>
-                      <td className="mono-number">{formatCurrency(budget.amount_mxn)}</td>
+                      <td><Badge variant="outline">{budget.approval_status || "legacy"}</Badge></td>
+                      <td className="mono-number">{formatCurrency(Number(budget.total_amount || budget.amount_mxn || 0))}</td>
                       <td className="text-muted-foreground text-sm">{budget.notes || "-"}</td>
                       <td className="text-right">
                         <div className="flex justify-end gap-1">
