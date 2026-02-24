@@ -394,3 +394,97 @@ EC2_HOST=52.53.215.40 WEB_URL=http://52.53.215.40:8088 ENABLE_SWAP=0 MIN_FREE_MB
 - Existe flujo de cambio de contraseña desde **Mi Cuenta / Configuración**.
 - Si un usuario tiene `must_change_password=true` (por ejemplo tras reset a contraseña temporal), el sistema obliga el flujo `/force-change-password` antes de permitir acceso al resto de módulos.
 
+
+## Órdenes de Compra (OC) internas + gate presupuestal + fiscal (nuevo)
+
+### Variables de entorno
+
+```env
+ODOO_MODE=stub
+QF_OC_LOGO_PATH=/ruta/opcional/logo.png
+OVERBUDGET_APPROVAL_MODE=reject_and_request
+QF_ENFORCE_OC_FOR_EGRESS=false
+QF_BRAND_PRIMARY=#1F3A8A
+QF_BRAND_SECONDARY=#0EA5E9
+QF_BRAND_ACCENT=#F59E0B
+QF_BRAND_PDF_HEADER_BG=#1F3A8A
+QF_BRAND_PDF_HEADER_TEXT=#FFFFFF
+QF_OC_DEFAULT_IVA_RATE=16
+QF_OC_DEFAULT_ISR_WITHHOLDING_RATE=0
+```
+
+### Flujo OC (cURL)
+
+```bash
+# 1) Crear OC
+curl -X POST http://localhost:8000/api/purchase-orders \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "external_id":"OC-2026-0042",
+    "project_id":"pr1",
+    "vendor_name":"Proveedor SA",
+    "currency":"MXN",
+    "exchange_rate":"1",
+    "order_date":"2026-01-10",
+    "lines":[
+      {"line_no":1,"partida_codigo":"205","description":"Servicio A","qty":"1","price_unit":"1000","discount_pct":"0","iva_rate":"16","apply_isr_withholding":false,"isr_withholding_rate":"0"},
+      {"line_no":2,"partida_codigo":"205","description":"Servicio B","qty":"1","price_unit":"500","discount_pct":"0","iva_rate":"8","apply_isr_withholding":true,"isr_withholding_rate":"1.25"},
+      {"line_no":3,"partida_codigo":"205","description":"Servicio C","qty":"1","price_unit":"200","discount_pct":"0","iva_rate":"0","apply_isr_withholding":false,"isr_withholding_rate":"0"}
+    ]
+  }'
+
+# 2) Enviar a aprobación
+curl -X POST http://localhost:8000/api/purchase-orders/{id}/submit -H "Authorization: Bearer $TOKEN"
+
+# 3) Aprobar (ADMIN)
+curl -X POST http://localhost:8000/api/purchase-orders/{id}/approve -H "Authorization: Bearer $TOKEN"
+
+# 4) Rechazar (ADMIN)
+curl -X POST http://localhost:8000/api/purchase-orders/{id}/reject \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"reason":"Falta evidencia"}'
+
+# 5) PDF
+curl -L http://localhost:8000/api/purchase-orders/{id}/pdf -H "Authorization: Bearer $TOKEN" -o oc.pdf
+```
+
+### Preview presupuestal OC
+
+```bash
+curl -X POST http://localhost:8000/api/budgets/availability/oc-preview \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "project_id":"pr1",
+    "order_date":"2026-01-10",
+    "lines":[{"partida_codigo":"205","requested_amount":"250000.00"}]
+  }'
+```
+
+### Ejemplo de respuesta de excepción presupuestal
+
+```json
+{
+  "detail": {
+    "code": "purchase_order_budget_exception",
+    "message": "La orden de compra excede el presupuesto disponible y no puede postearse.",
+    "meta": {
+      "purchase_order_id": "...",
+      "approval_request_id": "...",
+      "buckets_exceeded": ["monthly"]
+    }
+  }
+}
+```
+
+### Notas RBAC Movements
+
+- `CAPTURA_INGRESOS`: solo ingresos (partidas del grupo ingresos), sin egresos.
+- `FINANZAS`: sigue permitido crear movimientos manuales por compatibilidad; activar `QF_ENFORCE_OC_FOR_EGRESS=true` para forzar egresos solo por OC.
+- `ADMIN`: permisos completos.
+
+### Reglas explícitas
+
+- Solo TOTAL sin breakdowns anual/mensual es válido.
+- `0 = OK` (si el restante proyectado queda en cero, sí se permite).
+- Ausencia de annual/monthly no bloquea por sí sola.
+- Cálculo fiscal de OC se recalcula server-side usando `Decimal`.
