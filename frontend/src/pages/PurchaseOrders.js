@@ -8,7 +8,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Badge } from "../components/ui/badge";
-import { Plus, FileDown, Send, CheckCircle, XCircle, Pencil, Trash2, Eye, Loader2 } from "lucide-react";
+import { Plus, FileDown, Send, XCircle, Pencil, Trash2, Eye, Loader2 } from "lucide-react";
 
 const STATUS_LABELS = {
   draft: { label: "Borrador", variant: "secondary" },
@@ -101,6 +101,9 @@ const PurchaseOrders = () => {
   const [saving, setSaving] = useState(false);
   const [actingId, setActingId] = useState("");
   const [form, setForm] = useState(emptyForm);
+  const [budgetPreview, setBudgetPreview] = useState(null);
+  const [budgetPreviewLoading, setBudgetPreviewLoading] = useState(false);
+  const [budgetPreviewError, setBudgetPreviewError] = useState("");
   const [filters, setFilters] = useState({
     empresa_id: "all",
     project_id: "all",
@@ -152,6 +155,47 @@ const PurchaseOrders = () => {
     }, { subtotal: 0, tax: 0, withholding: 0, total: 0 });
   }, [form.lines]);
 
+
+  const lineRequestedAmount = (line) => {
+    const c = calcLine(line);
+    return Number(c.lineTotal || 0);
+  };
+
+  const buildPreviewPayload = useCallback(() => {
+    if (!form.project_id || !form.order_date) return null;
+    const lines = (form.lines || [])
+      .filter((line) => line?.partida_codigo)
+      .map((line) => ({
+        partida_codigo: line.partida_codigo,
+        requested_amount: String(lineRequestedAmount(line).toFixed(2)),
+      }));
+    if (!lines.length) return null;
+    return { project_id: form.project_id, order_date: form.order_date, lines };
+  }, [form]);
+
+  useEffect(() => {
+    const payload = buildPreviewPayload();
+    if (!payload) {
+      setBudgetPreview(null);
+      setBudgetPreviewError("");
+      return;
+    }
+    const t = setTimeout(async () => {
+      setBudgetPreviewLoading(true);
+      try {
+        const res = await api().post("/budgets/availability/oc-preview", payload);
+        setBudgetPreview(res.data || null);
+        setBudgetPreviewError("");
+      } catch (error) {
+        setBudgetPreview(null);
+        setBudgetPreviewError(error?.response?.data?.detail?.message || "No se pudo calcular disponibilidad");
+      } finally {
+        setBudgetPreviewLoading(false);
+      }
+    }, 350);
+    return () => clearTimeout(t);
+  }, [api, buildPreviewPayload]);
+
   const filteredProjects = useMemo(() => {
     if (filters.empresa_id === "all") return projects;
     return projects.filter((p) => p.empresa_id === filters.empresa_id);
@@ -177,7 +221,11 @@ const PurchaseOrders = () => {
     });
   }, [orders, projects, filters]);
 
-  const resetForm = () => setForm({ ...emptyForm, lines: [emptyLine()] });
+  const resetForm = () => {
+    setForm({ ...emptyForm, lines: [emptyLine()] });
+    setBudgetPreview(null);
+    setBudgetPreviewError("");
+  };
 
   const openCreate = () => {
     setSelected(null);
@@ -479,6 +527,31 @@ const PurchaseOrders = () => {
                 </div>
               </div>
 
+              <div className="rounded-lg border border-border/60 p-3 space-y-2">
+                <p className="font-medium">Disponibilidad de presupuesto (preview)</p>
+                {budgetPreviewLoading && <p className="text-sm text-muted-foreground">Calculando disponibilidad...</p>}
+                {budgetPreviewError && <p className="text-sm text-red-400">{budgetPreviewError}</p>}
+                {!budgetPreviewLoading && !budgetPreviewError && budgetPreview?.lines?.length > 0 && (
+                  <div className="space-y-2 text-sm">
+                    {(budgetPreview.lines || []).map((item) => (
+                      <div key={item.partida_codigo} className="rounded border border-border/40 p-2">
+                        <p className="font-medium">Partida {item.partida_codigo}</p>
+                        <p>Total presupuesto: <span className="font-mono">{Number(item.budget_total || 0).toFixed(2)}</span></p>
+                        <p>Ejecutado: <span className="font-mono">{Number(item.executed_total || 0).toFixed(2)}</span></p>
+                        <p>Disponible actual: <span className="font-mono">{Number(item.remaining_total_current || 0).toFixed(2)}</span></p>
+                        <p>Monto proyectado línea(s): <span className="font-mono">{Number(item.requested_amount || 0).toFixed(2)}</span></p>
+                        <p>Restante proyectado: <span className="font-mono font-semibold">{Number(item.projected_remaining_total || 0).toFixed(2)}</span></p>
+                      </div>
+                    ))}
+                    <div className="rounded border border-emerald-500/20 bg-emerald-500/10 p-2">
+                      <p>Resumen OC - disponible actual: <span className="font-mono">{Number(budgetPreview?.summary?.disponible_actual || 0).toFixed(2)}</span></p>
+                      <p>Resumen OC - monto solicitado: <span className="font-mono">{Number(budgetPreview?.summary?.monto_solicitado || 0).toFixed(2)}</span></p>
+                      <p>Resumen OC - restante proyectado: <span className="font-mono font-semibold">{Number(budgetPreview?.summary?.restante_proyectado || 0).toFixed(2)}</span></p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Subtotal base</p><p className="font-semibold">{formTotals.subtotal.toFixed(2)}</p></div>
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">IVA total</p><p className="font-semibold">{formTotals.tax.toFixed(2)}</p></div>
@@ -549,7 +622,7 @@ const PurchaseOrders = () => {
                             <Button size="icon" variant="outline" onClick={() => openView(row.id)} title="Ver"><Eye className="h-4 w-4" /></Button>
                             {isDraft && !isDirector && <Button size="icon" variant="outline" onClick={() => openEdit(row)} title="Editar"><Pencil className="h-4 w-4" /></Button>}
                             {isDraft && !isDirector && <Button size="icon" variant="outline" disabled={disabled} onClick={() => doAction(row.id, "submit", null, "OC enviada a autorización")} title="Enviar"><Send className="h-4 w-4" /></Button>}
-                            {isPending && isAdmin && <Button size="icon" variant="outline" disabled={disabled} onClick={() => doAction(row.id, "approve", null, "OC aprobada")} title="Aprobar"><CheckCircle className="h-4 w-4" /></Button>}
+
                             {isPending && isAdmin && <Button size="icon" variant="outline" disabled={disabled} onClick={() => { const reason = window.prompt("Motivo de rechazo"); if (reason) doAction(row.id, "reject", { reason }, "OC rechazada"); }} title="Rechazar"><XCircle className="h-4 w-4" /></Button>}
                             {isDraft && !isDirector && <Button size="icon" variant="destructive" disabled={disabled} onClick={() => doAction(row.id, "delete", null, "OC cancelada")} title="Eliminar"><Trash2 className="h-4 w-4" /></Button>}
                             {(isApproved || isPending || isDraft || row.status === "rejected") && <Button size="icon" variant="outline" onClick={() => downloadPdf(row)} title="PDF"><FileDown className="h-4 w-4" /></Button>}

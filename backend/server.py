@@ -1638,42 +1638,49 @@ def render_basic_pdf(lines: List[str]) -> bytes:
 
 
 def render_purchase_order_pdf(po: dict) -> bytes:
-    logo = "Quantum"
-    title = "ORDEN DE COMPRA"
-    folio = po.get("folio") or po.get("external_id") or "N/A"
+    folio = canonicalize_oc_folio(po.get("folio") or po.get("external_id"))
+    order_date = (po.get('order_date') or '')[:10]
+    planned_date = ((po.get('planned_date') or '')[:10]) or 'N/A'
+
     lines = [
-        logo,
-        title,
-        f"Folio OC: {folio}",
-        f"Folio factura: {po.get('invoice_folio') or 'N/A'}",
-        f"Fecha: {(po.get('order_date') or '')[:10]}",
-        f"Fecha programada: {((po.get('planned_date') or '')[:10]) or 'N/A'}",
-        f"Empresa ID: {po.get('company_id')}",
-        f"Proyecto ID: {po.get('project_id')}",
+        "QUANTUM | QFinance",
+        "============================================================",
+        "ORDEN DE COMPRA",
+        "DOCUMENTO COMERCIAL",
+        "",
+        f"Folio: {folio}    Fecha: {order_date or 'N/A'}",
+        f"Fecha programada: {planned_date}",
+        "",
+        "[DATOS GENERALES]",
+        f"Empresa: {po.get('company_name') or po.get('company_id') or 'N/A'}",
+        f"Proyecto: {po.get('project_code') or po.get('project_id') or 'N/A'}",
         f"Proveedor: {po.get('vendor_name') or 'N/A'}",
-        f"RFC: {po.get('vendor_rfc') or 'N/A'}",
-        f"Correo: {po.get('vendor_email') or 'N/A'}",
-        f"Teléfono: {po.get('vendor_phone') or 'N/A'}",
-        f"Dirección: {po.get('vendor_address') or 'N/A'}",
+        f"RFC proveedor: {po.get('vendor_rfc') or 'N/A'}",
+        f"Folio factura proveedor: {po.get('invoice_folio') or 'N/A'}",
         f"Condiciones de pago: {po.get('payment_terms') or 'N/A'}",
-        f"Moneda: {po.get('currency') or 'MXN'}",
-        f"Tipo cambio: {po.get('exchange_rate') or '1'}",
-        "--- LÍNEAS ---",
+        f"Moneda: {po.get('currency') or 'MXN'}    Tipo cambio: {po.get('exchange_rate') or '1'}",
+        "",
+        "[DETALLE DE PARTIDAS]",
+        "# | Partida | Descripción | Cant. | U.M. | P.U. | IVA | Ret ISR | Total",
+        "------------------------------------------------------------",
     ]
     for line in po.get("lines", []):
         lines.append(
-            f"[{line.get('line_no')}] Partida {line.get('partida_codigo')} | {line.get('description')} | qty {line.get('qty')} | pu {line.get('price_unit')} | IVA {line.get('iva_rate')}% ({line.get('iva_amount')}) | ISR {line.get('isr_withholding_rate')}% ({line.get('isr_withholding_amount')}) | total {line.get('line_total')}"
+            f"{line.get('line_no')} | {line.get('partida_codigo')} | {line.get('description') or '-'} | {line.get('qty')} | {line.get('uom') or '-'} | {line.get('price_unit')} | {line.get('iva_amount')} | {line.get('isr_withholding_amount')} | {line.get('line_total')}"
         )
+
     lines.extend([
-        "--- TOTALES ---",
+        "",
+        "[TOTALES]",
         f"Subtotal: {po.get('subtotal_tax_base')}",
         f"IVA: {po.get('tax_total')}",
-        f"Ret ISR: {po.get('withholding_isr_total')}",
+        f"Retenciones ISR: {po.get('withholding_isr_total')}",
         f"TOTAL: {po.get('total')}",
-        f"Estatus: {po.get('status')}",
+        f"Estado OC: {po.get('status')}",
+        "",
         f"Notas: {po.get('notes') or 'N/A'}",
-        "Creado con QFinance",
-        "quantum.mx",
+        "------------------------------------------------------------",
+        "Creado con QFinance | quantum.mx",
     ])
     return render_basic_pdf(lines)
 
@@ -2521,10 +2528,101 @@ async def ensure_partial_indexes_for_movements():
         name=index_name,
         unique=True,
         partialFilterExpression={
-            "purchase_order_line_id": {"$exists": True, "$ne": None},
-            "origin_event": {"$exists": True, "$ne": None},
+            "purchase_order_line_id": {"$type": "string"},
+            "origin_event": {"$type": "string"},
         },
     )
+
+
+def canonicalize_oc_folio(raw_folio: Optional[str]) -> str:
+    folio = (raw_folio or "").strip().upper()
+    if not folio:
+        return "N/A"
+    if folio.startswith("OC-"):
+        folio = folio[3:]
+    if folio.startswith("OC") and len(folio) > 2:
+        body = folio[2:]
+        if body.isdigit():
+            return f"OC{int(body):06d}"
+    return folio
+
+
+def structured_error(code: str, message: str, details: Optional[Dict[str, Any]] = None) -> dict:
+    payload = {"code": code, "message": message}
+    if details:
+        payload["details"] = to_json_safe(details)
+    return payload
+
+
+async def build_purchase_order_budget_summary(po: dict, approval_amount: Optional[Decimal] = None) -> dict:
+    order_date = date_parser.parse(po.get("order_date")) if po.get("order_date") else datetime.now(timezone.utc)
+    po_total = money_dec(po.get("total", 0))
+    approved_total = money_dec(po.get("approved_amount_total", 0))
+    pending_total = (po_total - approved_total).quantize(TWO_DECIMALS)
+    amount_to_approve = (money_dec(approval_amount) if approval_amount is not None else pending_total).quantize(TWO_DECIMALS)
+    if amount_to_approve < 0:
+        amount_to_approve = Decimal("0.00")
+
+    ratio = (amount_to_approve / po_total) if po_total > 0 else Decimal("0")
+    aggregated: Dict[str, Decimal] = {}
+    for line in po.get("lines", []):
+        partida = str(line.get("partida_codigo") or "")
+        if not partida:
+            continue
+        line_total = money_dec(line.get("line_total", 0))
+        projected = (line_total * ratio).quantize(TWO_DECIMALS)
+        aggregated[partida] = (aggregated.get(partida, Decimal("0.00")) + projected).quantize(TWO_DECIMALS)
+
+    by_partida = []
+    presupuesto_total = Decimal("0.00")
+    ejecutado_actual = Decimal("0.00")
+    disponible_actual = Decimal("0.00")
+    restante_proyectado = Decimal("0.00")
+    for partida, requested in sorted(aggregated.items()):
+        if partida in {"400", "401", "402", "403", "404"}:
+            by_partida.append({
+                "partida_codigo": partida,
+                "presupuesto_total": None,
+                "ejecutado_actual": None,
+                "disponible_actual": None,
+                "monto_proyectado": str(requested),
+                "restante_proyectado_si_aprueba": None,
+                "budget_validation_applies": False,
+                "scope": "income",
+            })
+            continue
+        av = await compute_budget_availability(po.get("project_id"), partida, order_date)
+        b_total = money_dec(av.get("budget_total_amount", 0)) if av.get("budget_total_amount") is not None else Decimal("0.00")
+        b_exec = money_dec(av.get("executed_total", 0)) if av.get("executed_total") is not None else Decimal("0.00")
+        b_avail = money_dec(av.get("remaining_total", 0)) if av.get("remaining_total") is not None else Decimal("0.00")
+        b_projected = (b_avail - requested).quantize(TWO_DECIMALS)
+        presupuesto_total += b_total
+        ejecutado_actual += b_exec
+        disponible_actual += b_avail
+        restante_proyectado += b_projected
+        by_partida.append({
+            "partida_codigo": partida,
+            "presupuesto_total": str(b_total.quantize(TWO_DECIMALS)),
+            "ejecutado_actual": str(b_exec.quantize(TWO_DECIMALS)),
+            "disponible_actual": str(b_avail.quantize(TWO_DECIMALS)),
+            "monto_proyectado": str(requested),
+            "restante_proyectado_si_aprueba": str(b_projected),
+            "budget_validation_applies": bool(av.get("budget_validation_applies", True)),
+            "scope": av.get("effective_scope") or "total",
+        })
+
+    return {
+        "scope": "purchase_order",
+        "presupuesto_total": str(presupuesto_total.quantize(TWO_DECIMALS)),
+        "ejecutado_actual": str(ejecutado_actual.quantize(TWO_DECIMALS)),
+        "disponible_actual": str(disponible_actual.quantize(TWO_DECIMALS)),
+        "monto_oc": str(po_total.quantize(TWO_DECIMALS)),
+        "monto_aprobado_acumulado": str(approved_total.quantize(TWO_DECIMALS)),
+        "monto_pendiente_oc": str(pending_total if pending_total > 0 else Decimal("0.00")),
+        "monto_a_aprobar": str(amount_to_approve),
+        "restante_proyectado_si_aprueba": str(restante_proyectado.quantize(TWO_DECIMALS)),
+        "by_partida": by_partida,
+    }
 
 
 async def generate_purchase_order_folio() -> str:
@@ -2553,9 +2651,12 @@ async def oc_budget_preview(payload: OCBudgetPreviewInput, current_user: dict = 
     enforce_company_access(current_user, project.get("empresa_id"))
     target_date = parse_date_tijuana(payload.order_date)
     items = []
+    grouped_requested: Dict[str, Decimal] = {}
     for line in payload.lines:
         partida = str(line.get("partida_codigo"))
         requested = parse_amount_like(line.get("requested_amount", "0"), "requested_amount")
+        grouped_requested[partida] = (grouped_requested.get(partida, Decimal("0.00")) + requested).quantize(TWO_DECIMALS)
+    for partida, requested in grouped_requested.items():
         if partida in {"400", "401", "402", "403", "404"}:
             items.append({"partida_codigo": partida, "requested_amount": str(requested), "budget_validation_applies": False})
             continue
@@ -2580,6 +2681,8 @@ async def oc_budget_preview(payload: OCBudgetPreviewInput, current_user: dict = 
             "budget_total_defined": bool(av.get("budget_total_amount") is not None),
             "budget_annual_defined": bool(av.get("annual_budget") is not None),
             "budget_monthly_defined": bool(av.get("monthly_budget") is not None),
+            "budget_total": av.get("budget_total_amount"),
+            "executed_total": av.get("executed_total"),
             "remaining_total_current": str(remaining_total),
             "remaining_annual_current": str(remaining_annual) if remaining_annual is not None else None,
             "remaining_monthly_current": str(remaining_monthly) if remaining_monthly is not None else None,
@@ -2590,7 +2693,31 @@ async def oc_budget_preview(payload: OCBudgetPreviewInput, current_user: dict = 
             "can_proceed_workflow": True,
             "can_post_payment": len(exceeded) == 0,
         })
-    return {"project_id": payload.project_id, "lines": items}
+
+    summary_budget = Decimal("0.00")
+    summary_executed = Decimal("0.00")
+    summary_available = Decimal("0.00")
+    summary_requested = Decimal("0.00")
+    summary_projected = Decimal("0.00")
+    for item in items:
+        if item.get("budget_validation_applies") is False:
+            continue
+        summary_budget += money_dec(item.get("budget_total") or 0)
+        summary_executed += money_dec(item.get("executed_total") or 0)
+        summary_available += money_dec(item.get("remaining_total_current") or 0)
+        summary_requested += money_dec(item.get("requested_amount") or 0)
+        summary_projected += money_dec(item.get("projected_remaining_total") or 0)
+    return {
+        "project_id": payload.project_id,
+        "lines": items,
+        "summary": {
+            "presupuesto_total": str(summary_budget.quantize(TWO_DECIMALS)),
+            "ejecutado_actual": str(summary_executed.quantize(TWO_DECIMALS)),
+            "disponible_actual": str(summary_available.quantize(TWO_DECIMALS)),
+            "monto_solicitado": str(summary_requested.quantize(TWO_DECIMALS)),
+            "restante_proyectado": str(summary_projected.quantize(TWO_DECIMALS)),
+        },
+    }
 
 
 @api_router.post("/purchase-orders")
@@ -2868,25 +2995,12 @@ async def purchase_order_pdf(po_id: str, current_user: dict = Depends(require_ro
     if not po:
         raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
     enforce_company_access(current_user, po.get("company_id"))
-    lines = [
-        "ORDEN DE COMPRA",
-        f"Folio OC: {po.get('folio') or po.get('external_id')}",
-        f"Folio Factura: {po.get('invoice_folio') or 'N/A'}",
-        f"Estado: {po.get('status')}",
-        f"Budget gate: {po.get('budget_gate_status')}",
-        f"Posting: {po.get('posting_status')}",
-        f"Proveedor: {po.get('vendor_name')}",
-        f"Subtotal base: {po.get('subtotal_tax_base')}",
-        f"IVA total: {po.get('tax_total')}",
-        f"Ret ISR: {po.get('withholding_isr_total')}",
-        f"Total: {po.get('total')}",
-    ]
     logo_path = os.getenv("QF_OC_LOGO_PATH")
     if logo_path and not Path(logo_path).exists():
         logger.warning("QF_OC_LOGO_PATH no existe: %s", logo_path)
     pdf_bytes = render_purchase_order_pdf(po)
     await log_audit(current_user, "PDF", "purchase_orders", po_id, {"folio": po.get("folio") or po.get("external_id")})
-    filename = po.get("folio") or po.get("external_id") or po_id
+    filename = canonicalize_oc_folio(po.get("folio") or po.get("external_id") or po_id)
     return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"inline; filename={filename}.pdf"})
 
 
@@ -3594,15 +3708,35 @@ async def get_authorizations(
                 "referencia": po.get("invoice_folio") or po.get("folio") or po.get("external_id"),
                 "descripcion": f"Orden de Compra {po.get('folio') or po.get('external_id')}",
             }
+            partial_value = auth.get("partial_amount") or po.get("pending_amount")
+            budget_summary = await build_purchase_order_budget_summary(po, money_dec(partial_value) if partial_value is not None else None)
             auth["purchase_order_details"] = {
                 "id": po.get("id"),
-                "folio": po.get("folio") or po.get("external_id"),
-                "status": po.get("status"),
-                "vendor_name": po.get("vendor_name"),
+                "folio": canonicalize_oc_folio(po.get("folio") or po.get("external_id")),
                 "invoice_folio": po.get("invoice_folio"),
-                "total": po.get("total"),
+                "status": po.get("status"),
+                "project_id": po.get("project_id"),
+                "project": project_map.get(po.get("project_id"), {}).get("name"),
+                "project_code": project_map.get(po.get("project_id"), {}).get("code"),
+                "company_id": po.get("company_id"),
+                "company": empresa_map.get(po.get("company_id"), {}).get("nombre"),
+                "vendor_name": po.get("vendor_name"),
+                "vendor_rfc": po.get("vendor_rfc"),
+                "totals": {
+                    "subtotal": po.get("subtotal_tax_base"),
+                    "iva": po.get("tax_total"),
+                    "ret_isr": po.get("withholding_isr_total"),
+                    "total": po.get("total"),
+                },
+                "approved_amount_total": po.get("approved_amount_total") or "0.00",
+                "pending_amount": po.get("pending_amount") or po.get("total"),
             }
-            enriched_auths.append(auth)
+            auth["budget_gate_summary"] = budget_summary
+            auth["budget_preview"] = budget_summary
+            auth["partial_approved_accumulated"] = po.get("approved_amount_total") or "0.00"
+            auth["pending_amount_oc"] = po.get("pending_amount") or po.get("total")
+            auth["next_estimated_impact"] = budget_summary.get("restante_proyectado_si_aprueba")
+            enriched_auths.append(sanitize_mongo_document(auth))
             continue
 
         movement = None
@@ -3708,19 +3842,19 @@ async def resolve_authorization(
 ):
     auth = await db.authorizations.find_one({"id": auth_id}, {"_id": 0})
     if not auth:
-        raise HTTPException(status_code=404, detail="Autorización no encontrada")
-    
-    if auth['status'] != 'pending':
-        raise HTTPException(status_code=400, detail="Autorización ya resuelta")
-    
+        raise HTTPException(status_code=404, detail=structured_error("authorization_not_found", "Autorización no encontrada"))
+
+    if auth.get('status') != 'pending':
+        raise HTTPException(status_code=409, detail=structured_error("authorization_already_resolved", "Autorización ya resuelta", {"status": auth.get("status")}))
+
     # Reject requires notes/motivo
-    if resolution.status == AuthorizationStatus.REJECTED and not resolution.notes:
-        raise HTTPException(status_code=400, detail="Rechazo requiere motivo/notas")
+    if resolution.status == AuthorizationStatus.REJECTED and not (resolution.notes or "").strip():
+        raise HTTPException(status_code=422, detail=structured_error("notes_required_for_rejection", "Rechazo requiere motivo/notas"))
 
     if auth.get("approval_type") == ApprovalType.PURCHASE_ORDER_WORKFLOW.value and auth.get("purchase_order_id"):
         po = await db.purchase_orders.find_one({"id": auth.get("purchase_order_id")}, {"_id": 0})
         if not po:
-            raise HTTPException(status_code=404, detail="OC no encontrada")
+            raise HTTPException(status_code=404, detail=structured_error("purchase_order_not_found", "OC no encontrada"))
         enforce_company_access(current_user, po.get("company_id"))
 
         po_total = money_dec(po.get("total", 0))
@@ -3741,9 +3875,9 @@ async def resolve_authorization(
 
         partial_amount = money_dec(resolution.partial_amount) if resolution.partial_amount is not None else pending_amount
         if partial_amount <= 0:
-            raise HTTPException(status_code=422, detail={"code": "invalid_partial_amount", "message": "Monto parcial debe ser mayor a 0"})
+            raise HTTPException(status_code=422, detail=structured_error("invalid_partial_amount", "Monto parcial debe ser mayor a 0", {"pending_amount": str(pending_amount)}))
         if partial_amount > pending_amount:
-            raise HTTPException(status_code=422, detail={"code": "partial_amount_exceeds_pending", "message": "Monto parcial excede saldo pendiente"})
+            raise HTTPException(status_code=422, detail=structured_error("partial_amount_exceeds_pending", "Monto parcial excede saldo pendiente", {"pending_amount": str(pending_amount), "partial_amount": str(partial_amount)}))
 
         approve_event_id = str(uuid.uuid4())
         ratio = (partial_amount / po_total) if po_total > 0 else Decimal("0")
@@ -3816,8 +3950,18 @@ async def resolve_authorization(
                 metadata={"folio": po.get("folio") or po.get("external_id"), "purchase_order_id": po.get("id"), "pending_amount": str(new_pending)},
             )
 
+        updated_po = await db.purchase_orders.find_one({"id": po.get("id")}, {"_id": 0})
+        budget_summary = await build_purchase_order_budget_summary(updated_po, new_pending if new_pending > 0 else Decimal("0.00"))
         await log_audit(current_user, "AUTH_APPROVED", "purchase_orders", po.get("id"), {"partial_amount": str(partial_amount), "approved_amount_total": str(new_approved_total), "pending_amount": str(new_pending), "movement_ids": created_movements})
-        return {"message": "Autorización approved", "purchase_order_id": po.get("id"), "approved_amount": str(partial_amount), "approved_amount_total": str(new_approved_total), "pending_amount": str(new_pending if new_pending > 0 else Decimal("0.00")), "movement_ids": created_movements}
+        return {
+            "message": "Autorización approved",
+            "purchase_order_id": po.get("id"),
+            "approved_amount": str(partial_amount),
+            "approved_amount_total": str(new_approved_total),
+            "pending_amount": str(new_pending if new_pending > 0 else Decimal("0.00")),
+            "movement_ids": created_movements,
+            "budget_gate_summary": budget_summary,
+        }
     
     update_data = {
         "status": resolution.status.value,

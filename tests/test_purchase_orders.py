@@ -161,3 +161,89 @@ def test_invalid_iva_rate_422():
     res = client.post("/api/purchase-orders", json=payload)
     assert res.status_code == 422
     assert res.json()["detail"]["code"] == "invalid_iva_rate"
+
+
+def test_authorization_payload_includes_oc_budget_summary():
+    client, _ = client_for("admin")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "1000.00"}).status_code == 201
+    created = client.post("/api/purchase-orders", json=po_payload(ext="", total_line="100.00"))
+    po_id = created.json()["purchase_order"]["id"]
+    assert client.post(f"/api/purchase-orders/{po_id}/submit").status_code == 200
+
+    listed = client.get("/api/authorizations", params={"status": "pending"})
+    assert listed.status_code == 200
+    auth = next((a for a in listed.json() if a.get("purchase_order_id") == po_id), None)
+    assert auth is not None
+    assert auth.get("purchase_order_details", {}).get("folio")
+    assert auth.get("budget_gate_summary", {}).get("presupuesto_total") is not None
+    assert isinstance(auth.get("budget_gate_summary", {}).get("by_partida"), list)
+
+
+def test_partial_approval_updates_pending_and_budget_fields():
+    client, db = client_for("admin")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "1000.00"}).status_code == 201
+    created = client.post("/api/purchase-orders", json=po_payload(ext="", total_line="100.00"))
+    po_id = created.json()["purchase_order"]["id"]
+    assert client.post(f"/api/purchase-orders/{po_id}/submit").status_code == 200
+    auth_id = next(a["id"] for a in db.authorizations.rows if a.get("purchase_order_id") == po_id and a.get("status") == "pending")
+
+    res = client.put(f"/api/authorizations/{auth_id}", json={"status": "approved", "partial_amount": "50.00", "notes": "ok"})
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["pending_amount"] == "66.00"
+    assert payload.get("budget_gate_summary", {}).get("monto_pendiente_oc") == "66.00"
+
+
+def test_authorization_resolve_422_does_not_return_unserializable_error():
+    client, db = client_for("admin")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "1000.00"}).status_code == 201
+    created = client.post("/api/purchase-orders", json=po_payload(ext="", total_line="100.00"))
+    po_id = created.json()["purchase_order"]["id"]
+    assert client.post(f"/api/purchase-orders/{po_id}/submit").status_code == 200
+    auth_id = next(a["id"] for a in db.authorizations.rows if a.get("purchase_order_id") == po_id and a.get("status") == "pending")
+
+    bad = client.put(f"/api/authorizations/{auth_id}", json={"status": "approved", "partial_amount": "9999.00"})
+    assert bad.status_code == 422
+    detail = bad.json().get("detail")
+    assert isinstance(detail, dict)
+    assert detail.get("code") == "partial_amount_exceeds_pending"
+    assert isinstance(detail.get("details"), dict)
+
+
+def test_purchase_order_pdf_endpoint_returns_pdf_and_contains_folio():
+    client, _ = client_for("admin")
+    created = client.post("/api/purchase-orders", json=po_payload(ext="OC-2", total_line="100.00"))
+    po = created.json()["purchase_order"]
+    po_id = po["id"]
+    pdf_res = client.get(f"/api/purchase-orders/{po_id}/pdf")
+    assert pdf_res.status_code == 200
+    assert b"%PDF" in pdf_res.content[:10]
+    assert b"ORDEN DE COMPRA" in pdf_res.content
+
+
+def test_index_setup_is_mongo_compatible_no_ne_in_partial_expression():
+    _, db = client_for("admin")
+    import asyncio
+    asyncio.run(server.ensure_partial_indexes_for_movements())
+    idx = db.movements.indexes.get("uq_movements_po_line_origin_event_exists") or {}
+    partial = idx.get("partialFilterExpression") or {}
+    assert "$type" in partial.get("purchase_order_line_id", {})
+    assert "$ne" not in partial.get("purchase_order_line_id", {})
+    assert "$type" in partial.get("origin_event", {})
+
+
+def test_oc_preview_budget_calculation_with_iva_and_multi_lines():
+    client, _ = client_for("admin")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "300.00"}).status_code == 201
+    preview = client.post("/api/budgets/availability/oc-preview", json={
+        "project_id": "pr1",
+        "order_date": "2026-01-10",
+        "lines": [
+            {"partida_codigo": "205", "requested_amount": "100.00"},
+            {"partida_codigo": "205", "requested_amount": "50.00"},
+        ],
+    })
+    assert preview.status_code == 200
+    body = preview.json()
+    assert body["lines"][0]["requested_amount"] == "150.00"
+    assert body["summary"]["monto_solicitado"] == "150.00"
