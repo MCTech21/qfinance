@@ -17,10 +17,24 @@ class FakeCollection:
     def __init__(self, rows=None):
         self.rows = rows or []
         self.unique_fields = []
+        self.indexes = {}
 
-    async def create_index(self, keys, unique=False):
+    async def create_index(self, keys, unique=False, name=None, partialFilterExpression=None, **kwargs):
         if unique:
             self.unique_fields.append(tuple(k for k, _ in keys))
+        index_name = name or "_".join([f"{k}_{v}" for k, v in keys])
+        self.indexes[index_name] = {
+            "key": keys,
+            "unique": unique,
+            "partialFilterExpression": partialFilterExpression,
+        }
+        return index_name
+
+    async def index_information(self):
+        return dict(self.indexes)
+
+    async def drop_index(self, name):
+        self.indexes.pop(name, None)
 
     def _matches(self, row, query):
         for k, v in query.items():

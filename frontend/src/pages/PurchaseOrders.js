@@ -111,6 +111,7 @@ const PurchaseOrders = () => {
     date_to: "",
   });
   const isAdmin = user?.role === "admin";
+  const isDirector = user?.role === "director";
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -383,7 +384,7 @@ const PurchaseOrders = () => {
     }
   };
 
-  const roleCanOpenModule = ["admin", "finanzas"].includes(user?.role);
+  const roleCanOpenModule = ["admin", "finanzas", "director"].includes(user?.role);
 
   if (!roleCanOpenModule) {
     return (
@@ -402,9 +403,11 @@ const PurchaseOrders = () => {
           <p className="text-muted-foreground">Captura y workflow de autorización de egresos por OC</p>
         </div>
         <Dialog open={openForm} onOpenChange={(open) => { setOpenForm(open); if (!open) setSelected(null); }}>
-          <DialogTrigger asChild>
-            <Button onClick={openCreate}><Plus className="h-4 w-4 mr-2" />Nueva OC</Button>
-          </DialogTrigger>
+          {!isDirector && (
+            <DialogTrigger asChild>
+              <Button onClick={openCreate}><Plus className="h-4 w-4 mr-2" />Nueva OC</Button>
+            </DialogTrigger>
+          )}
           <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
             <DialogHeader><DialogTitle>{selected ? "Editar OC" : "Nueva OC"}</DialogTitle></DialogHeader>
             <form onSubmit={saveOrder} className="space-y-4">
@@ -544,11 +547,11 @@ const PurchaseOrders = () => {
                         <td className="text-right">
                           <div className="flex justify-end gap-1 flex-wrap">
                             <Button size="icon" variant="outline" onClick={() => openView(row.id)} title="Ver"><Eye className="h-4 w-4" /></Button>
-                            {isDraft && <Button size="icon" variant="outline" onClick={() => openEdit(row)} title="Editar"><Pencil className="h-4 w-4" /></Button>}
-                            {isDraft && <Button size="icon" variant="outline" disabled={disabled} onClick={() => doAction(row.id, "submit", null, "OC enviada a autorización")} title="Enviar"><Send className="h-4 w-4" /></Button>}
+                            {isDraft && !isDirector && <Button size="icon" variant="outline" onClick={() => openEdit(row)} title="Editar"><Pencil className="h-4 w-4" /></Button>}
+                            {isDraft && !isDirector && <Button size="icon" variant="outline" disabled={disabled} onClick={() => doAction(row.id, "submit", null, "OC enviada a autorización")} title="Enviar"><Send className="h-4 w-4" /></Button>}
                             {isPending && isAdmin && <Button size="icon" variant="outline" disabled={disabled} onClick={() => doAction(row.id, "approve", null, "OC aprobada")} title="Aprobar"><CheckCircle className="h-4 w-4" /></Button>}
                             {isPending && isAdmin && <Button size="icon" variant="outline" disabled={disabled} onClick={() => { const reason = window.prompt("Motivo de rechazo"); if (reason) doAction(row.id, "reject", { reason }, "OC rechazada"); }} title="Rechazar"><XCircle className="h-4 w-4" /></Button>}
-                            {isDraft && <Button size="icon" variant="destructive" disabled={disabled} onClick={() => doAction(row.id, "delete", null, "OC cancelada")} title="Eliminar"><Trash2 className="h-4 w-4" /></Button>}
+                            {isDraft && !isDirector && <Button size="icon" variant="destructive" disabled={disabled} onClick={() => doAction(row.id, "delete", null, "OC cancelada")} title="Eliminar"><Trash2 className="h-4 w-4" /></Button>}
                             {(isApproved || isPending || isDraft || row.status === "rejected") && <Button size="icon" variant="outline" onClick={() => downloadPdf(row)} title="PDF"><FileDown className="h-4 w-4" /></Button>}
                           </div>
                         </td>

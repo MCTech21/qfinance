@@ -69,6 +69,34 @@ def test_create_without_external_id_autogenerates_folio_and_invoice_folio_persis
     assert po["invoice_folio"] == "F-SD3BC5"
 
 
+def test_partial_index_creation_does_not_fail_with_legacy_null_docs():
+    client, db = client_for("admin")
+    db.movements.rows = [{"id": "m1", "purchase_order_line_id": None, "origin_event": None}, {"id": "m2"}]
+    import asyncio
+    asyncio.run(server.ensure_partial_indexes_for_movements())
+    idx = db.movements.indexes.get("uq_movements_po_line_origin_event_exists")
+    assert idx is not None
+    assert idx.get("unique") is True
+    assert idx.get("partialFilterExpression") is not None
+
+
+def test_partial_approval_authorization_creates_partial_movement_and_keeps_pending():
+    client, db = client_for("admin")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "1000.00"}).status_code == 201
+    created = client.post("/api/purchase-orders", json=po_payload(ext="", total_line="100.00"))
+    po_id = created.json()["purchase_order"]["id"]
+    assert client.post(f"/api/purchase-orders/{po_id}/submit").status_code == 200
+    pending_auth = [a for a in db.authorizations.rows if a.get("approval_type") == "purchase_order_workflow" and a.get("status") == "pending"]
+    assert len(pending_auth) == 1
+    auth_id = pending_auth[0]["id"]
+    res = client.put(f"/api/authorizations/{auth_id}", json={"status": "approved", "notes": "parcial", "partial_amount": "50.00"})
+    assert res.status_code == 200
+    po = next((p for p in db.purchase_orders.rows if p.get("id") == po_id), None)
+    assert po is not None
+    assert po.get("status") == "partially_approved"
+    assert po.get("pending_amount") == "66.00"
+
+
 def test_approve_budget_exception_and_idempotent_approval_request():
     client, db = client_for("admin")
     assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "100.00"}).status_code == 201

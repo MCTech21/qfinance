@@ -27,10 +27,11 @@ const Authorizations = () => {
   const [filters, setFilters] = useState({
     empresa_id: "all",
     project_id: "all",
-    year: 2025,
-    month: 1,
+    year: new Date().getFullYear(),
+    month: new Date().getMonth() + 1,
     status: "pending"
   });
+  const [partialAmount, setPartialAmount] = useState("");
 
   const yearOptions = buildYearOptions();
 
@@ -94,13 +95,15 @@ const Authorizations = () => {
     try {
       await api().put(`/authorizations/${selectedAuth.id}`, {
         status: action,
-        notes: notes
+        notes: notes,
+        partial_amount: action === "approved" && partialAmount ? Number(partialAmount) : undefined,
       });
       
       toast.success(action === "approved" ? "Movimiento aprobado y contabilizado" : "Movimiento rechazado");
       setDialogOpen(false);
       setSelectedAuth(null);
       setNotes("");
+      setPartialAmount("");
       fetchData();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Error al procesar autorización");
@@ -113,6 +116,7 @@ const Authorizations = () => {
     setSelectedAuth(auth);
     setAction(actionType);
     setNotes("");
+    setPartialAmount("");
     setDialogOpen(true);
   };
 
@@ -143,7 +147,7 @@ const Authorizations = () => {
     rejected: { icon: XCircle, color: "text-red-400", bg: "bg-red-500/10", label: "Rechazado" }
   };
 
-  const canResolve = user?.role === "admin" || user?.role === "autorizador";
+  const canResolve = user?.role === "admin" || user?.role === "autorizador" || user?.role === "director";
 
   return (
     <div className="space-y-6" data-testid="authorizations-page">
@@ -317,15 +321,15 @@ const Authorizations = () => {
                               <p className="font-medium">{mov.project_code}</p>
                             </div>
                             <div>
-                              <span className="text-xs text-muted-foreground">Partida</span>
-                              <p className="font-medium">{mov.partida_codigo} - {mov.partida_nombre}</p>
+                              <span className="text-xs text-muted-foreground">Partida(s)</span>
+                              <p className="font-medium">{mov.partida_codigo || "-"}</p>
                             </div>
                             <div>
-                              <span className="text-xs text-muted-foreground">Proveedor</span>
-                              <p className="font-medium">{mov.provider_name}</p>
+                              <span className="text-xs text-muted-foreground">RFC</span>
+                              <p className="font-medium">{mov.provider_rfc || "-"}</p>
                             </div>
                             <div>
-                              <span className="text-xs text-muted-foreground">Referencia</span>
+                              <span className="text-xs text-muted-foreground">Referencia (Factura)</span>
                               <p className="font-mono text-xs">{mov.referencia}</p>
                             </div>
                             <div>
@@ -381,7 +385,7 @@ const Authorizations = () => {
                             data-testid={`approve-auth-${auth.id}`}
                           >
                             <CheckCircle className="h-4 w-4 mr-1" />
-                            Aprobar
+                            Aprobar / Parcial
                           </Button>
                           <Button
                             size="sm"
@@ -511,6 +515,18 @@ const Authorizations = () => {
                 <p className="text-xs text-red-400">* El motivo es obligatorio para rechazar</p>
               )}
             </div>
+
+            {action === "approved" && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Monto parcial a aprobar (opcional)</label>
+                <input
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  value={partialAmount}
+                  onChange={(e) => setPartialAmount(e.target.value)}
+                  placeholder="Vacío = aprobar monto completo pendiente"
+                />
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>

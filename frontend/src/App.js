@@ -87,7 +87,7 @@ function App() {
           } />
 
           <Route path="/purchase-orders" element={
-            <ProtectedRoute allowedRoles={["admin", "finanzas"]}>
+            <ProtectedRoute allowedRoles={["admin", "finanzas", "director"]}>
               <DashboardLayout>
                 <PurchaseOrders />
               </DashboardLayout>
@@ -112,7 +112,7 @@ function App() {
           } />
 
           <Route path="/authorizations" element={
-            <ProtectedRoute allowedRoles={["admin", "autorizador"]}>
+            <ProtectedRoute allowedRoles={["admin", "autorizador", "director"]}>
               <DashboardLayout>
                 <Authorizations />
               </DashboardLayout>

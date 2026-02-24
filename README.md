@@ -488,3 +488,45 @@ curl -X POST http://localhost:8000/api/budgets/availability/oc-preview \
 - `0 = OK` (si el restante proyectado queda en cero, sí se permite).
 - Ausencia de annual/monthly no bloquea por sí sola.
 - Cálculo fiscal de OC se recalcula server-side usando `Decimal`.
+
+## Migración/Backfill OC (producción)
+
+### 1) Índice idempotente parcial en movimientos
+
+El índice de idempotencia de movimientos por OC se creó como **partial unique index** para evitar conflictos legacy con `null/null`:
+- nombre: `uq_movements_po_line_origin_event_exists`
+- campos: `purchase_order_line_id`, `origin_event`
+- parcial: solo cuando ambos campos existen y no son null.
+
+### 2) Backfill sugerido de folios OC legacy
+
+Si existen OCs sin `folio`, ejecutar un script one-shot en mantenimiento para asignar folios `OC000001+` y luego validar índice único en `purchase_orders.folio`.
+
+### 3) Smoke test manual recomendado
+
+1. Crear OC sin folio manual (folio se asigna automático).
+2. Capturar `Folio factura proveedor`.
+3. Ver OC en listado `/purchase-orders`.
+4. Enviar a autorización.
+5. Abrir `/authorizations` (mes/año actual por default) y aprobar total/parcial.
+6. Verificar movimiento(s) en `/movements`.
+7. Descargar PDF de OC y validar footer `Creado con QFinance` / `quantum.mx`.
+
+## Endpoints/Componentes tocados
+
+- Backend:
+  - `POST /api/purchase-orders`
+  - `PUT /api/purchase-orders/{id}`
+  - `POST /api/purchase-orders/{id}/submit`
+  - `POST /api/purchase-orders/{id}/approve`
+  - `POST /api/purchase-orders/{id}/reject`
+  - `GET /api/purchase-orders`
+  - `GET /api/purchase-orders/{id}`
+  - `GET /api/purchase-orders/{id}/pdf`
+  - `GET /api/authorizations`
+  - `PUT /api/authorizations/{id}`
+- Frontend:
+  - `frontend/src/pages/PurchaseOrders.js`
+  - `frontend/src/pages/Authorizations.js`
+  - `frontend/src/components/DashboardLayout.js`
+  - `frontend/src/App.js`

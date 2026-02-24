@@ -67,6 +67,7 @@ logger = logging.getLogger(__name__)
 class UserRole(str, Enum):
     ADMIN = "admin"
     FINANZAS = "finanzas"
+    DIRECTOR = "director"
     AUTORIZADOR = "autorizador"
     SOLO_LECTURA = "solo_lectura"
     CAPTURA = "captura"
@@ -327,6 +328,7 @@ class PurchaseOrderLineInput(BaseModel):
 class PurchaseOrderCreate(BaseModel):
     external_id: Optional[str] = None
     invoice_folio: Optional[str] = None
+    supplier_invoice_folio: Optional[str] = None
     project_id: str
     vendor_name: str
     vendor_rfc: Optional[str] = None
@@ -466,6 +468,7 @@ class Authorization(AuthorizationBase):
 class AuthorizationResolve(BaseModel):
     status: AuthorizationStatus
     notes: Optional[str] = None
+    partial_amount: Optional[Decimal] = None
 
 class AuditLog(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -615,6 +618,16 @@ ROLE_PERMISSIONS = {
         Permission.VIEW_BUDGETS.value,
         Permission.REQUEST_BUDGETS.value,
         Permission.MANAGE_CATALOGS.value,
+    ],
+
+    UserRole.DIRECTOR.value: [
+        Permission.VIEW_DASHBOARD.value,
+        Permission.VIEW_REPORTS.value,
+        Permission.VIEW_MOVEMENTS.value,
+        Permission.VIEW_AUTHORIZATIONS.value,
+        Permission.APPROVE_REJECT.value,
+        Permission.VIEW_CATALOGS.value,
+        Permission.VIEW_BUDGETS.value,
     ],
     
     UserRole.AUTORIZADOR.value: [
@@ -1623,6 +1636,47 @@ def render_basic_pdf(lines: List[str]) -> bytes:
     pdf.extend(f"trailer << /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode("latin-1"))
     return bytes(pdf)
 
+
+def render_purchase_order_pdf(po: dict) -> bytes:
+    logo = "Quantum"
+    title = "ORDEN DE COMPRA"
+    folio = po.get("folio") or po.get("external_id") or "N/A"
+    lines = [
+        logo,
+        title,
+        f"Folio OC: {folio}",
+        f"Folio factura: {po.get('invoice_folio') or 'N/A'}",
+        f"Fecha: {(po.get('order_date') or '')[:10]}",
+        f"Fecha programada: {((po.get('planned_date') or '')[:10]) or 'N/A'}",
+        f"Empresa ID: {po.get('company_id')}",
+        f"Proyecto ID: {po.get('project_id')}",
+        f"Proveedor: {po.get('vendor_name') or 'N/A'}",
+        f"RFC: {po.get('vendor_rfc') or 'N/A'}",
+        f"Correo: {po.get('vendor_email') or 'N/A'}",
+        f"Teléfono: {po.get('vendor_phone') or 'N/A'}",
+        f"Dirección: {po.get('vendor_address') or 'N/A'}",
+        f"Condiciones de pago: {po.get('payment_terms') or 'N/A'}",
+        f"Moneda: {po.get('currency') or 'MXN'}",
+        f"Tipo cambio: {po.get('exchange_rate') or '1'}",
+        "--- LÍNEAS ---",
+    ]
+    for line in po.get("lines", []):
+        lines.append(
+            f"[{line.get('line_no')}] Partida {line.get('partida_codigo')} | {line.get('description')} | qty {line.get('qty')} | pu {line.get('price_unit')} | IVA {line.get('iva_rate')}% ({line.get('iva_amount')}) | ISR {line.get('isr_withholding_rate')}% ({line.get('isr_withholding_amount')}) | total {line.get('line_total')}"
+        )
+    lines.extend([
+        "--- TOTALES ---",
+        f"Subtotal: {po.get('subtotal_tax_base')}",
+        f"IVA: {po.get('tax_total')}",
+        f"Ret ISR: {po.get('withholding_isr_total')}",
+        f"TOTAL: {po.get('total')}",
+        f"Estatus: {po.get('status')}",
+        f"Notas: {po.get('notes') or 'N/A'}",
+        "Creado con QFinance",
+        "quantum.mx",
+    ])
+    return render_basic_pdf(lines)
+
 # ========================= AUTH ROUTES =========================
 @api_router.post("/auth/register", response_model=User)
 async def register(user_data: UserCreate, current_user: dict = Depends(require_permission(Permission.MANAGE_USERS))):
@@ -2446,6 +2500,33 @@ async def _sync_po_odoo_stub(po: dict) -> dict:
     return doc
 
 
+async def ensure_partial_indexes_for_movements():
+    try:
+        existing = await db.movements.index_information()
+    except Exception:
+        existing = {}
+
+    index_name = "uq_movements_po_line_origin_event_exists"
+    legacy_names = [
+        "purchase_order_line_id_1_origin_event_1",
+    ]
+    for legacy in legacy_names:
+        if legacy in existing:
+            try:
+                await db.movements.drop_index(legacy)
+            except Exception:
+                pass
+    await db.movements.create_index(
+        [("purchase_order_line_id", ASCENDING), ("origin_event", ASCENDING)],
+        name=index_name,
+        unique=True,
+        partialFilterExpression={
+            "purchase_order_line_id": {"$exists": True, "$ne": None},
+            "origin_event": {"$exists": True, "$ne": None},
+        },
+    )
+
+
 async def generate_purchase_order_folio() -> str:
     counter = await db.counters.find_one_and_update(
         {"_id": "purchase_order_folio"},
@@ -2528,7 +2609,7 @@ async def create_purchase_order(payload: PurchaseOrderCreate, current_user: dict
     po_base = {
         "folio": folio,
         "external_id": folio,
-        "invoice_folio": (payload.invoice_folio or "").strip()[:100] or None,
+        "invoice_folio": (payload.supplier_invoice_folio or payload.invoice_folio or "").strip()[:100] or None,
         "company_id": project.get("empresa_id"),
         "project_id": payload.project_id,
         "vendor_name": payload.vendor_name,
@@ -2586,7 +2667,7 @@ async def update_purchase_order(po_id: str, payload: PurchaseOrderCreate, curren
     lines = [calculate_oc_line(line) for line in payload.lines]
     totals = summarize_oc_lines(lines)
     update_doc = {
-        "invoice_folio": (payload.invoice_folio or "").strip()[:100] or None,
+        "invoice_folio": (payload.supplier_invoice_folio or payload.invoice_folio or "").strip()[:100] or None,
         "vendor_name": payload.vendor_name,
         "vendor_rfc": payload.vendor_rfc,
         "vendor_email": payload.vendor_email,
@@ -2613,7 +2694,13 @@ async def submit_purchase_order(po_id: str, current_user: dict = Depends(require
     enforce_company_access(current_user, po.get("company_id"))
     if po.get("status") not in {PurchaseOrderStatus.DRAFT.value, PurchaseOrderStatus.REJECTED.value}:
         raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "Estado inválido para submit"})
-    await db.purchase_orders.update_one({"id": po_id}, {"$set": {"status": PurchaseOrderStatus.PENDING_APPROVAL.value, "updated_at": datetime.now(timezone.utc).isoformat()}})
+    gate = await evaluate_oc_budget_gate(po)
+    await db.purchase_orders.update_one({"id": po_id}, {"$set": {
+        "status": PurchaseOrderStatus.PENDING_APPROVAL.value,
+        "budget_gate_status": BudgetGateStatus.OK.value if gate.get("ok") else BudgetGateStatus.EXCEPTION_PENDING.value,
+        "budget_check_snapshot_json": gate,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }})
     await ensure_pending_approval(
         approval_type=ApprovalType.PURCHASE_ORDER_WORKFLOW,
         company_id=po.get("company_id"),
@@ -2752,7 +2839,7 @@ async def cancel_purchase_order(po_id: str, current_user: dict = Depends(require
 
 
 @api_router.get("/purchase-orders")
-async def list_purchase_orders(status: Optional[str] = None, project_id: Optional[str] = None, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+async def list_purchase_orders(status: Optional[str] = None, project_id: Optional[str] = None, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS, UserRole.DIRECTOR))):
     query = {}
     if status:
         query["status"] = status
@@ -2767,7 +2854,7 @@ async def list_purchase_orders(status: Optional[str] = None, project_id: Optiona
 
 
 @api_router.get("/purchase-orders/{po_id}")
-async def get_purchase_order(po_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+async def get_purchase_order(po_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS, UserRole.DIRECTOR))):
     po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
     if not po:
         raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
@@ -2776,7 +2863,7 @@ async def get_purchase_order(po_id: str, current_user: dict = Depends(require_ro
 
 
 @api_router.get("/purchase-orders/{po_id}/pdf")
-async def purchase_order_pdf(po_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+async def purchase_order_pdf(po_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS, UserRole.DIRECTOR))):
     po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
     if not po:
         raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
@@ -2797,7 +2884,7 @@ async def purchase_order_pdf(po_id: str, current_user: dict = Depends(require_ro
     logo_path = os.getenv("QF_OC_LOGO_PATH")
     if logo_path and not Path(logo_path).exists():
         logger.warning("QF_OC_LOGO_PATH no existe: %s", logo_path)
-    pdf_bytes = render_basic_pdf(lines)
+    pdf_bytes = render_purchase_order_pdf(po)
     await log_audit(current_user, "PDF", "purchase_orders", po_id, {"folio": po.get("folio") or po.get("external_id")})
     filename = po.get("folio") or po.get("external_id") or po_id
     return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"inline; filename={filename}.pdf"})
@@ -3488,6 +3575,7 @@ async def get_authorizations(
                 continue
             if month and po_date and po_date.month != month:
                 continue
+            partidas = sorted({str((line or {}).get("partida_codigo") or "") for line in (po.get("lines") or []) if (line or {}).get("partida_codigo")})
             auth["movement_details"] = {
                 "date": po.get("order_date"),
                 "empresa_id": po.get("company_id"),
@@ -3495,14 +3583,15 @@ async def get_authorizations(
                 "project_id": po.get("project_id"),
                 "project_code": project_map.get(po.get("project_id"), {}).get("code", "N/A"),
                 "project_name": project_map.get(po.get("project_id"), {}).get("name", "N/A"),
-                "partida_codigo": None,
-                "partida_nombre": "OC",
+                "partida_codigo": ", ".join(partidas) if partidas else None,
+                "partida_nombre": "Partidas OC",
                 "provider_name": po.get("vendor_name") or "N/A",
+                "provider_rfc": po.get("vendor_rfc") or "N/A",
                 "moneda": po.get("currency"),
                 "monto_original": po.get("total"),
                 "tipo_cambio": po.get("exchange_rate"),
                 "monto_mxn": float(po.get("total", 0) or 0),
-                "referencia": po.get("folio") or po.get("external_id"),
+                "referencia": po.get("invoice_folio") or po.get("folio") or po.get("external_id"),
                 "descripcion": f"Orden de Compra {po.get('folio') or po.get('external_id')}",
             }
             auth["purchase_order_details"] = {
@@ -3627,6 +3716,108 @@ async def resolve_authorization(
     # Reject requires notes/motivo
     if resolution.status == AuthorizationStatus.REJECTED and not resolution.notes:
         raise HTTPException(status_code=400, detail="Rechazo requiere motivo/notas")
+
+    if auth.get("approval_type") == ApprovalType.PURCHASE_ORDER_WORKFLOW.value and auth.get("purchase_order_id"):
+        po = await db.purchase_orders.find_one({"id": auth.get("purchase_order_id")}, {"_id": 0})
+        if not po:
+            raise HTTPException(status_code=404, detail="OC no encontrada")
+        enforce_company_access(current_user, po.get("company_id"))
+
+        po_total = money_dec(po.get("total", 0))
+        already_approved = money_dec(po.get("approved_amount_total", 0))
+        pending_amount = (po_total - already_approved).quantize(TWO_DECIMALS)
+
+        if resolution.status == AuthorizationStatus.REJECTED:
+            await db.authorizations.update_one({"id": auth_id}, {"$set": {
+                "status": AuthorizationStatus.REJECTED.value,
+                "resolved_at": datetime.now(timezone.utc).isoformat(),
+                "resolved_by": current_user["user_id"],
+                "resolved_by_email": current_user["email"],
+                "notes": resolution.notes,
+            }})
+            await db.purchase_orders.update_one({"id": po.get("id")}, {"$set": {"status": PurchaseOrderStatus.REJECTED.value, "rejection_reason": resolution.notes or "", "updated_at": datetime.now(timezone.utc).isoformat()}})
+            await log_audit(current_user, "AUTH_REJECTED", "purchase_orders", po.get("id"), {"reason": resolution.notes})
+            return {"message": "Autorización rejected"}
+
+        partial_amount = money_dec(resolution.partial_amount) if resolution.partial_amount is not None else pending_amount
+        if partial_amount <= 0:
+            raise HTTPException(status_code=422, detail={"code": "invalid_partial_amount", "message": "Monto parcial debe ser mayor a 0"})
+        if partial_amount > pending_amount:
+            raise HTTPException(status_code=422, detail={"code": "partial_amount_exceeds_pending", "message": "Monto parcial excede saldo pendiente"})
+
+        approve_event_id = str(uuid.uuid4())
+        ratio = (partial_amount / po_total) if po_total > 0 else Decimal("0")
+        created_movements = []
+        for line in po.get("lines", []):
+            line_total = money_dec(line.get("line_total", 0))
+            line_partial = (line_total * ratio).quantize(TWO_DECIMALS)
+            if line_partial <= 0:
+                continue
+            origin_event = f"OC_APPROVE_PARTIAL:{approve_event_id}"
+            existing_mv = await db.movements.find_one({"purchase_order_line_id": line.get("id"), "origin_event": origin_event}, {"_id": 0})
+            if existing_mv:
+                created_movements.append(existing_mv.get("id"))
+                continue
+            movement_doc = {
+                "id": str(uuid.uuid4()),
+                "project_id": po.get("project_id"),
+                "partida_codigo": line.get("partida_codigo"),
+                "provider_id": None,
+                "date": po.get("order_date"),
+                "currency": po.get("currency"),
+                "amount_original": float(line_partial),
+                "exchange_rate": float(decimal_from_value(po.get("exchange_rate", 1), "exchange_rate")),
+                "amount_mxn": float(line_partial),
+                "reference": po.get("invoice_folio") or po.get("folio") or po.get("external_id"),
+                "description": f"OC parcial {po.get('folio') or po.get('external_id')} línea {line.get('line_no')}",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": current_user["user_id"],
+                "status": MovementStatus.POSTED.value,
+                "purchase_order_id": po.get("id"),
+                "purchase_order_line_id": line.get("id"),
+                "origin_event": origin_event,
+                "is_active": True,
+            }
+            await db.movements.insert_one(movement_doc)
+            created_movements.append(movement_doc["id"])
+
+        new_approved_total = (already_approved + partial_amount).quantize(TWO_DECIMALS)
+        new_pending = (po_total - new_approved_total).quantize(TWO_DECIMALS)
+        new_status = PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value if new_pending <= 0 else "partially_approved"
+        posting_status = PostingStatus.POSTED.value if new_pending <= 0 else "partially_posted"
+
+        await db.purchase_orders.update_one({"id": po.get("id")}, {"$set": {
+            "approved_amount_total": str(new_approved_total),
+            "pending_amount": str(new_pending if new_pending > 0 else Decimal("0.00")),
+            "status": new_status,
+            "posting_status": posting_status,
+            "approved_by_user_id": current_user["user_id"],
+            "approved_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }})
+        await db.authorizations.update_one({"id": auth_id}, {"$set": {
+            "status": AuthorizationStatus.APPROVED.value,
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+            "resolved_by": current_user["user_id"],
+            "resolved_by_email": current_user["email"],
+            "notes": resolution.notes,
+            "partial_amount": str(partial_amount),
+            "approval_event_id": approve_event_id,
+            "movement_ids": created_movements,
+        }})
+        if new_pending > 0:
+            await ensure_pending_approval(
+                approval_type=ApprovalType.PURCHASE_ORDER_WORKFLOW,
+                company_id=po.get("company_id"),
+                project_id=po.get("project_id"),
+                requested_by=current_user["user_id"],
+                purchase_order_id=po.get("id"),
+                dedupe_key=f"purchase_order_workflow:{po.get('id')}:{str(new_pending)}",
+                metadata={"folio": po.get("folio") or po.get("external_id"), "purchase_order_id": po.get("id"), "pending_amount": str(new_pending)},
+            )
+
+        await log_audit(current_user, "AUTH_APPROVED", "purchase_orders", po.get("id"), {"partial_amount": str(partial_amount), "approved_amount_total": str(new_approved_total), "pending_amount": str(new_pending), "movement_ids": created_movements})
+        return {"message": "Autorización approved", "purchase_order_id": po.get("id"), "approved_amount": str(partial_amount), "approved_amount_total": str(new_approved_total), "pending_amount": str(new_pending if new_pending > 0 else Decimal("0.00")), "movement_ids": created_movements}
     
     update_data = {
         "status": resolution.status.value,
@@ -4998,7 +5189,8 @@ async def setup_indexes():
     await db.users.create_index([("name", ASCENDING)], unique=True)
     await db.budget_plans.create_index([("project_id", ASCENDING), ("partida_codigo", ASCENDING)], unique=True)
     await db.purchase_orders.create_index([("company_id", ASCENDING), ("external_id", ASCENDING)], unique=True)
-    await db.movements.create_index([("purchase_order_line_id", ASCENDING), ("origin_event", ASCENDING)], unique=True)
+    await db.purchase_orders.create_index([("folio", ASCENDING)], unique=True)
+    await ensure_partial_indexes_for_movements()
     await db.odoo_sync_purchase_orders.create_index([("purchase_order_id", ASCENDING)], unique=True)
 
 @app.on_event("shutdown")

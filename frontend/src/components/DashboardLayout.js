@@ -33,6 +33,7 @@ import { Badge } from "./ui/badge";
 const roleLabels = {
   admin: "Administrador",
   finanzas: "Finanzas",
+  director: "Director",
   autorizador: "Autorizador",
   solo_lectura: "Solo Lectura",
   captura_ingresos: "Captura Ingresos"
@@ -55,15 +56,15 @@ const DashboardLayout = ({ children }) => {
     { path: "/dashboard", icon: LayoutDashboard, label: "Dashboard", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos"] },
     { path: "/budgets", icon: Wallet, label: "Presupuestos", roles: ["admin", "finanzas"] },
     { path: "/movements", icon: ArrowRightLeft, label: "Movimientos", roles: ["admin", "finanzas", "captura_ingresos"] },
-    { path: "/purchase-orders", icon: ShoppingCart, label: "Órdenes de Compra", roles: ["admin", "finanzas"] },
-    { path: "/authorizations", icon: CheckSquare, label: "Autorizaciones", roles: ["admin", "autorizador"] },
-    { path: "/reports", icon: BarChart3, label: "Reportes", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos"] },
+    { path: "/purchase-orders", icon: ShoppingCart, label: "Órdenes de Compra", roles: ["admin", "finanzas", "director"] },
+    { path: "/authorizations", icon: CheckSquare, label: "Autorizaciones", roles: ["admin", "autorizador", "director"] },
+    { path: "/reports", icon: BarChart3, label: "Reportes", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos", "director"] },
     { path: "/clientes", icon: Users, label: "Clientes", roles: ["admin", "finanzas", "captura_ingresos"] },
     { path: "/inventarios", icon: Building2, label: "Inventarios", roles: ["admin", "finanzas", "captura_ingresos"] },
     { path: "/catalogs", icon: FolderOpen, label: "Proveedores", roles: ["admin"] },
     { path: "/audit", icon: ScrollText, label: "Bitácora", roles: ["admin", "autorizador"] },
     { path: "/admin", icon: Shield, label: "Consola Admin", roles: ["admin"] },
-    { path: "/settings", icon: Settings, label: "Mi Cuenta", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos"] },
+    { path: "/settings", icon: Settings, label: "Mi Cuenta", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos", "director"] },
   ];
 
   const filteredNav = navItems.filter(item => 
