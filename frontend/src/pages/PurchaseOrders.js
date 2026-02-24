@@ -9,7 +9,6 @@ import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Badge } from "../components/ui/badge";
 import { Plus, FileDown, Send, CheckCircle, XCircle, Pencil, Trash2, Eye, Loader2 } from "lucide-react";
-import { v4 as uuidv4 } from "uuid";
 
 const STATUS_LABELS = {
   draft: { label: "Borrador", variant: "secondary" },
@@ -22,7 +21,7 @@ const STATUS_LABELS = {
 const IVA_OPTIONS = ["0", "8", "16"];
 
 const emptyLine = () => ({
-  rowKey: uuidv4(),
+  rowKey: `tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   line_no: 1,
   partida_codigo: "",
   description: "",
@@ -37,6 +36,8 @@ const emptyLine = () => ({
 
 const emptyForm = {
   external_id: "",
+  folio: "",
+  invoice_folio: "",
   project_id: "",
   provider_id: "",
   vendor_name: "",
@@ -166,7 +167,7 @@ const PurchaseOrders = () => {
       if (filters.provider && !(row.vendor_name || "").toLowerCase().includes(filters.provider.toLowerCase())) return false;
       if (filters.search) {
         const needle = filters.search.toLowerCase();
-        const hay = `${row.external_id || ""} ${row.vendor_name || ""}`.toLowerCase();
+      const hay = `${row.folio || row.external_id || ""} ${row.vendor_name || ""}`.toLowerCase();
         if (!hay.includes(needle)) return false;
       }
       if (filters.date_from && orderDate && orderDate < new Date(filters.date_from)) return false;
@@ -187,6 +188,8 @@ const PurchaseOrders = () => {
     setSelected(row);
     setForm({
       external_id: row.external_id || "",
+      folio: row.folio || row.external_id || "",
+      invoice_folio: row.invoice_folio || "",
       project_id: row.project_id || "",
       provider_id: "",
       vendor_name: row.vendor_name || "",
@@ -201,7 +204,7 @@ const PurchaseOrders = () => {
       notes: row.notes || "",
       payment_terms: row.payment_terms || "",
       lines: (row.lines || []).map((line, index) => ({
-        rowKey: line.id || uuidv4(),
+        rowKey: line.id || `tmp-${Date.now()}-${index}`,
         line_no: line.line_no || index + 1,
         partida_codigo: String(line.partida_codigo || ""),
         description: line.description || "",
@@ -252,7 +255,8 @@ const PurchaseOrders = () => {
   };
 
   const buildPayload = () => ({
-    external_id: form.external_id,
+    external_id: selected?.id ? (form.external_id || form.folio || null) : null,
+    invoice_folio: form.invoice_folio || null,
     project_id: form.project_id,
     vendor_name: form.vendor_name,
     vendor_rfc: form.vendor_rfc || null,
@@ -280,7 +284,6 @@ const PurchaseOrders = () => {
   });
 
   const validateForm = () => {
-    if (!form.external_id.trim()) return "Folio/Número es obligatorio";
     if (!form.project_id) return "Proyecto es obligatorio";
     if (!form.vendor_name.trim()) return "Proveedor es obligatorio";
     if (!form.lines.length) return "Debe capturar al menos una línea";
@@ -406,7 +409,7 @@ const PurchaseOrders = () => {
             <DialogHeader><DialogTitle>{selected ? "Editar OC" : "Nueva OC"}</DialogTitle></DialogHeader>
             <form onSubmit={saveOrder} className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                <div><Label>Folio</Label><Input value={form.external_id} onChange={(e) => setForm((p) => ({ ...p, external_id: e.target.value }))} /></div>
+                <div><Label>Folio OC</Label><Input value={selected?.id ? (form.folio || form.external_id || "") : "Se asigna automáticamente al guardar"} readOnly /></div>
                 <div><Label>Proyecto</Label><Select value={form.project_id || undefined} onValueChange={(v) => setForm((p) => ({ ...p, project_id: v }))}><SelectTrigger><SelectValue placeholder="Selecciona" /></SelectTrigger><SelectContent>{projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.code} - {p.name}</SelectItem>)}</SelectContent></Select></div>
                 <div><Label>Fecha</Label><Input type="date" value={form.order_date} onChange={(e) => setForm((p) => ({ ...p, order_date: e.target.value }))} /></div>
                 <div><Label>Fecha programada</Label><Input type="date" value={form.planned_date} onChange={(e) => setForm((p) => ({ ...p, planned_date: e.target.value }))} /></div>
@@ -423,6 +426,7 @@ const PurchaseOrders = () => {
                 <div><Label>Tipo cambio</Label><Input value={form.exchange_rate} onChange={(e) => setForm((p) => ({ ...p, exchange_rate: e.target.value }))} /></div>
                 <div><Label>Condiciones de pago</Label><Input value={form.payment_terms} onChange={(e) => setForm((p) => ({ ...p, payment_terms: e.target.value }))} /></div>
               </div>
+              <div><Label>Folio de factura proveedor</Label><Input value={form.invoice_folio} onChange={(e) => setForm((p) => ({ ...p, invoice_folio: e.target.value }))} /></div>
               <div><Label>Dirección proveedor</Label><Input value={form.vendor_address} onChange={(e) => setForm((p) => ({ ...p, vendor_address: e.target.value }))} /></div>
               <div><Label>Notas</Label><Input value={form.notes} onChange={(e) => setForm((p) => ({ ...p, notes: e.target.value }))} /></div>
 
@@ -525,7 +529,7 @@ const PurchaseOrders = () => {
                     const disabled = actingId === row.id;
                     return (
                       <tr key={row.id} className="border-b border-border/50">
-                        <td className="py-2 font-medium">{row.external_id || "-"}</td>
+                        <td className="py-2 font-medium">{row.folio || row.external_id || "-"}</td>
                         <td>{row.order_date ? new Date(row.order_date).toLocaleDateString("es-MX") : "-"}</td>
                         <td>{company?.nombre || "-"}</td>
                         <td>{project ? `${project.code} - ${project.name}` : row.project_id}</td>
@@ -567,11 +571,12 @@ const PurchaseOrders = () => {
           {!selected ? <p className="text-muted-foreground">Sin datos</p> : (
             <div className="space-y-3 text-sm">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <div><p className="text-muted-foreground">Folio</p><p className="font-medium">{selected.external_id}</p></div>
+                <div><p className="text-muted-foreground">Folio</p><p className="font-medium">{selected.folio || selected.external_id}</p></div>
                 <div><p className="text-muted-foreground">Estado</p><p>{selected.status}</p></div>
                 <div><p className="text-muted-foreground">Budget Gate</p><p>{selected.budget_gate_status || "-"}</p></div>
                 <div><p className="text-muted-foreground">Posting</p><p>{selected.posting_status || "-"}</p></div>
               </div>
+              <div><p className="text-muted-foreground">Folio factura proveedor</p><p>{selected.invoice_folio || "-"}</p></div>
               <div><p className="text-muted-foreground">Proveedor</p><p>{selected.vendor_name}</p></div>
               <div className="overflow-x-auto border rounded-md">
                 <table className="w-full text-sm">

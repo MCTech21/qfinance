@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import DuplicateKeyError
-from pymongo import ASCENDING
+from pymongo import ASCENDING, ReturnDocument
 import os
 import logging
 import json
@@ -93,6 +93,7 @@ class ApprovalType(str, Enum):
     MOVEMENT = "movement"
     BUDGET_DEFINITION = "budget_definition"
     OVERBUDGET_EXCEPTION = "overbudget_exception"
+    PURCHASE_ORDER_WORKFLOW = "purchase_order_workflow"
 
 class MovementStatus(str, Enum):
     POSTED = "posted"                    # Contabilizado (aprobado o no requirió autorización)
@@ -324,7 +325,8 @@ class PurchaseOrderLineInput(BaseModel):
 
 
 class PurchaseOrderCreate(BaseModel):
-    external_id: str
+    external_id: Optional[str] = None
+    invoice_folio: Optional[str] = None
     project_id: str
     vendor_name: str
     vendor_rfc: Optional[str] = None
@@ -912,6 +914,14 @@ def enforce_company_access(current_user: dict, company_id: Optional[str]):
         raise HTTPException(status_code=403, detail="Acceso restringido a la empresa del usuario")
 
 
+def has_company_access(current_user: dict, company_id: Optional[str]) -> bool:
+    try:
+        enforce_company_access(current_user, company_id)
+        return True
+    except HTTPException:
+        return False
+
+
 def get_budget_approval_mode() -> str:
     return os.getenv("BUDGET_APPROVAL_MODE", "soft").strip().lower() or "soft"
 
@@ -1049,6 +1059,7 @@ async def ensure_pending_approval(
     requested_by: str,
     budget_id: Optional[str] = None,
     movement_id: Optional[str] = None,
+    purchase_order_id: Optional[str] = None,
     dedupe_key: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ):
@@ -1062,6 +1073,8 @@ async def ensure_pending_approval(
         query["budget_id"] = budget_id
     if movement_id:
         query["movement_id"] = movement_id
+    if purchase_order_id:
+        query["purchase_order_id"] = purchase_order_id
     if dedupe_key:
         query["dedupe_key"] = dedupe_key
 
@@ -1077,6 +1090,7 @@ async def ensure_pending_approval(
         "project_id": project_id,
         "budget_id": budget_id,
         "movement_id": movement_id,
+        "purchase_order_id": purchase_order_id,
         "reason": "",
         "requested_by": requested_by,
         "requested_at": datetime.now(timezone.utc).isoformat(),
@@ -2432,6 +2446,24 @@ async def _sync_po_odoo_stub(po: dict) -> dict:
     return doc
 
 
+async def generate_purchase_order_folio() -> str:
+    counter = await db.counters.find_one_and_update(
+        {"_id": "purchase_order_folio"},
+        {"$inc": {"seq": 1}, "$setOnInsert": {"created_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    seq = int(counter.get("seq", 1))
+    return f"OC{seq:06d}"
+
+
+def normalize_purchase_order_response(doc: dict) -> dict:
+    normalized = sanitize_mongo_document(doc)
+    normalized.setdefault("folio", normalized.get("external_id"))
+    normalized.setdefault("external_id", normalized.get("folio"))
+    return normalized
+
+
 @api_router.post("/budgets/availability/oc-preview")
 async def oc_budget_preview(payload: OCBudgetPreviewInput, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
     project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
@@ -2486,11 +2518,17 @@ async def create_purchase_order(payload: PurchaseOrderCreate, current_user: dict
     if not project:
         raise HTTPException(status_code=404, detail={"code": "project_not_found", "message": "Proyecto no encontrado"})
     enforce_company_access(current_user, project.get("empresa_id"))
-    existing = await db.purchase_orders.find_one({"company_id": project.get("empresa_id"), "external_id": payload.external_id}, {"_id": 0})
+    folio = (payload.external_id or "").strip()
+    if folio:
+        existing = await db.purchase_orders.find_one({"company_id": project.get("empresa_id"), "folio": folio}, {"_id": 0})
+    else:
+        existing = None
     lines = [calculate_oc_line(line) for line in payload.lines]
     totals = summarize_oc_lines(lines)
     po_base = {
-        "external_id": payload.external_id,
+        "folio": folio,
+        "external_id": folio,
+        "invoice_folio": (payload.invoice_folio or "").strip()[:100] or None,
         "company_id": project.get("empresa_id"),
         "project_id": payload.project_id,
         "vendor_name": payload.vendor_name,
@@ -2516,6 +2554,11 @@ async def create_purchase_order(payload: PurchaseOrderCreate, current_user: dict
             raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "OC existente con payload distinto; use PUT"})
         raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "OC existente no editable"})
 
+    if not folio:
+        folio = await generate_purchase_order_folio()
+        po_base["folio"] = folio
+        po_base["external_id"] = folio
+
     po = {
         "id": str(uuid.uuid4()),
         **po_base,
@@ -2528,8 +2571,8 @@ async def create_purchase_order(payload: PurchaseOrderCreate, current_user: dict
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.purchase_orders.insert_one(po)
-    await log_audit(current_user, "CREATE", "purchase_orders", po["id"], {"external_id": po["external_id"]})
-    return {"purchase_order": sanitize_mongo_document(po)}
+    await log_audit(current_user, "CREATE", "purchase_orders", po["id"], {"folio": po["folio"], "external_id": po["external_id"]})
+    return {"purchase_order": normalize_purchase_order_response(po)}
 
 
 @api_router.put("/purchase-orders/{po_id}")
@@ -2543,6 +2586,7 @@ async def update_purchase_order(po_id: str, payload: PurchaseOrderCreate, curren
     lines = [calculate_oc_line(line) for line in payload.lines]
     totals = summarize_oc_lines(lines)
     update_doc = {
+        "invoice_folio": (payload.invoice_folio or "").strip()[:100] or None,
         "vendor_name": payload.vendor_name,
         "vendor_rfc": payload.vendor_rfc,
         "vendor_email": payload.vendor_email,
@@ -2558,7 +2602,7 @@ async def update_purchase_order(po_id: str, payload: PurchaseOrderCreate, curren
     }
     await db.purchase_orders.update_one({"id": po_id}, {"$set": update_doc})
     saved = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
-    return {"purchase_order": sanitize_mongo_document(saved)}
+    return {"purchase_order": normalize_purchase_order_response(saved)}
 
 
 @api_router.post("/purchase-orders/{po_id}/submit")
@@ -2570,8 +2614,18 @@ async def submit_purchase_order(po_id: str, current_user: dict = Depends(require
     if po.get("status") not in {PurchaseOrderStatus.DRAFT.value, PurchaseOrderStatus.REJECTED.value}:
         raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "Estado inválido para submit"})
     await db.purchase_orders.update_one({"id": po_id}, {"$set": {"status": PurchaseOrderStatus.PENDING_APPROVAL.value, "updated_at": datetime.now(timezone.utc).isoformat()}})
+    await ensure_pending_approval(
+        approval_type=ApprovalType.PURCHASE_ORDER_WORKFLOW,
+        company_id=po.get("company_id"),
+        project_id=po.get("project_id"),
+        requested_by=current_user["user_id"],
+        purchase_order_id=po_id,
+        dedupe_key=f"purchase_order_workflow:{po_id}",
+        metadata={"folio": po.get("folio") or po.get("external_id"), "purchase_order_id": po_id},
+    )
+    await log_audit(current_user, "SUBMIT", "purchase_orders", po_id, {"status": PurchaseOrderStatus.PENDING_APPROVAL.value})
     saved = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
-    return {"purchase_order": sanitize_mongo_document(saved)}
+    return {"purchase_order": normalize_purchase_order_response(saved)}
 
 
 @api_router.post("/purchase-orders/{po_id}/approve")
@@ -2583,7 +2637,7 @@ async def approve_purchase_order(po_id: str, current_user: dict = Depends(requir
             raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
         enforce_company_access(current_user, po.get("company_id"))
         if po.get("posting_status") == PostingStatus.POSTED.value:
-            return {"purchase_order": sanitize_mongo_document(po), "idempotent": True}
+            return {"purchase_order": normalize_purchase_order_response(po), "idempotent": True}
         if po.get("status") not in {PurchaseOrderStatus.PENDING_APPROVAL.value, PurchaseOrderStatus.DRAFT.value}:
             raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "Estado inválido para approve"})
 
@@ -2636,6 +2690,7 @@ async def approve_purchase_order(po_id: str, current_user: dict = Depends(requir
                 "is_active": True,
             }
             await db.movements.insert_one(movement_doc)
+            await log_audit(current_user, "CREATE", "movements", movement_doc["id"], {"origin_event": "OC_APPROVE", "purchase_order_id": po_id})
             movement_ids.append(movement_doc["id"])
 
         odoo_sync = await _sync_po_odoo_stub(po)
@@ -2648,8 +2703,13 @@ async def approve_purchase_order(po_id: str, current_user: dict = Depends(requir
             "budget_check_snapshot_json": gate,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }})
+        await db.authorizations.update_many(
+            {"approval_type": ApprovalType.PURCHASE_ORDER_WORKFLOW.value, "purchase_order_id": po_id, "status": AuthorizationStatus.PENDING.value},
+            {"$set": {"status": AuthorizationStatus.APPROVED.value, "decision_by": current_user["user_id"], "decision_at": datetime.now(timezone.utc).isoformat()}},
+        )
         saved = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
-        return {"purchase_order": sanitize_mongo_document(saved), "movement_ids": movement_ids, "odoo": sanitize_mongo_document(odoo_sync)}
+        await log_audit(current_user, "APPROVE", "purchase_orders", po_id, {"movement_ids": movement_ids, "odoo_purchase_order_id": odoo_sync.get("odoo_purchase_order_id")})
+        return {"purchase_order": normalize_purchase_order_response(saved), "movement_ids": movement_ids, "odoo": sanitize_mongo_document(odoo_sync)}
 
 
 @api_router.post("/purchase-orders/{po_id}/reject")
@@ -2665,8 +2725,13 @@ async def reject_purchase_order(po_id: str, payload: PurchaseOrderRejectInput, c
         if not payload.reason.strip():
             raise HTTPException(status_code=422, detail={"code": "rejection_reason_required", "message": "reason es obligatorio"})
         await db.purchase_orders.update_one({"id": po_id}, {"$set": {"status": PurchaseOrderStatus.REJECTED.value, "rejected_by_user_id": current_user["user_id"], "rejected_at": datetime.now(timezone.utc).isoformat(), "rejection_reason": payload.reason.strip(), "updated_at": datetime.now(timezone.utc).isoformat()}})
+        await db.authorizations.update_many(
+            {"approval_type": ApprovalType.PURCHASE_ORDER_WORKFLOW.value, "purchase_order_id": po_id, "status": AuthorizationStatus.PENDING.value},
+            {"$set": {"status": AuthorizationStatus.REJECTED.value, "decision_by": current_user["user_id"], "decision_at": datetime.now(timezone.utc).isoformat(), "comment": payload.reason.strip()}},
+        )
+        await log_audit(current_user, "REJECT", "purchase_orders", po_id, {"reason": payload.reason.strip()})
         saved = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
-        return {"purchase_order": sanitize_mongo_document(saved)}
+        return {"purchase_order": normalize_purchase_order_response(saved)}
 
 
 @api_router.delete("/purchase-orders/{po_id}")
@@ -2682,6 +2747,7 @@ async def cancel_purchase_order(po_id: str, current_user: dict = Depends(require
         if po.get("status") not in {PurchaseOrderStatus.DRAFT.value, PurchaseOrderStatus.REJECTED.value, PurchaseOrderStatus.PENDING_APPROVAL.value}:
             raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "Estado inválido para cancelar"})
         await db.purchase_orders.update_one({"id": po_id}, {"$set": {"status": PurchaseOrderStatus.CANCELLED.value, "cancelled_by_user_id": current_user["user_id"], "cancelled_at": datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()}})
+        await log_audit(current_user, "CANCEL", "purchase_orders", po_id, {})
         return {"message": "OC cancelada"}
 
 
@@ -2692,11 +2758,11 @@ async def list_purchase_orders(status: Optional[str] = None, project_id: Optiona
         query["status"] = status
     if project_id:
         query["project_id"] = project_id
-    rows = await db.purchase_orders.find(query, {"_id": 0}).to_list(5000)
+    rows = await db.purchase_orders.find(query, {"_id": 0}).sort("created_at", -1).to_list(5000)
     out = []
     for row in rows:
         if has_company_access(current_user, row.get("company_id")):
-            out.append(sanitize_mongo_document(row))
+            out.append(normalize_purchase_order_response(row))
     return out
 
 
@@ -2706,7 +2772,7 @@ async def get_purchase_order(po_id: str, current_user: dict = Depends(require_ro
     if not po:
         raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
     enforce_company_access(current_user, po.get("company_id"))
-    return sanitize_mongo_document(po)
+    return normalize_purchase_order_response(po)
 
 
 @api_router.get("/purchase-orders/{po_id}/pdf")
@@ -2717,7 +2783,8 @@ async def purchase_order_pdf(po_id: str, current_user: dict = Depends(require_ro
     enforce_company_access(current_user, po.get("company_id"))
     lines = [
         "ORDEN DE COMPRA",
-        f"Folio: {po.get('external_id')}",
+        f"Folio OC: {po.get('folio') or po.get('external_id')}",
+        f"Folio Factura: {po.get('invoice_folio') or 'N/A'}",
         f"Estado: {po.get('status')}",
         f"Budget gate: {po.get('budget_gate_status')}",
         f"Posting: {po.get('posting_status')}",
@@ -2731,7 +2798,9 @@ async def purchase_order_pdf(po_id: str, current_user: dict = Depends(require_ro
     if logo_path and not Path(logo_path).exists():
         logger.warning("QF_OC_LOGO_PATH no existe: %s", logo_path)
     pdf_bytes = render_basic_pdf(lines)
-    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"inline; filename=oc_{po.get('external_id')}.pdf"})
+    await log_audit(current_user, "PDF", "purchase_orders", po_id, {"folio": po.get("folio") or po.get("external_id")})
+    filename = po.get("folio") or po.get("external_id") or po_id
+    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"inline; filename={filename}.pdf"})
 
 
 @api_router.post("/budget-requests", status_code=201)
@@ -3406,6 +3475,47 @@ async def get_authorizations(
     
     enriched_auths = []
     for auth in auths:
+        if auth.get("approval_type") == ApprovalType.PURCHASE_ORDER_WORKFLOW.value and auth.get("purchase_order_id"):
+            po = await db.purchase_orders.find_one({"id": auth.get("purchase_order_id")}, {"_id": 0})
+            if not po:
+                continue
+            if empresa_id and po.get("company_id") != empresa_id:
+                continue
+            if project_id and po.get("project_id") != project_id:
+                continue
+            po_date = date_parser.parse(po.get("order_date")) if po.get("order_date") else None
+            if year and po_date and po_date.year != year:
+                continue
+            if month and po_date and po_date.month != month:
+                continue
+            auth["movement_details"] = {
+                "date": po.get("order_date"),
+                "empresa_id": po.get("company_id"),
+                "empresa_nombre": empresa_map.get(po.get("company_id"), {}).get("nombre", "N/A"),
+                "project_id": po.get("project_id"),
+                "project_code": project_map.get(po.get("project_id"), {}).get("code", "N/A"),
+                "project_name": project_map.get(po.get("project_id"), {}).get("name", "N/A"),
+                "partida_codigo": None,
+                "partida_nombre": "OC",
+                "provider_name": po.get("vendor_name") or "N/A",
+                "moneda": po.get("currency"),
+                "monto_original": po.get("total"),
+                "tipo_cambio": po.get("exchange_rate"),
+                "monto_mxn": float(po.get("total", 0) or 0),
+                "referencia": po.get("folio") or po.get("external_id"),
+                "descripcion": f"Orden de Compra {po.get('folio') or po.get('external_id')}",
+            }
+            auth["purchase_order_details"] = {
+                "id": po.get("id"),
+                "folio": po.get("folio") or po.get("external_id"),
+                "status": po.get("status"),
+                "vendor_name": po.get("vendor_name"),
+                "invoice_folio": po.get("invoice_folio"),
+                "total": po.get("total"),
+            }
+            enriched_auths.append(auth)
+            continue
+
         movement = None
         if auth.get('movement_id'):
             movement = await db.movements.find_one({"id": auth['movement_id']}, {"_id": 0})

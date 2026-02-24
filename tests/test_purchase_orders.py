@@ -21,6 +21,7 @@ def client_for(role: str, company_id: str = "e1"):
 def po_payload(ext: str = "OC-1", total_line: str = "100.00"):
     return {
         "external_id": ext,
+        "invoice_folio": "F-SD3BC5",
         "project_id": "pr1",
         "vendor_name": "Proveedor Uno",
         "currency": "MXN",
@@ -54,6 +55,18 @@ def test_create_submit_reject_flow():
 
     denied = client.post(f"/api/purchase-orders/{po_id}/reject", json={"reason": "x"})
     assert denied.status_code == 403
+
+
+def test_create_without_external_id_autogenerates_folio_and_invoice_folio_persists():
+    client, _ = client_for("finanzas")
+    payload = po_payload(ext="", total_line="100.00")
+    payload["external_id"] = None
+    created = client.post("/api/purchase-orders", json=payload)
+    assert created.status_code == 200
+    po = created.json()["purchase_order"]
+    assert po["folio"].startswith("OC")
+    assert po["external_id"] == po["folio"]
+    assert po["invoice_folio"] == "F-SD3BC5"
 
 
 def test_approve_budget_exception_and_idempotent_approval_request():
@@ -100,6 +113,17 @@ def test_oc_preview_endpoint_and_zero_ok_boundary():
     line = preview.json()["lines"][0]
     assert line["projected_remaining_total"] == "0.00"
     assert line["can_post_payment"] is True
+
+
+def test_pdf_endpoint_returns_pdf_content_type():
+    client, _ = client_for("admin")
+    created = client.post("/api/purchase-orders", json=po_payload(ext="OC-PDF", total_line="100.00"))
+    assert created.status_code == 200
+    po_id = created.json()["purchase_order"]["id"]
+    pdf_res = client.get(f"/api/purchase-orders/{po_id}/pdf")
+    assert pdf_res.status_code == 200
+    assert "application/pdf" in pdf_res.headers.get("content-type", "")
+    assert len(pdf_res.content) > 10
 
 
 def test_invalid_iva_rate_422():
