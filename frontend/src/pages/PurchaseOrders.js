@@ -9,6 +9,7 @@ import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Badge } from "../components/ui/badge";
 import { Plus, FileDown, Send, CheckCircle, XCircle, Pencil, Trash2, Eye, Loader2 } from "lucide-react";
+import { v4 as uuidv4 } from "uuid";
 
 const STATUS_LABELS = {
   draft: { label: "Borrador", variant: "secondary" },
@@ -21,7 +22,7 @@ const STATUS_LABELS = {
 const IVA_OPTIONS = ["0", "8", "16"];
 
 const emptyLine = () => ({
-  rowKey: crypto.randomUUID(),
+  rowKey: uuidv4(),
   line_no: 1,
   partida_codigo: "",
   description: "",
@@ -200,7 +201,7 @@ const PurchaseOrders = () => {
       notes: row.notes || "",
       payment_terms: row.payment_terms || "",
       lines: (row.lines || []).map((line, index) => ({
-        rowKey: line.id || crypto.randomUUID(),
+        rowKey: line.id || uuidv4(),
         line_no: line.line_no || index + 1,
         partida_codigo: String(line.partida_codigo || ""),
         description: line.description || "",
