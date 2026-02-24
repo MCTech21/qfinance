@@ -70,6 +70,8 @@ const Movements = () => {
   const [hardDeleteConfirmText, setHardDeleteConfirmText] = useState("");
   const [isEditSaving, setIsEditSaving] = useState(false);
   const [isDeleteSaving, setIsDeleteSaving] = useState(false);
+  const [budgetAvailability, setBudgetAvailability] = useState(null);
+  const [availabilityLoading, setAvailabilityLoading] = useState(false);
 
   const months = [
     { value: 1, label: "Enero" }, { value: 2, label: "Febrero" }, { value: 3, label: "Marzo" },
@@ -152,6 +154,37 @@ const Movements = () => {
     if (formData.project_id) return c.project_id === formData.project_id;
     return true;
   });
+
+  const amountPreview = Number(formData.amount_original || 0) * Number(formData.exchange_rate || 0);
+  const isIncomePartida = String(formData.partida_codigo || "").startsWith("4");
+  const effectiveRemaining = Number(budgetAvailability?.effective_remaining ?? 0);
+  const projectedRemaining = Number.isFinite(amountPreview) ? (effectiveRemaining - amountPreview) : effectiveRemaining;
+  const projectedState = projectedRemaining > 0 ? "ok" : (projectedRemaining === 0 ? "zero" : "negative");
+
+  useEffect(() => {
+    const loadBudgetAvailability = async () => {
+      if (!formData.project_id || !formData.partida_codigo || isIncomePartida) {
+        setBudgetAvailability(null);
+        return;
+      }
+      try {
+        setAvailabilityLoading(true);
+        const res = await api().get("/budget-availability", {
+          params: {
+            project_id: formData.project_id,
+            partida_codigo: formData.partida_codigo,
+            date: formData.date,
+          },
+        });
+        setBudgetAvailability(res.data || null);
+      } catch {
+        setBudgetAvailability(null);
+      } finally {
+        setAvailabilityLoading(false);
+      }
+    };
+    loadBudgetAvailability();
+  }, [api, formData.project_id, formData.partida_codigo, formData.date, isIncomePartida]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -720,6 +753,40 @@ const Movements = () => {
                     />
                   </div>
                 </div>
+
+                {!isIncomePartida ? (
+                  <div className="rounded-md border border-border bg-card/70 p-3 space-y-2">
+                    <div className="text-sm font-medium">Disponibilidad de presupuesto</div>
+                    {availabilityLoading ? (
+                      <div className="text-xs text-muted-foreground">Consultando disponibilidad...</div>
+                    ) : !budgetAvailability?.has_budget ? (
+                      <div className="text-xs text-amber-400">No hay presupuesto aplicable para esta partida/proyecto.</div>
+                    ) : (
+                      <>
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div>Total: <span className="font-mono">{budgetAvailability.budget_total_amount}</span></div>
+                          <div>Ejecutado: <span className="font-mono">{budgetAvailability.executed_total}</span></div>
+                          <div>Restante: <span className="font-mono">{budgetAvailability.remaining_total}</span></div>
+                          <div>% usado: <span className="font-mono">{Number(budgetAvailability.usage_pct_total || 0).toFixed(2)}%</span></div>
+                          <div>Scope activo: <span className="font-mono">{budgetAvailability.effective_scope || "total"}</span></div>
+                          <div>Restante scope: <span className="font-mono">{budgetAvailability.effective_remaining || "0.00"}</span></div>
+                        </div>
+                        <div className="text-xs">Este movimiento usará: <span className="font-mono">{amountPreview.toFixed(2)}</span></div>
+                        <div className={`text-xs ${projectedState === "ok" ? "text-emerald-400" : (projectedState === "zero" ? "text-amber-400" : "text-red-400")}`}>
+                          Restante proyectado: <span className="font-mono">{projectedRemaining.toFixed(2)}</span>
+                          {projectedState === "zero" ? " (0 = OK)" : ""}
+                        </div>
+                        {projectedState === "negative" && (
+                          <div className="text-xs text-red-400">Quedaría negativo; backend rechazará con 422 según reglas de presupuesto.</div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-border bg-card/70 p-3 text-xs text-muted-foreground">
+                    Presupuesto: No aplica para partidas de ingresos (4xx).
+                  </div>
+                )}
                 
                 <div className="space-y-2">
                   <Label>Descripción</Label>

@@ -870,6 +870,13 @@ def decimal_map_to_strings(values: Dict[str, Decimal]) -> Dict[str, str]:
     return {k: str(v) for k, v in values.items()}
 
 
+TWO_DECIMALS = Decimal("0.01")
+
+
+def money_dec(value: Any) -> Decimal:
+    return decimal_from_value(value or 0, "money").quantize(TWO_DECIMALS)
+
+
 async def ensure_pending_approval(
     *,
     approval_type: ApprovalType,
@@ -1028,6 +1035,126 @@ async def evaluate_overbudget(project_id: str, partida_codigo: str, movement_dat
         "metadata": metadata,
         "scope_exceeded": scope_exceeded,
         "total_exceeded": total_exceeded,
+    }
+
+
+async def compute_budget_availability(project_id: str, partida_codigo: str, movement_date: datetime) -> Dict[str, Any]:
+    year = movement_date.year
+    month = movement_date.month
+    ym = f"{year:04d}-{month:02d}"
+
+    posted_movements = await db.movements.find(movement_active_query(extra={
+        "project_id": project_id,
+        "partida_codigo": partida_codigo,
+        "status": MovementStatus.POSTED.value,
+    }), {"_id": 0}).to_list(5000)
+
+    executed_total = Decimal("0.00")
+    executed_annual = Decimal("0.00")
+    executed_monthly = Decimal("0.00")
+    for mov in posted_movements:
+        amt = money_dec(mov.get("amount_mxn", 0))
+        mov_date = date_parser.parse(mov["date"]) if isinstance(mov.get("date"), str) else mov.get("date")
+        executed_total += amt
+        if mov_date.year == year:
+            executed_annual += amt
+        if mov_date.year == year and mov_date.month == month:
+            executed_monthly += amt
+
+    plan = await db.budget_plans.find_one({"project_id": project_id, "partida_codigo": partida_codigo}, {"_id": 0})
+    if plan:
+        annual_breakdown = plan.get("annual_breakdown") or {}
+        monthly_breakdown = plan.get("monthly_breakdown") or {}
+        total_budget = money_dec(plan.get("total_amount", 0))
+        annual_budget = money_dec(annual_breakdown.get(str(year), 0)) if str(year) in annual_breakdown else None
+        monthly_budget = money_dec(monthly_breakdown.get(ym, 0)) if ym in monthly_breakdown else None
+
+        effective_scope = "monthly" if monthly_budget is not None else ("annual" if annual_budget is not None else "total")
+        effective_budget = monthly_budget if monthly_budget is not None else (annual_budget if annual_budget is not None else total_budget)
+        effective_executed = executed_monthly if monthly_budget is not None else (executed_annual if annual_budget is not None else executed_total)
+        effective_remaining = (effective_budget - effective_executed).quantize(TWO_DECIMALS)
+        total_remaining = (total_budget - executed_total).quantize(TWO_DECIMALS)
+
+        return {
+            "has_budget": True,
+            "source": "plan",
+            "budget_id": plan.get("id"),
+            "effective_scope": effective_scope,
+            "budget_validation_applies": True,
+            "zero_is_allowed": True,
+            "can_post_if_exact_zero": True,
+            "budget_total_amount": str(total_budget),
+            "executed_total": str(executed_total.quantize(TWO_DECIMALS)),
+            "remaining_total": str(total_remaining),
+            "usage_pct_total": float(((executed_total / total_budget) * Decimal("100")).quantize(TWO_DECIMALS)) if total_budget > 0 else 0.0,
+            "annual_budget": str(annual_budget) if annual_budget is not None else None,
+            "executed_annual": str(executed_annual.quantize(TWO_DECIMALS)),
+            "remaining_annual": str((annual_budget - executed_annual).quantize(TWO_DECIMALS)) if annual_budget is not None else None,
+            "usage_pct_annual": float(((executed_annual / annual_budget) * Decimal("100")).quantize(TWO_DECIMALS)) if annual_budget and annual_budget > 0 else None,
+            "monthly_budget": str(monthly_budget) if monthly_budget is not None else None,
+            "executed_monthly": str(executed_monthly.quantize(TWO_DECIMALS)),
+            "remaining_monthly": str((monthly_budget - executed_monthly).quantize(TWO_DECIMALS)) if monthly_budget is not None else None,
+            "usage_pct_monthly": float(((executed_monthly / monthly_budget) * Decimal("100")).quantize(TWO_DECIMALS)) if monthly_budget and monthly_budget > 0 else None,
+            "effective_budget": str(effective_budget.quantize(TWO_DECIMALS)),
+            "effective_executed": str(effective_executed.quantize(TWO_DECIMALS)),
+            "effective_remaining": str(effective_remaining),
+            "rules": ["monthly_if_present", "annual_if_month_missing", "total_fallback", "total_hard_cap", "0_is_ok"],
+        }
+
+    legacy_rows = await db.budgets.find({
+        "project_id": project_id,
+        "partida_codigo": partida_codigo,
+    }, {"_id": 0}).to_list(5000)
+
+    monthly_budget = Decimal("0.00")
+    annual_budget = Decimal("0.00")
+    total_budget = Decimal("0.00")
+    for row in legacy_rows:
+        amount = money_dec(row.get("amount_mxn", 0))
+        total_budget += amount
+        if row.get("year") == year:
+            annual_budget += amount
+            if row.get("month") == month:
+                monthly_budget += amount
+
+    if legacy_rows:
+        effective_scope = "monthly" if monthly_budget > 0 else ("annual" if annual_budget > 0 else "total")
+        effective_budget = monthly_budget if monthly_budget > 0 else (annual_budget if annual_budget > 0 else total_budget)
+        effective_executed = executed_monthly if monthly_budget > 0 else (executed_annual if annual_budget > 0 else executed_total)
+        effective_remaining = (effective_budget - effective_executed).quantize(TWO_DECIMALS)
+        total_remaining = (total_budget - executed_total).quantize(TWO_DECIMALS)
+        return {
+            "has_budget": True,
+            "source": "legacy",
+            "effective_scope": effective_scope,
+            "budget_validation_applies": True,
+            "zero_is_allowed": True,
+            "can_post_if_exact_zero": True,
+            "budget_total_amount": str(total_budget.quantize(TWO_DECIMALS)),
+            "executed_total": str(executed_total.quantize(TWO_DECIMALS)),
+            "remaining_total": str(total_remaining),
+            "usage_pct_total": float(((executed_total / total_budget) * Decimal("100")).quantize(TWO_DECIMALS)) if total_budget > 0 else 0.0,
+            "annual_budget": str(annual_budget.quantize(TWO_DECIMALS)) if annual_budget > 0 else None,
+            "executed_annual": str(executed_annual.quantize(TWO_DECIMALS)),
+            "remaining_annual": str((annual_budget - executed_annual).quantize(TWO_DECIMALS)) if annual_budget > 0 else None,
+            "usage_pct_annual": float(((executed_annual / annual_budget) * Decimal("100")).quantize(TWO_DECIMALS)) if annual_budget > 0 else None,
+            "monthly_budget": str(monthly_budget.quantize(TWO_DECIMALS)) if monthly_budget > 0 else None,
+            "executed_monthly": str(executed_monthly.quantize(TWO_DECIMALS)),
+            "remaining_monthly": str((monthly_budget - executed_monthly).quantize(TWO_DECIMALS)) if monthly_budget > 0 else None,
+            "usage_pct_monthly": float(((executed_monthly / monthly_budget) * Decimal("100")).quantize(TWO_DECIMALS)) if monthly_budget > 0 else None,
+            "effective_budget": str(effective_budget.quantize(TWO_DECIMALS)),
+            "effective_executed": str(effective_executed.quantize(TWO_DECIMALS)),
+            "effective_remaining": str(effective_remaining),
+            "rules": ["legacy_monthly_if_defined", "legacy_annual_fallback", "legacy_total_fallback", "0_is_ok"],
+        }
+
+    return {
+        "has_budget": False,
+        "source": None,
+        "budget_validation_applies": True,
+        "zero_is_allowed": True,
+        "can_post_if_exact_zero": True,
+        "rules": ["no_budget_found"],
     }
 
 
@@ -1785,6 +1912,19 @@ async def get_budgets(
         normalized["period_mode"] = period_label
         normalized["year"] = normalized_year
         normalized["month"] = normalized_month
+        availability = await compute_budget_availability(plan.get("project_id"), plan.get("partida_codigo"), datetime((normalized_year or to_tijuana(datetime.now(timezone.utc)).year), (normalized_month or 1), 1))
+        normalized.update({
+            "budget_total_amount": availability.get("budget_total_amount"),
+            "executed_total": availability.get("executed_total"),
+            "remaining_total": availability.get("remaining_total"),
+            "usage_pct_total": availability.get("usage_pct_total"),
+            "executed_annual": availability.get("executed_annual"),
+            "remaining_annual": availability.get("remaining_annual"),
+            "usage_pct_annual": availability.get("usage_pct_annual"),
+            "executed_monthly": availability.get("executed_monthly"),
+            "remaining_monthly": availability.get("remaining_monthly"),
+            "usage_pct_monthly": availability.get("usage_pct_monthly"),
+        })
         plan_items.append(normalized)
         planned_pairs.add((plan.get("project_id"), plan.get("partida_codigo")))
 
@@ -1821,6 +1961,19 @@ async def get_budgets(
     for item in grouped.values():
         final = dict(item)
         final["total_amount"] = str(final["total_amount"])
+        availability = await compute_budget_availability(final.get("project_id"), final.get("partida_codigo"), datetime((normalized_year or to_tijuana(datetime.now(timezone.utc)).year), (normalized_month or 1), 1))
+        final.update({
+            "budget_total_amount": availability.get("budget_total_amount"),
+            "executed_total": availability.get("executed_total"),
+            "remaining_total": availability.get("remaining_total"),
+            "usage_pct_total": availability.get("usage_pct_total"),
+            "executed_annual": availability.get("executed_annual"),
+            "remaining_annual": availability.get("remaining_annual"),
+            "usage_pct_annual": availability.get("usage_pct_annual"),
+            "executed_monthly": availability.get("executed_monthly"),
+            "remaining_monthly": availability.get("remaining_monthly"),
+            "usage_pct_monthly": availability.get("usage_pct_monthly"),
+        })
         legacy_items.append(sanitize_mongo_document(final))
 
     return plan_items + legacy_items
@@ -2054,6 +2207,32 @@ async def get_budget_requests(status: Optional[str] = None, current_user: dict =
     return [sanitize_mongo_document(r) for r in rows]
 
 
+@api_router.get("/budget-availability")
+async def get_budget_availability(
+    project_id: str,
+    partida_codigo: str,
+    date: Optional[str] = None,
+    current_user: dict = Depends(require_permission(Permission.VIEW_BUDGETS, Permission.CREATE_MOVEMENT)),
+):
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail={"code": "project_not_found", "message": "Proyecto no encontrado"})
+    enforce_company_access(current_user, project.get("empresa_id"))
+
+    target_date = parse_date_tijuana(date) if date else to_tijuana(datetime.now(timezone.utc))
+    availability = await compute_budget_availability(project_id, partida_codigo, target_date)
+    is_income = is_ingresos_partida(partida_codigo)
+    availability.update({
+        "project_id": project_id,
+        "partida_codigo": partida_codigo,
+        "date": target_date.date().isoformat(),
+        "is_income_partida": is_income,
+        "budget_validation_applies": False if is_income else availability.get("budget_validation_applies", True),
+        "admin_total_only_bypass": current_user.get("role") == UserRole.ADMIN.value and availability.get("has_budget") and availability.get("source") == "plan" and not availability.get("annual_budget") and not availability.get("monthly_budget"),
+    })
+    return availability
+
+
 @api_router.post("/budget-requests", status_code=201)
 async def create_budget_request(payload: BudgetRequestBase, current_user: dict = Depends(require_permission(Permission.REQUEST_BUDGETS, Permission.MANAGE_BUDGETS))):
     validate_year_in_range(payload.year)
@@ -2196,8 +2375,8 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
         if not provider:
             raise HTTPException(status_code=422, detail={"code": "provider_not_found", "message": "Proveedor no válido"})
     
-    amount_original_dec = decimal_from_value(movement_data.amount_original, "amount_original")
-    exchange_rate_dec = decimal_from_value(movement_data.exchange_rate, "exchange_rate")
+    amount_original_dec = money_dec(movement_data.amount_original)
+    exchange_rate_dec = decimal_from_value(movement_data.exchange_rate, "exchange_rate").quantize(Decimal("0.0001"))
     if amount_original_dec <= 0:
         raise HTTPException(status_code=422, detail={"code": "invalid_amount", "message": "Monto debe ser mayor a 0"})
 
@@ -2207,7 +2386,7 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     # Parse date
     parsed_date = parse_date_tijuana(movement_data.date)
     validate_date_in_range(parsed_date)
-    amount_mxn_dec = amount_original_dec * exchange_rate_dec
+    amount_mxn_dec = (amount_original_dec * exchange_rate_dec).quantize(TWO_DECIMALS)
 
     if no_provider_flow and movement_data.client_id:
         await validate_client_abono_limit(movement_data.client_id, amount_mxn_dec)
@@ -2305,7 +2484,8 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
                 if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
             )
             budget_amount = decimal_from_value(budget.get('amount_mxn', 0), 'amount_mxn')
-            if (current_spent + amount_mxn_dec) > budget_amount:
+            projected_available = (budget_amount - (current_spent + amount_mxn_dec)).quantize(TWO_DECIMALS)
+            if projected_available < Decimal("0.00"):
                 raise HTTPException(status_code=422, detail="Saldo de presupuesto insuficiente para la partida y periodo")
     
     movement = Movement(

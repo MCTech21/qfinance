@@ -482,6 +482,8 @@ const Budgets = () => {
                     <th>Partida</th>
                     <th>Estado</th>
                     <th className="text-right">Total</th>
+                    <th className="text-right">Restante</th>
+                    <th className="text-right">% Usado</th>
                     <th>Notas</th>
                     <th className="text-right">Acciones</th>
                   </tr>
@@ -498,6 +500,8 @@ const Budgets = () => {
                       </td>
                       <td><Badge variant="outline">{budget.approval_status || "legacy"}</Badge></td>
                       <td className="mono-number">{formatCurrency(Number(budget.total_amount || budget.amount_mxn || 0))}</td>
+                      <td className="mono-number">{formatCurrency(Number(budget.remaining_total || 0))}</td>
+                      <td className="mono-number">{Number(budget.usage_pct_total || 0).toFixed(1)}%</td>
                       <td className="text-muted-foreground text-sm">{budget.notes || "-"}</td>
                       <td className="text-right">
                         <div className="flex justify-end gap-1">

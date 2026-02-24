@@ -227,3 +227,141 @@ def test_budgets_accept_all_filters_semantics():
     invalid = client.get("/api/budgets", params={"project_id": "pr1", "month": "2"})
     assert invalid.status_code == 422
     assert invalid.json()["detail"]["code"] == "month_requires_year"
+
+
+def test_breakdown_invalid_key_422():
+    client, _ = client_for("admin")
+    payload = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "total_amount": "1000.00",
+        "annual_breakdown": {"20AA": "100"},
+    }
+    res = client.post("/api/budgets", json=payload)
+    assert res.status_code == 422
+    assert res.json()["detail"]["code"] == "invalid_breakdown_key"
+
+
+def test_breakdown_invalid_value_422():
+    client, _ = client_for("admin")
+    payload = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "total_amount": "1000.00",
+        "monthly_breakdown": {"2026-01": "bad"},
+    }
+    res = client.post("/api/budgets", json=payload)
+    assert res.status_code == 422
+    assert res.json()["detail"]["code"] == "invalid_breakdown_value"
+
+
+def test_zero_is_ok_total_exact_allow():
+    client, _ = client_for("finanzas")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "100.00"}).status_code == 201
+    move = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-01-01",
+        "currency": "MXN",
+        "amount_original": 100,
+        "exchange_rate": 1,
+        "reference": "ZERO-OK-TOTAL",
+    }
+    res = client.post("/api/movements", json=move)
+    assert res.status_code == 200
+
+
+def test_zero_is_ok_annual_exact_allow():
+    client, _ = client_for("finanzas")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "1000.00", "annual_breakdown": {"2026": "100.00"}}).status_code == 201
+    move = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-02-01",
+        "currency": "MXN",
+        "amount_original": 100,
+        "exchange_rate": 1,
+        "reference": "ZERO-OK-ANNUAL",
+    }
+    res = client.post("/api/movements", json=move)
+    assert res.status_code == 200
+
+
+def test_zero_is_ok_monthly_exact_allow():
+    client, _ = client_for("finanzas")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "1000.00", "monthly_breakdown": {"2026-03": "100.00"}}).status_code == 201
+    move = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-03-05",
+        "currency": "MXN",
+        "amount_original": 100,
+        "exchange_rate": 1,
+        "reference": "ZERO-OK-MONTH",
+    }
+    res = client.post("/api/movements", json=move)
+    assert res.status_code == 200
+
+
+def test_exceeds_by_cent_rejected():
+    client, _ = client_for("finanzas")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "100.00"}).status_code == 201
+    move = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-01-01",
+        "currency": "MXN",
+        "amount_original": 100.01,
+        "exchange_rate": 1,
+        "reference": "OVER-CENT",
+    }
+    res = client.post("/api/movements", json=move)
+    assert res.status_code == 422
+
+
+def test_admin_total_only_exceed_rejected():
+    client, _ = client_for("admin")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "100.00"}).status_code == 201
+    move = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-01-01",
+        "currency": "MXN",
+        "amount_original": 150,
+        "exchange_rate": 1,
+        "reference": "ADMIN-TOTAL-EXCEED",
+    }
+    res = client.post("/api/movements", json=move)
+    assert res.status_code == 422
+
+
+def test_high_amount_within_total_allowed():
+    client, _ = client_for("finanzas")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "5000000.00"}).status_code == 201
+    move = {
+        "project_id": "pr1",
+        "partida_codigo": "205",
+        "provider_id": "pv1",
+        "date": "2026-01-01",
+        "currency": "MXN",
+        "amount_original": 4800000,
+        "exchange_rate": 1,
+        "reference": "BIG-AMOUNT",
+    }
+    res = client.post("/api/movements", json=move)
+    assert res.status_code == 200
+
+
+def test_budget_availability_endpoint_returns_remaining():
+    client, _ = client_for("finanzas")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "1000.00"}).status_code == 201
+    res = client.get("/api/budget-availability", params={"project_id": "pr1", "partida_codigo": "205", "date": "2026-01-10"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["has_budget"] is True
+    assert body["remaining_total"] is not None
