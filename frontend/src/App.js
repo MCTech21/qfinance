@@ -15,6 +15,7 @@ import Clients from "./pages/Clients";
 import Inventory from "./pages/Inventory";
 import DashboardLayout from "./components/DashboardLayout";
 import ForceChangePassword from "./pages/ForceChangePassword";
+import PurchaseOrders from "./pages/PurchaseOrders";
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user, isLoading } = useAuth();
@@ -81,6 +82,14 @@ function App() {
             <ProtectedRoute allowedRoles={["admin", "finanzas", "captura_ingresos"]}>
               <DashboardLayout>
                 <Movements />
+              </DashboardLayout>
+            </ProtectedRoute>
+          } />
+
+          <Route path="/purchase-orders" element={
+            <ProtectedRoute allowedRoles={["admin", "finanzas"]}>
+              <DashboardLayout>
+                <PurchaseOrders />
               </DashboardLayout>
             </ProtectedRoute>
           } />

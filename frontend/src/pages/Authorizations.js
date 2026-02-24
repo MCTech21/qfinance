@@ -296,6 +296,18 @@ const Authorizations = () => {
                         
                         {mov && (
                           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                            {auth.purchase_order_details && (
+                              <>
+                                <div>
+                                  <span className="text-xs text-muted-foreground">OC</span>
+                                  <p className="font-medium">{auth.purchase_order_details.folio || "-"}</p>
+                                </div>
+                                <div>
+                                  <span className="text-xs text-muted-foreground">Proveedor</span>
+                                  <p className="font-medium">{auth.purchase_order_details.vendor_name || "-"}</p>
+                                </div>
+                              </>
+                            )}
                             <div>
                               <span className="text-xs text-muted-foreground">Empresa</span>
                               <p className="font-medium">{mov.empresa_nombre}</p>
