@@ -4888,7 +4888,33 @@ async def setup_indexes():
     await db.users.create_index([("name", ASCENDING)], unique=True)
     await db.budget_plans.create_index([("project_id", ASCENDING), ("partida_codigo", ASCENDING)], unique=True)
     await db.purchase_orders.create_index([("company_id", ASCENDING), ("external_id", ASCENDING)], unique=True)
-    await db.movements.create_index([("purchase_order_line_id", ASCENDING), ("origin_event", ASCENDING)], unique=True)
+    # OC idempotency index: único solo cuando ambos campos existen (compatible con legacy)
+    try:
+        await db.movements.drop_index("purchase_order_line_id_1_origin_event_1")
+    except Exception:
+        pass
+    try:
+        await db.movements.drop_index("uq_movements_po_line_origin_event_sparse")
+    except Exception:
+        pass
+    try:
+        await db.movements.drop_index("uq_movements_po_line_origin_event_nonnull")
+    except Exception:
+        pass
+    try:
+        await db.movements.drop_index("uq_movements_po_line_origin_event_exists")
+    except Exception:
+        pass
+
+    await db.movements.create_index(
+        [("purchase_order_line_id", ASCENDING), ("origin_event", ASCENDING)],
+        unique=True,
+        name="uq_movements_po_line_origin_event_exists",
+        partialFilterExpression={
+            "purchase_order_line_id": {"$exists": True},
+            "origin_event": {"$exists": True},
+        },
+    )
     await db.odoo_sync_purchase_orders.create_index([("purchase_order_id", ASCENDING)], unique=True)
 
 @app.on_event("shutdown")
