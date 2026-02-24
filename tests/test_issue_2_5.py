@@ -99,6 +99,8 @@ class FakeDB:
         ])
         self.budgets = FakeCollection([])
         self.budget_plans = FakeCollection([])
+        self.purchase_orders = FakeCollection([])
+        self.odoo_sync_purchase_orders = FakeCollection([])
         self.movements = FakeCollection([])
         self.authorizations = FakeCollection([])
         self.audit_logs = FakeCollection([])
