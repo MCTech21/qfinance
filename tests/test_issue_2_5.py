@@ -17,10 +17,24 @@ class FakeCollection:
     def __init__(self, rows=None):
         self.rows = rows or []
         self.unique_fields = []
+        self.indexes = {}
 
-    async def create_index(self, keys, unique=False):
+    async def create_index(self, keys, unique=False, name=None, partialFilterExpression=None, **kwargs):
         if unique:
             self.unique_fields.append(tuple(k for k, _ in keys))
+        index_name = name or "_".join([f"{k}_{v}" for k, v in keys])
+        self.indexes[index_name] = {
+            "key": keys,
+            "unique": unique,
+            "partialFilterExpression": partialFilterExpression,
+        }
+        return index_name
+
+    async def index_information(self):
+        return dict(self.indexes)
+
+    async def drop_index(self, name):
+        self.indexes.pop(name, None)
 
     def _matches(self, row, query):
         for k, v in query.items():
@@ -57,6 +71,25 @@ class FakeCollection:
         for row in self.rows:
             if all(row.get(k) == v for k, v in query.items()):
                 row.update(update.get("$set", {}))
+
+    async def find_one_and_update(self, query, update, upsert=False, return_document=None):
+        target = None
+        for row in self.rows:
+            if self._matches(row, query):
+                target = row
+                break
+        if target is None and upsert:
+            target = dict(query)
+            self.rows.append(target)
+        if target is None:
+            return None
+        for key, value in update.get("$inc", {}).items():
+            target[key] = target.get(key, 0) + value
+        for key, value in update.get("$set", {}).items():
+            target[key] = value
+        for key, value in update.get("$setOnInsert", {}).items():
+            target.setdefault(key, value)
+        return dict(target)
 
     async def delete_one(self, query):
         self.rows = [r for r in self.rows if not self._matches(r, query)]
@@ -99,6 +132,8 @@ class FakeDB:
         ])
         self.budgets = FakeCollection([])
         self.budget_plans = FakeCollection([])
+        self.purchase_orders = FakeCollection([])
+        self.odoo_sync_purchase_orders = FakeCollection([])
         self.movements = FakeCollection([])
         self.authorizations = FakeCollection([])
         self.audit_logs = FakeCollection([])
@@ -107,6 +142,7 @@ class FakeDB:
         self.inventory_items = FakeCollection([{"id": "inv1", "company_id": "e1", "project_id": "pr1", "lote_edificio": "L1", "manzana_departamento": "M3", "precio_total": 500000.0}])
         self.import_export_logs = FakeCollection([])
         self.empresas = FakeCollection([{"id": "e1", "nombre": "Empresa 1"}])
+        self.counters = FakeCollection([])
 
     def __getitem__(self, name):
         return getattr(self, name)
