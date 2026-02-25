@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import DuplicateKeyError
-from pymongo import ASCENDING
+from pymongo import ASCENDING, ReturnDocument
 import os
 import logging
 import json
@@ -16,6 +16,8 @@ from typing import List, Optional, Dict, Any
 from decimal import Decimal, InvalidOperation
 import uuid
 from datetime import datetime, timezone, date
+import zlib
+import asyncio
 import jwt
 import bcrypt
 from enum import Enum
@@ -65,6 +67,7 @@ logger = logging.getLogger(__name__)
 class UserRole(str, Enum):
     ADMIN = "admin"
     FINANZAS = "finanzas"
+    DIRECTOR = "director"
     AUTORIZADOR = "autorizador"
     SOLO_LECTURA = "solo_lectura"
     CAPTURA = "captura"
@@ -91,11 +94,32 @@ class ApprovalType(str, Enum):
     MOVEMENT = "movement"
     BUDGET_DEFINITION = "budget_definition"
     OVERBUDGET_EXCEPTION = "overbudget_exception"
+    PURCHASE_ORDER_WORKFLOW = "purchase_order_workflow"
 
 class MovementStatus(str, Enum):
     POSTED = "posted"                    # Contabilizado (aprobado o no requirió autorización)
     PENDING_APPROVAL = "pending_approval" # Pendiente de autorización (no contabiliza)
     REJECTED = "rejected"                 # Rechazado (no contabiliza)
+
+
+class PurchaseOrderStatus(str, Enum):
+    DRAFT = "draft"
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED_FOR_PAYMENT = "approved_for_payment"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
+class BudgetGateStatus(str, Enum):
+    NOT_CHECKED = "not_checked"
+    OK = "ok"
+    EXCEPTION_PENDING = "exception_pending"
+
+
+class PostingStatus(str, Enum):
+    NOT_POSTED = "not_posted"
+    POSTED = "posted"
+    POST_FAILED = "post_failed"
 
 class PartidaGrupo(str, Enum):
     OBRA = "obra"
@@ -287,6 +311,50 @@ class MovementCreate(BaseModel):
     client_id: Optional[str] = None
 
 
+class PurchaseOrderLineInput(BaseModel):
+    line_no: int
+    partida_codigo: str
+    sku: Optional[str] = None
+    description: str
+    qty: Decimal
+    uom: Optional[str] = None
+    price_unit: Decimal
+    discount_pct: Optional[Decimal] = Decimal("0")
+    iva_rate: Decimal = Decimal("16")
+    apply_isr_withholding: bool = False
+    isr_withholding_rate: Optional[Decimal] = Decimal("0")
+
+
+class PurchaseOrderCreate(BaseModel):
+    external_id: Optional[str] = None
+    invoice_folio: Optional[str] = None
+    supplier_invoice_folio: Optional[str] = None
+    project_id: str
+    vendor_name: str
+    vendor_rfc: Optional[str] = None
+    vendor_email: Optional[str] = None
+    vendor_phone: Optional[str] = None
+    vendor_address: Optional[str] = None
+    currency: Currency = Currency.MXN
+    exchange_rate: Optional[Decimal] = Decimal("1")
+    order_date: str
+    planned_date: Optional[str] = None
+    notes: Optional[str] = None
+    payment_terms: Optional[str] = None
+    fob: Optional[str] = None
+    lines: List[PurchaseOrderLineInput]
+
+
+class PurchaseOrderRejectInput(BaseModel):
+    reason: str
+
+
+class OCBudgetPreviewInput(BaseModel):
+    project_id: str
+    order_date: str
+    lines: List[Dict[str, Any]]
+
+
 class InventoryItemBase(BaseModel):
     company_id: str
     project_id: str
@@ -400,6 +468,7 @@ class Authorization(AuthorizationBase):
 class AuthorizationResolve(BaseModel):
     status: AuthorizationStatus
     notes: Optional[str] = None
+    partial_amount: Optional[Decimal] = None
 
 class AuditLog(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -549,6 +618,16 @@ ROLE_PERMISSIONS = {
         Permission.VIEW_BUDGETS.value,
         Permission.REQUEST_BUDGETS.value,
         Permission.MANAGE_CATALOGS.value,
+    ],
+
+    UserRole.DIRECTOR.value: [
+        Permission.VIEW_DASHBOARD.value,
+        Permission.VIEW_REPORTS.value,
+        Permission.VIEW_MOVEMENTS.value,
+        Permission.VIEW_AUTHORIZATIONS.value,
+        Permission.APPROVE_REJECT.value,
+        Permission.VIEW_CATALOGS.value,
+        Permission.VIEW_BUDGETS.value,
     ],
     
     UserRole.AUTORIZADOR.value: [
@@ -848,6 +927,14 @@ def enforce_company_access(current_user: dict, company_id: Optional[str]):
         raise HTTPException(status_code=403, detail="Acceso restringido a la empresa del usuario")
 
 
+def has_company_access(current_user: dict, company_id: Optional[str]) -> bool:
+    try:
+        enforce_company_access(current_user, company_id)
+        return True
+    except HTTPException:
+        return False
+
+
 def get_budget_approval_mode() -> str:
     return os.getenv("BUDGET_APPROVAL_MODE", "soft").strip().lower() or "soft"
 
@@ -866,6 +953,11 @@ def is_admin_or_bypass(current_user: dict) -> bool:
     return role in {UserRole.ADMIN.value}
 
 
+def enforce_oc_for_finanzas_egress_enabled() -> bool:
+    raw = os.getenv("QF_ENFORCE_OC_FOR_EGRESS", "false").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def decimal_map_to_strings(values: Dict[str, Decimal]) -> Dict[str, str]:
     return {k: str(v) for k, v in values.items()}
 
@@ -877,6 +969,101 @@ def money_dec(value: Any) -> Decimal:
     return decimal_from_value(value or 0, "money").quantize(TWO_DECIMALS)
 
 
+def parse_amount_like(value: Any, field_name: str) -> Decimal:
+    if isinstance(value, str):
+        value = value.replace(",", "").strip()
+    return money_dec(value)
+
+
+def _validate_iva_rate(rate: Decimal):
+    if rate not in {Decimal("0"), Decimal("8"), Decimal("16")}:
+        raise HTTPException(status_code=422, detail={"code": "invalid_iva_rate", "message": "IVA inválido. Solo 0, 8, 16", "meta": {"iva_rate": str(rate)}})
+
+
+def calculate_oc_line(line: PurchaseOrderLineInput) -> dict:
+    qty = parse_amount_like(line.qty, "qty")
+    unit = parse_amount_like(line.price_unit, "price_unit")
+    if qty <= 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_amount", "message": "qty debe ser mayor a 0", "meta": {"line_no": line.line_no}})
+    if unit < 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_amount", "message": "price_unit no puede ser negativo", "meta": {"line_no": line.line_no}})
+
+    discount_pct = parse_amount_like(line.discount_pct or 0, "discount_pct")
+    if discount_pct < 0 or discount_pct > 100:
+        raise HTTPException(status_code=422, detail={"code": "invalid_discount_pct", "message": "discount_pct debe estar entre 0 y 100", "meta": {"line_no": line.line_no}})
+
+    iva_rate = parse_amount_like(line.iva_rate, "iva_rate")
+    _validate_iva_rate(iva_rate)
+    isr_rate = parse_amount_like(line.isr_withholding_rate or 0, "isr_withholding_rate") if line.apply_isr_withholding else Decimal("0")
+    if isr_rate < 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_isr_withholding_rate", "message": "Tasa ISR inválida", "meta": {"line_no": line.line_no}})
+
+    subtotal_before_discount = (qty * unit).quantize(TWO_DECIMALS)
+    discount_amount = (subtotal_before_discount * (discount_pct / Decimal("100"))).quantize(TWO_DECIMALS)
+    taxable_base = (subtotal_before_discount - discount_amount).quantize(TWO_DECIMALS)
+    if taxable_base < 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_tax_calculation", "message": "Base gravable inválida", "meta": {"line_no": line.line_no}})
+    iva_amount = (taxable_base * (iva_rate / Decimal("100"))).quantize(TWO_DECIMALS)
+    isr_amount = (taxable_base * (isr_rate / Decimal("100"))).quantize(TWO_DECIMALS) if line.apply_isr_withholding else Decimal("0")
+    line_total = (taxable_base + iva_amount - isr_amount).quantize(TWO_DECIMALS)
+    if line_total < 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_tax_calculation", "message": "Total de línea inválido", "meta": {"line_no": line.line_no}})
+
+    return {
+        "id": str(uuid.uuid4()),
+        "line_no": line.line_no,
+        "partida_codigo": str(line.partida_codigo),
+        "sku": line.sku,
+        "description": line.description,
+        "qty": str(qty),
+        "uom": line.uom,
+        "price_unit": str(unit),
+        "discount_pct": str(discount_pct),
+        "discount_amount": str(discount_amount),
+        "subtotal_before_discount": str(subtotal_before_discount),
+        "taxable_base": str(taxable_base),
+        "iva_rate": str(iva_rate),
+        "iva_amount": str(iva_amount),
+        "apply_isr_withholding": line.apply_isr_withholding,
+        "isr_withholding_rate": str(isr_rate),
+        "isr_withholding_amount": str(isr_amount),
+        "line_total": str(line_total),
+    }
+
+
+def summarize_oc_lines(lines: List[dict]) -> dict:
+    subtotal_tax_base = sum((money_dec(l.get("taxable_base", 0)) for l in lines), Decimal("0"))
+    tax_total = sum((money_dec(l.get("iva_amount", 0)) for l in lines), Decimal("0"))
+    withholding_isr_total = sum((money_dec(l.get("isr_withholding_amount", 0)) for l in lines), Decimal("0"))
+    total = (subtotal_tax_base + tax_total - withholding_isr_total).quantize(TWO_DECIMALS)
+    return {
+        "subtotal_tax_base": str(subtotal_tax_base.quantize(TWO_DECIMALS)),
+        "tax_total": str(tax_total.quantize(TWO_DECIMALS)),
+        "withholding_isr_total": str(withholding_isr_total.quantize(TWO_DECIMALS)),
+        "total": str(total),
+    }
+
+
+async def evaluate_oc_budget_gate(po: dict) -> Dict[str, Any]:
+    order_date = date_parser.parse(po.get("order_date")) if isinstance(po.get("order_date"), str) else po.get("order_date")
+    exceeded = []
+    lines_meta = []
+    for line in po.get("lines", []):
+        partida = str(line.get("partida_codigo"))
+        if partida in {"400", "401", "402", "403", "404"}:
+            continue
+        requested = money_dec(line.get("line_total", 0))
+        if requested <= 0:
+            continue
+        overbudget = await evaluate_overbudget(po.get("project_id"), partida, order_date, requested)
+        if overbudget:
+            meta = overbudget.get("metadata", {})
+            meta.update({"partida_codigo": partida, "requested": str(requested)})
+            exceeded.append(meta)
+        lines_meta.append({"partida_codigo": partida, "requested": str(requested)})
+    return {"ok": len(exceeded) == 0, "exceeded": exceeded, "checked": lines_meta}
+
+
 async def ensure_pending_approval(
     *,
     approval_type: ApprovalType,
@@ -885,6 +1072,7 @@ async def ensure_pending_approval(
     requested_by: str,
     budget_id: Optional[str] = None,
     movement_id: Optional[str] = None,
+    purchase_order_id: Optional[str] = None,
     dedupe_key: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ):
@@ -898,6 +1086,8 @@ async def ensure_pending_approval(
         query["budget_id"] = budget_id
     if movement_id:
         query["movement_id"] = movement_id
+    if purchase_order_id:
+        query["purchase_order_id"] = purchase_order_id
     if dedupe_key:
         query["dedupe_key"] = dedupe_key
 
@@ -913,6 +1103,7 @@ async def ensure_pending_approval(
         "project_id": project_id,
         "budget_id": budget_id,
         "movement_id": movement_id,
+        "purchase_order_id": purchase_order_id,
         "reason": "",
         "requested_by": requested_by,
         "requested_at": datetime.now(timezone.utc).isoformat(),
@@ -1443,6 +1634,267 @@ def render_basic_pdf(lines: List[str]) -> bytes:
     for off in offsets[1:]:
         pdf.extend(f"{off:010d} 00000 n \n".encode("latin-1"))
     pdf.extend(f"trailer << /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode("latin-1"))
+    return bytes(pdf)
+
+
+def _pdf_escape(text: Any) -> str:
+    return str(text or "").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _pdf_wrap(text: Any, max_chars: int) -> List[str]:
+    raw = str(text or "").strip() or "N/A"
+    words = raw.split()
+    if not words:
+        return ["N/A"]
+    lines: List[str] = []
+    line = ""
+    for word in words:
+        candidate = f"{line} {word}".strip()
+        if len(candidate) <= max_chars:
+            line = candidate
+            continue
+        if line:
+            lines.append(line)
+        while len(word) > max_chars:
+            lines.append(word[:max_chars])
+            word = word[max_chars:]
+        line = word
+    if line:
+        lines.append(line)
+    return lines or ["N/A"]
+
+
+def _pdf_format_date_local(date_value: Any, fmt: str = "%d/%m/%Y") -> str:
+    try:
+        if isinstance(date_value, datetime):
+            dt = date_value
+        elif isinstance(date_value, str) and date_value.strip():
+            dt = date_parser.parse(date_value)
+        else:
+            return "N/A"
+        if dt.tzinfo is None:
+            dt = TIMEZONE.localize(dt)
+        else:
+            dt = dt.astimezone(TIMEZONE)
+        return dt.strftime(fmt)
+    except Exception:
+        return "N/A"
+
+
+def _oc_numeric_display(folio: str) -> str:
+    normalized = canonicalize_oc_folio(folio)
+    digits = ''.join(ch for ch in normalized if ch.isdigit())
+    if not digits:
+        return normalized
+    return f"{int(digits):04d}"
+
+
+def oc_pdf_filename(raw_folio: Optional[str]) -> str:
+    normalized = canonicalize_oc_folio(raw_folio)
+    if normalized == "N/A":
+        return "OC-SIN-FOLIO"
+    if normalized.startswith("OC"):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip("-")
+    return f"OC-{normalized}" if normalized else "OC-SIN-FOLIO"
+
+
+def render_purchase_order_pdf(po: dict) -> bytes:
+    folio = canonicalize_oc_folio(po.get("folio") or po.get("external_id"))
+    order_date = _pdf_format_date_local(po.get("order_date"))
+    planned_date = _pdf_format_date_local(po.get("planned_date")) if po.get("planned_date") else "N/A"
+    oc_number = _oc_numeric_display(folio)
+
+    company_name = po.get("company_name") or po.get("empresa_nombre") or po.get("company_id") or "N/A"
+    project_name = po.get("project_name") or po.get("proyecto_nombre") or po.get("project_id") or "N/A"
+    vendor_name = po.get("vendor_name") or po.get("proveedor_nombre") or "N/A"
+    vendor_rfc = po.get("vendor_rfc") or po.get("proveedor_rfc") or "N/A"
+    payment_state = "Pendiente"
+    if money_dec(po.get("approved_amount_total", 0)) > 0 and money_dec(po.get("pending_amount", 0)) > 0:
+        payment_state = "Parcial"
+    elif money_dec(po.get("pending_amount", 0)) <= 0 and po.get("status") == PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value:
+        payment_state = "Total"
+
+    lines = po.get("lines") or []
+    notes_lines = _pdf_wrap(po.get("notes") or "N/A", 95)
+
+    page_streams: List[bytes] = []
+
+    def text_cmd(cmds: List[str], x: float, y: float, text: Any, size: int = 9):
+        cmds += ["BT", f"/F1 {size} Tf", f"{x:.2f} {y:.2f} Td", f"({_pdf_escape(text)}) Tj", "ET"]
+
+    def draw_header(cmds: List[str]):
+        cmds += ["0.05 0.18 0.56 rg", "40 748 532 20 re f", "0 0 0 rg"]
+        text_cmd(cmds, 50, 732, "Quantum | QFinance", 11)
+        text_cmd(cmds, 50, 716, "ORDEN DE COMPRA", 22)
+        text_cmd(cmds, 50, 703, "DOCUMENTO COMERCIAL", 9)
+
+        # Right metadata block (no overlap)
+        text_cmd(cmds, 390, 731, f"N°: {oc_number}", 11)
+        text_cmd(cmds, 390, 717, f"Fecha: {order_date}", 10)
+        text_cmd(cmds, 390, 704, f"Folio: {folio}", 9)
+
+        # Badges/chips
+        cmds += ["0.92 0.92 0.94 rg", "390 684 88 16 re f", "0.90 0.90 0.92 rg", "484 684 88 16 re f", "0 0 0 rg"]
+        text_cmd(cmds, 396, 688, f"Envío: {po.get('shipping_status') or 'Pendiente'}", 8)
+        text_cmd(cmds, 490, 688, f"Pago: {payment_state}", 8)
+
+    def draw_party_cards(cmds: List[str]) -> float:
+        left_x, right_x = 50, 315
+        top_y = 674
+        card_h = 86
+        cmds += ["0.95 0.96 0.99 rg", f"{left_x} {top_y-card_h} 250 {card_h} re f", "0 0 0 rg"]
+        cmds += ["0.95 0.96 0.99 rg", f"{right_x} {top_y-card_h} 257 {card_h} re f", "0 0 0 rg"]
+        text_cmd(cmds, left_x+8, top_y-14, "COMPRADOR", 10)
+        text_cmd(cmds, right_x+8, top_y-14, "VENDEDOR", 10)
+
+        buyer = [
+            f"Empresa: {company_name}",
+            f"Proyecto: {project_name}",
+            f"Moneda: {po.get('currency') or 'MXN'} | TC: {po.get('exchange_rate') or '1'}",
+            f"Condiciones: {po.get('payment_terms') or 'N/A'}",
+        ]
+        vendor = [
+            f"Proveedor: {vendor_name}",
+            f"RFC: {vendor_rfc}",
+            f"Factura proveedor: {po.get('invoice_folio') or 'N/A'}",
+            f"Contacto: {po.get('vendor_email') or 'N/A'}",
+        ]
+        y = top_y - 30
+        for t in buyer:
+            text_cmd(cmds, left_x+8, y, t, 8)
+            y -= 15
+        y = top_y - 30
+        for t in vendor:
+            text_cmd(cmds, right_x+8, y, t, 8)
+            y -= 15
+        return top_y - card_h - 10
+
+    def draw_table_header(cmds: List[str], y: float):
+        cmds += ["0.05 0.18 0.56 rg", f"50 {y-16:.2f} 522 16 re f", "1 1 1 rg"]
+        headers = ["#", "Partida", "Descripción", "Cant.", "P.U.", "IVA", "Ret ISR", "Total"]
+        xs = [54, 78, 142, 350, 394, 438, 484, 528]
+        for x, h in zip(xs, headers):
+            text_cmd(cmds, x, y-12, h, 8)
+        cmds += ["0 0 0 rg"]
+
+    def draw_footer(cmds: List[str], page_no: int):
+        cmds += ["0.80 0.80 0.80 rg", "50 46 522 1 re f", "0 0 0 rg"]
+        text_cmd(cmds, 50, 34, f"Generado: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", 8)
+        text_cmd(cmds, 250, 34, "Creado con QFinance", 8)
+        text_cmd(cmds, 500, 34, f"Pag. {page_no}", 8)
+
+    row_y_start_first = 548
+    row_y_start_other = 706
+    page_no = 1
+    i = 0
+    while i < len(lines) or page_no == 1:
+        cmds: List[str] = []
+        draw_header(cmds)
+        if page_no == 1:
+            y_table_top = draw_party_cards(cmds)
+            y_cursor = min(y_table_top, row_y_start_first)
+        else:
+            y_cursor = row_y_start_other
+
+        draw_table_header(cmds, y_cursor)
+        y_cursor -= 20
+
+        shaded = False
+        while i < len(lines):
+            line = lines[i] or {}
+            desc_lines = _pdf_wrap(line.get("description") or "-", 34)
+            row_height = max(13, 10 * len(desc_lines))
+            if y_cursor - row_height < 150:
+                break
+            if shaded:
+                cmds += ["0.98 0.98 0.99 rg", f"50 {y_cursor-row_height+2:.2f} 522 {row_height:.2f} re f", "0 0 0 rg"]
+            shaded = not shaded
+
+            base_y = y_cursor - 9
+            text_cmd(cmds, 54, base_y, line.get("line_no") or i + 1, 8)
+            text_cmd(cmds, 78, base_y, line.get("partida_codigo") or "", 8)
+            for idx_desc, d in enumerate(desc_lines):
+                text_cmd(cmds, 142, base_y - (idx_desc * 10), d, 8)
+            text_cmd(cmds, 350, base_y, line.get("qty") or "0", 8)
+            text_cmd(cmds, 394, base_y, line.get("price_unit") or "0", 8)
+            text_cmd(cmds, 438, base_y, line.get("iva_amount") or "0", 8)
+            text_cmd(cmds, 484, base_y, line.get("isr_withholding_amount") or "0", 8)
+            text_cmd(cmds, 528, base_y, line.get("line_total") or "0", 8)
+
+            y_cursor -= row_height
+            i += 1
+
+        if i >= len(lines):
+            box_y = max(120, y_cursor - 96)
+            cmds += ["0.95 0.95 0.97 rg", f"360 {box_y:.2f} 212 90 re f", "0 0 0 rg"]
+            totals = [
+                f"Subtotal: {po.get('subtotal_tax_base')}",
+                f"IVA: {po.get('tax_total')}",
+                f"Ret ISR: {po.get('withholding_isr_total')}",
+                f"TOTAL: {po.get('total')}",
+            ]
+            ty = box_y + 70
+            for t in totals:
+                text_cmd(cmds, 370, ty, t, 10)
+                ty -= 16
+
+            notes_y = box_y - 8
+            text_cmd(cmds, 50, notes_y, "NOTAS Y TÉRMINOS", 9)
+            for n in notes_lines[:6]:
+                notes_y -= 12
+                text_cmd(cmds, 50, notes_y, n, 8)
+
+        generated_label = datetime.now(TIMEZONE).strftime("%I:%M %p").lower().replace("am", "a.m.").replace("pm", "p.m.")
+        generated_human = f"Generado: {datetime.now(TIMEZONE).strftime('%d %b %Y')}, {generated_label}"
+        # Footer matches requested brand text/domain
+        cmds += ["0.80 0.80 0.80 rg", "50 46 522 1 re f", "0 0 0 rg"]
+        text_cmd(cmds, 50, 34, generated_human, 8)
+        text_cmd(cmds, 250, 34, "Creado con QFinance", 8)
+        text_cmd(cmds, 470, 34, "quantumgrupo.mx", 8)
+        text_cmd(cmds, 548, 34, f"{page_no}", 8)
+        page_no += 1
+        page_streams.append("\n".join(cmds).encode("latin-1", errors="replace"))
+
+    objects: List[bytes] = []
+    info_obj_num = 3
+    objects.append(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+
+    page_count = len(page_streams)
+    page_obj_start = 4
+    content_obj_start = page_obj_start + page_count
+
+    kids = " ".join([f"{page_obj_start + idx} 0 R" for idx in range(page_count)])
+    objects.append(f"2 0 obj << /Type /Pages /Kids [{kids}] /Count {page_count} >> endobj\n".encode("latin-1"))
+
+    for idx in range(page_count):
+        page_obj_num = page_obj_start + idx
+        content_obj_num = content_obj_start + idx
+        objects.append(
+            f"{page_obj_num} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {content_obj_start + page_count} 0 R >> >> /Contents {content_obj_num} 0 R >> endobj\n".encode("latin-1")
+        )
+
+    for idx, stream in enumerate(page_streams):
+        content_obj_num = content_obj_start + idx
+        objects.append(
+            f"{content_obj_num} 0 obj << /Length {len(stream)} >> stream\n".encode("latin-1") + stream + b"\nendstream endobj\n"
+        )
+
+    font_obj_num = content_obj_start + page_count
+    objects.append(f"{font_obj_num} 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n".encode("latin-1"))
+    objects.insert(2, b"3 0 obj << /Creator (QFinance) /Producer (QFinance | quantumgrupo.mx) >> endobj\n")
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(pdf))
+        pdf.extend(obj)
+    xref_start = len(pdf)
+    pdf.extend(f"xref\n0 {len(offsets)}\n".encode("latin-1"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        pdf.extend(f"{off:010d} 00000 n \n".encode("latin-1"))
+    pdf.extend(f"trailer << /Size {len(offsets)} /Root 1 0 R /Info {info_obj_num} 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode("latin-1"))
     return bytes(pdf)
 
 # ========================= AUTH ROUTES =========================
@@ -2233,6 +2685,628 @@ async def get_budget_availability(
     return availability
 
 
+def _po_lock(po_id: str):
+    lock_map = getattr(app.state, "po_locks", None)
+    if lock_map is None:
+        lock_map = {}
+        app.state.po_locks = lock_map
+    if po_id not in lock_map:
+        lock_map[po_id] = asyncio.Lock()
+    return lock_map[po_id]
+
+
+async def _sync_po_odoo_stub(po: dict) -> dict:
+    mode = (os.getenv("ODOO_MODE", "stub") or "stub").strip().lower()
+    existing = await db.odoo_sync_purchase_orders.find_one({"purchase_order_id": po.get("id")}, {"_id": 0})
+    if existing:
+        return existing
+    if mode == "live":
+        raise HTTPException(status_code=501, detail={"code": "odoo_live_not_enabled", "message": "Odoo live not enabled yet"})
+    seed = abs(zlib.crc32((po.get("external_id") or "").encode("utf-8"))) % 100000 + 1000
+    doc = {
+        "id": str(uuid.uuid4()),
+        "purchase_order_id": po.get("id"),
+        "external_id": po.get("external_id"),
+        "odoo_purchase_order_id": seed,
+        "odoo_name": f"RFQ{str(seed)[-5:]}",
+        "state": "purchase",
+        "payload_hash": str(abs(zlib.crc32(json.dumps(po, sort_keys=True, default=str).encode("utf-8")))),
+        "stub_seed": seed,
+        "last_sync_mode": "stub",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.odoo_sync_purchase_orders.insert_one(doc)
+    return doc
+
+
+async def ensure_partial_indexes_for_movements():
+    index_name = "uq_movements_po_line_origin_event_exists"
+    expected_keys = [("purchase_order_line_id", ASCENDING), ("origin_event", ASCENDING)]
+    expected_partial = {
+        "purchase_order_line_id": {"$type": "string"},
+        "origin_event": {"$type": "string"},
+    }
+    try:
+        existing = await db.movements.index_information()
+    except Exception:
+        existing = {}
+
+    legacy_names = ["purchase_order_line_id_1_origin_event_1"]
+    for legacy in legacy_names:
+        if legacy in existing:
+            try:
+                await db.movements.drop_index(legacy)
+            except Exception:
+                pass
+
+    current = existing.get(index_name)
+    if current:
+        same_key = list(current.get("key", [])) == expected_keys
+        same_unique = bool(current.get("unique"))
+        same_partial = (current.get("partialFilterExpression") or {}) == expected_partial
+        if not (same_key and same_unique and same_partial):
+            try:
+                await db.movements.drop_index(index_name)
+            except Exception:
+                pass
+
+    await db.movements.create_index(expected_keys, name=index_name, unique=True, partialFilterExpression=expected_partial)
+
+
+async def ensure_purchase_order_indexes():
+    await db.purchase_orders.create_index([("company_id", ASCENDING), ("external_id", ASCENDING)], unique=True)
+
+    index_name = "uq_purchase_orders_folio_exists"
+    expected_keys = [("folio", ASCENDING)]
+    expected_partial = {"folio": {"$type": "string"}}
+    try:
+        existing = await db.purchase_orders.index_information()
+    except Exception:
+        existing = {}
+
+    # Cleanup legacy/incorrect folio indexes that can break startup with legacy nulls
+    for name in ["folio_1", index_name]:
+        info = existing.get(name)
+        if not info:
+            continue
+        same_key = list(info.get("key", [])) == expected_keys
+        same_unique = bool(info.get("unique"))
+        same_partial = (info.get("partialFilterExpression") or {}) == expected_partial
+        if not (same_key and same_unique and same_partial):
+            try:
+                await db.purchase_orders.drop_index(name)
+            except Exception:
+                pass
+
+    await db.purchase_orders.create_index(expected_keys, unique=True, name=index_name, partialFilterExpression=expected_partial)
+
+
+def canonicalize_oc_folio(raw_folio: Optional[str]) -> str:
+    folio = (raw_folio or "").strip().upper()
+    if not folio:
+        return "N/A"
+    if folio.startswith("OC-"):
+        folio = folio[3:]
+    if folio.startswith("OC") and len(folio) > 2:
+        body = folio[2:]
+        if body.isdigit():
+            return f"OC{int(body):06d}"
+    if folio.isdigit():
+        return f"OC{int(folio):06d}"
+    return folio
+
+
+def structured_error(code: str, message: str, details: Optional[Dict[str, Any]] = None) -> dict:
+    payload = {"code": code, "message": message}
+    if details:
+        payload["details"] = to_json_safe(details)
+    return payload
+
+
+async def build_purchase_order_budget_summary(po: dict, approval_amount: Optional[Decimal] = None) -> dict:
+    order_date = date_parser.parse(po.get("order_date")) if po.get("order_date") else datetime.now(timezone.utc)
+    po_total = money_dec(po.get("total", 0)).quantize(TWO_DECIMALS)
+    approved_total = money_dec(po.get("approved_amount_total", 0)).quantize(TWO_DECIMALS)
+    pending_total = (po_total - approved_total).quantize(TWO_DECIMALS)
+    if pending_total < 0:
+        pending_total = Decimal("0.00")
+    preview_partial = money_dec(approval_amount) if approval_amount is not None else pending_total
+    if preview_partial < 0:
+        preview_partial = Decimal("0.00")
+
+    partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(2000)
+    partida_map = {str(p.get("codigo")): p.get("nombre") for p in partida_docs}
+
+    ratio_partial = (preview_partial / po_total) if po_total > 0 else Decimal("0")
+    ratio_full = (pending_total / po_total) if po_total > 0 else Decimal("0")
+
+    by_partida = []
+    aggregate = {
+        "budget_total": Decimal("0.00"),
+        "executed_current": Decimal("0.00"),
+        "available_current": Decimal("0.00"),
+        "available_after_partial": Decimal("0.00"),
+        "available_after_full": Decimal("0.00"),
+    }
+
+    lines_by_partida: Dict[str, Decimal] = {}
+    for line in po.get("lines", []):
+        partida = str(line.get("partida_codigo") or "")
+        if not partida:
+            continue
+        lines_by_partida[partida] = (lines_by_partida.get(partida, Decimal("0.00")) + money_dec(line.get("line_total", 0))).quantize(TWO_DECIMALS)
+
+    for partida, line_total in sorted(lines_by_partida.items()):
+        approved_line = (line_total * (approved_total / po_total)).quantize(TWO_DECIMALS) if po_total > 0 else Decimal("0.00")
+        pending_line = (line_total - approved_line).quantize(TWO_DECIMALS)
+        partial_line = (line_total * ratio_partial).quantize(TWO_DECIMALS)
+        full_line = (line_total * ratio_full).quantize(TWO_DECIMALS)
+
+        if partida in {"400", "401", "402", "403", "404"}:
+            by_partida.append({
+                "partida_codigo": partida,
+                "partida_nombre": partida_map.get(partida),
+                "budget_validation_applies": False,
+                "budget_total": None,
+                "executed_current": None,
+                "available_current": None,
+                "po_committed_current": None,
+                "oc_line_total": str(line_total),
+                "approved_accumulated_line": str(approved_line),
+                "pending_line_amount": str(pending_line if pending_line > 0 else Decimal("0.00")),
+                "available_after_partial_line": None,
+                "available_after_full_line": None,
+                "scope": "income",
+            })
+            continue
+
+        av = await compute_budget_availability(po.get("project_id"), partida, order_date)
+        b_total = money_dec(av.get("budget_total_amount", 0)).quantize(TWO_DECIMALS) if av.get("budget_total_amount") is not None else Decimal("0.00")
+        b_exec = money_dec(av.get("executed_total", 0)).quantize(TWO_DECIMALS) if av.get("executed_total") is not None else Decimal("0.00")
+        b_avail = money_dec(av.get("remaining_total", 0)).quantize(TWO_DECIMALS) if av.get("remaining_total") is not None else Decimal("0.00")
+        after_partial = (b_avail - partial_line).quantize(TWO_DECIMALS)
+        after_full = (b_avail - pending_line).quantize(TWO_DECIMALS)
+
+        aggregate["budget_total"] += b_total
+        aggregate["executed_current"] += b_exec
+        aggregate["available_current"] += b_avail
+        aggregate["available_after_partial"] += after_partial
+        aggregate["available_after_full"] += after_full
+
+        by_partida.append({
+            "partida_codigo": partida,
+            "partida_nombre": partida_map.get(partida),
+            "budget_validation_applies": bool(av.get("budget_validation_applies", True)),
+            "scope": av.get("effective_scope") or "total",
+            "budget_total": str(b_total),
+            "executed_current": str(b_exec),
+            "available_current": str(b_avail),
+            "po_committed_current": str(line_total),
+            "oc_line_total": str(line_total),
+            "approved_accumulated_line": str(approved_line),
+            "pending_line_amount": str(pending_line if pending_line > 0 else Decimal("0.00")),
+            "available_after_partial_line": str(after_partial),
+            "available_after_full_line": str(after_full),
+        })
+
+    summary = {
+        "scope": "total",
+        "budget_total": str(aggregate["budget_total"].quantize(TWO_DECIMALS)),
+        "executed_current": str(aggregate["executed_current"].quantize(TWO_DECIMALS)),
+        "available_current": str(aggregate["available_current"].quantize(TWO_DECIMALS)),
+        "po_total": str(po_total),
+        "approved_accumulated": str(approved_total),
+        "pending_amount": str(pending_total),
+        "preview_partial_amount": str(preview_partial.quantize(TWO_DECIMALS)),
+        "available_after_partial": str(aggregate["available_after_partial"].quantize(TWO_DECIMALS)),
+        "available_after_full": str(aggregate["available_after_full"].quantize(TWO_DECIMALS)),
+        "by_partida": by_partida,
+    }
+    # backward-compatible aliases already used by frontend
+    summary.update({
+        "presupuesto_total": summary["budget_total"],
+        "ejecutado_actual": summary["executed_current"],
+        "disponible_actual": summary["available_current"],
+        "monto_oc": summary["po_total"],
+        "monto_aprobado_acumulado": summary["approved_accumulated"],
+        "monto_pendiente_oc": summary["pending_amount"],
+        "monto_a_aprobar": summary["preview_partial_amount"],
+        "restante_proyectado_si_aprueba": summary["available_after_full"],
+    })
+    return summary
+
+
+async def generate_purchase_order_folio() -> str:
+    counter = await db.counters.find_one_and_update(
+        {"_id": "purchase_order_folio"},
+        {"$inc": {"seq": 1}, "$setOnInsert": {"created_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    seq = int(counter.get("seq", 1))
+    return f"OC{seq:06d}"
+
+
+def normalize_purchase_order_response(doc: dict) -> dict:
+    normalized = sanitize_mongo_document(doc)
+    normalized.setdefault("folio", normalized.get("external_id"))
+    normalized.setdefault("external_id", normalized.get("folio"))
+    return normalized
+
+
+@api_router.post("/budgets/availability/oc-preview")
+async def oc_budget_preview(payload: OCBudgetPreviewInput, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+    project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail={"code": "project_not_found", "message": "Proyecto no encontrado"})
+    enforce_company_access(current_user, project.get("empresa_id"))
+    target_date = parse_date_tijuana(payload.order_date)
+    items = []
+    grouped_requested: Dict[str, Decimal] = {}
+    for line in payload.lines:
+        partida = str(line.get("partida_codigo"))
+        requested = parse_amount_like(line.get("requested_amount", "0"), "requested_amount")
+        grouped_requested[partida] = (grouped_requested.get(partida, Decimal("0.00")) + requested).quantize(TWO_DECIMALS)
+    for partida, requested in grouped_requested.items():
+        if partida in {"400", "401", "402", "403", "404"}:
+            items.append({"partida_codigo": partida, "requested_amount": str(requested), "budget_validation_applies": False})
+            continue
+        av = await compute_budget_availability(payload.project_id, partida, target_date)
+        remaining_total = money_dec(av.get("remaining_total", 0)) if av.get("remaining_total") is not None else Decimal("0")
+        projected_remaining_total = (remaining_total - requested).quantize(TWO_DECIMALS)
+        remaining_annual = money_dec(av.get("remaining_annual", 0)) if av.get("remaining_annual") is not None else None
+        projected_remaining_annual = (remaining_annual - requested).quantize(TWO_DECIMALS) if remaining_annual is not None else None
+        remaining_monthly = money_dec(av.get("remaining_monthly", 0)) if av.get("remaining_monthly") is not None else None
+        projected_remaining_monthly = (remaining_monthly - requested).quantize(TWO_DECIMALS) if remaining_monthly is not None else None
+        exceeded = []
+        if projected_remaining_total < 0:
+            exceeded.append("total")
+        if projected_remaining_annual is not None and projected_remaining_annual < 0:
+            exceeded.append("annual")
+        if projected_remaining_monthly is not None and projected_remaining_monthly < 0:
+            exceeded.append("monthly")
+        items.append({
+            "partida_codigo": partida,
+            "requested_amount": str(requested),
+            "period": f"{target_date.year:04d}-{target_date.month:02d}",
+            "budget_total_defined": bool(av.get("budget_total_amount") is not None),
+            "budget_annual_defined": bool(av.get("annual_budget") is not None),
+            "budget_monthly_defined": bool(av.get("monthly_budget") is not None),
+            "budget_total": av.get("budget_total_amount"),
+            "executed_total": av.get("executed_total"),
+            "remaining_total_current": str(remaining_total),
+            "remaining_annual_current": str(remaining_annual) if remaining_annual is not None else None,
+            "remaining_monthly_current": str(remaining_monthly) if remaining_monthly is not None else None,
+            "projected_remaining_total": str(projected_remaining_total),
+            "projected_remaining_annual": str(projected_remaining_annual) if projected_remaining_annual is not None else None,
+            "projected_remaining_monthly": str(projected_remaining_monthly) if projected_remaining_monthly is not None else None,
+            "buckets_exceeded": exceeded,
+            "can_proceed_workflow": True,
+            "can_post_payment": len(exceeded) == 0,
+        })
+
+    summary_budget = Decimal("0.00")
+    summary_executed = Decimal("0.00")
+    summary_available = Decimal("0.00")
+    summary_requested = Decimal("0.00")
+    summary_projected = Decimal("0.00")
+    for item in items:
+        if item.get("budget_validation_applies") is False:
+            continue
+        summary_budget += money_dec(item.get("budget_total") or 0)
+        summary_executed += money_dec(item.get("executed_total") or 0)
+        summary_available += money_dec(item.get("remaining_total_current") or 0)
+        summary_requested += money_dec(item.get("requested_amount") or 0)
+        summary_projected += money_dec(item.get("projected_remaining_total") or 0)
+    summary = {
+        "budget_total": str(summary_budget.quantize(TWO_DECIMALS)),
+        "executed_current": str(summary_executed.quantize(TWO_DECIMALS)),
+        "available_current": str(summary_available.quantize(TWO_DECIMALS)),
+        "po_preview_amount": str(summary_requested.quantize(TWO_DECIMALS)),
+        "available_after_preview": str(summary_projected.quantize(TWO_DECIMALS)),
+        "presupuesto_total": str(summary_budget.quantize(TWO_DECIMALS)),
+        "ejecutado_actual": str(summary_executed.quantize(TWO_DECIMALS)),
+        "disponible_actual": str(summary_available.quantize(TWO_DECIMALS)),
+        "monto_solicitado": str(summary_requested.quantize(TWO_DECIMALS)),
+        "restante_proyectado": str(summary_projected.quantize(TWO_DECIMALS)),
+    }
+    return {
+        "project_id": payload.project_id,
+        "by_partida": items,
+        "lines": items,
+        "summary": summary,
+    }
+
+
+@api_router.post("/purchase-orders")
+async def create_purchase_order(payload: PurchaseOrderCreate, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+    project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail={"code": "project_not_found", "message": "Proyecto no encontrado"})
+    enforce_company_access(current_user, project.get("empresa_id"))
+    folio = (payload.external_id or "").strip()
+    if folio:
+        existing = await db.purchase_orders.find_one({"company_id": project.get("empresa_id"), "folio": folio}, {"_id": 0})
+    else:
+        existing = None
+    lines = [calculate_oc_line(line) for line in payload.lines]
+    totals = summarize_oc_lines(lines)
+    po_base = {
+        "folio": folio,
+        "external_id": folio,
+        "invoice_folio": (payload.supplier_invoice_folio or payload.invoice_folio or "").strip()[:100] or None,
+        "company_id": project.get("empresa_id"),
+        "project_id": payload.project_id,
+        "vendor_name": payload.vendor_name,
+        "vendor_rfc": payload.vendor_rfc,
+        "vendor_email": payload.vendor_email,
+        "vendor_phone": payload.vendor_phone,
+        "vendor_address": payload.vendor_address,
+        "currency": payload.currency.value,
+        "exchange_rate": str(parse_amount_like(payload.exchange_rate or 1, "exchange_rate")),
+        "order_date": parse_date_tijuana(payload.order_date).isoformat(),
+        "planned_date": parse_date_tijuana(payload.planned_date).isoformat() if payload.planned_date else None,
+        "notes": payload.notes,
+        "payment_terms": payload.payment_terms,
+        "fob": payload.fob,
+        "lines": lines,
+        **totals,
+    }
+    payload_hash = str(abs(zlib.crc32(json.dumps(po_base, sort_keys=True, default=str).encode("utf-8"))))
+    if existing:
+        if existing.get("payload_hash") == payload_hash:
+            return {"purchase_order": sanitize_mongo_document(existing), "idempotent": True}
+        if existing.get("status") in {PurchaseOrderStatus.DRAFT.value, PurchaseOrderStatus.REJECTED.value}:
+            raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "OC existente con payload distinto; use PUT"})
+        raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "OC existente no editable"})
+
+    if not folio:
+        folio = await generate_purchase_order_folio()
+        po_base["folio"] = folio
+        po_base["external_id"] = folio
+
+    po = {
+        "id": str(uuid.uuid4()),
+        **po_base,
+        "payload_hash": payload_hash,
+        "status": PurchaseOrderStatus.DRAFT.value,
+        "budget_gate_status": BudgetGateStatus.NOT_CHECKED.value,
+        "posting_status": PostingStatus.NOT_POSTED.value,
+        "created_by_user_id": current_user["user_id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.purchase_orders.insert_one(po)
+    await log_audit(current_user, "CREATE", "purchase_orders", po["id"], {"folio": po["folio"], "external_id": po["external_id"]})
+    return {"purchase_order": normalize_purchase_order_response(po)}
+
+
+@api_router.put("/purchase-orders/{po_id}")
+async def update_purchase_order(po_id: str, payload: PurchaseOrderCreate, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+    po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
+    enforce_company_access(current_user, po.get("company_id"))
+    if po.get("status") not in {PurchaseOrderStatus.DRAFT.value, PurchaseOrderStatus.REJECTED.value}:
+        raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "Solo se puede editar DRAFT/REJECTED"})
+    lines = [calculate_oc_line(line) for line in payload.lines]
+    totals = summarize_oc_lines(lines)
+    update_doc = {
+        "invoice_folio": (payload.supplier_invoice_folio or payload.invoice_folio or "").strip()[:100] or None,
+        "vendor_name": payload.vendor_name,
+        "vendor_rfc": payload.vendor_rfc,
+        "vendor_email": payload.vendor_email,
+        "vendor_phone": payload.vendor_phone,
+        "vendor_address": payload.vendor_address,
+        "order_date": parse_date_tijuana(payload.order_date).isoformat(),
+        "planned_date": parse_date_tijuana(payload.planned_date).isoformat() if payload.planned_date else None,
+        "lines": lines,
+        **totals,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "budget_gate_status": BudgetGateStatus.NOT_CHECKED.value,
+        "posting_status": PostingStatus.NOT_POSTED.value,
+    }
+    await db.purchase_orders.update_one({"id": po_id}, {"$set": update_doc})
+    saved = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    return {"purchase_order": normalize_purchase_order_response(saved)}
+
+
+@api_router.post("/purchase-orders/{po_id}/submit")
+async def submit_purchase_order(po_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+    po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
+    enforce_company_access(current_user, po.get("company_id"))
+    if po.get("status") not in {PurchaseOrderStatus.DRAFT.value, PurchaseOrderStatus.REJECTED.value}:
+        raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "Estado inválido para submit"})
+    gate = await evaluate_oc_budget_gate(po)
+    await db.purchase_orders.update_one({"id": po_id}, {"$set": {
+        "status": PurchaseOrderStatus.PENDING_APPROVAL.value,
+        "budget_gate_status": BudgetGateStatus.OK.value if gate.get("ok") else BudgetGateStatus.EXCEPTION_PENDING.value,
+        "budget_check_snapshot_json": gate,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }})
+    await ensure_pending_approval(
+        approval_type=ApprovalType.PURCHASE_ORDER_WORKFLOW,
+        company_id=po.get("company_id"),
+        project_id=po.get("project_id"),
+        requested_by=current_user["user_id"],
+        purchase_order_id=po_id,
+        dedupe_key=f"purchase_order_workflow:{po_id}",
+        metadata={"folio": po.get("folio") or po.get("external_id"), "purchase_order_id": po_id},
+    )
+    await log_audit(current_user, "SUBMIT", "purchase_orders", po_id, {"status": PurchaseOrderStatus.PENDING_APPROVAL.value})
+    saved = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    return {"purchase_order": normalize_purchase_order_response(saved)}
+
+
+@api_router.post("/purchase-orders/{po_id}/approve")
+async def approve_purchase_order(po_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+    lock = _po_lock(po_id)
+    async with lock:
+        po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+        if not po:
+            raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
+        enforce_company_access(current_user, po.get("company_id"))
+        if po.get("posting_status") == PostingStatus.POSTED.value:
+            return {"purchase_order": normalize_purchase_order_response(po), "idempotent": True}
+        if po.get("status") not in {PurchaseOrderStatus.PENDING_APPROVAL.value, PurchaseOrderStatus.DRAFT.value}:
+            raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "Estado inválido para approve"})
+
+        gate = await evaluate_oc_budget_gate(po)
+        if not gate.get("ok"):
+            dedupe = f"po_overbudget:{po['id']}:{','.join(sorted({e.get('partida_codigo','') for e in gate.get('exceeded', [])}))}"
+            approval = await ensure_pending_approval(
+                approval_type=ApprovalType.OVERBUDGET_EXCEPTION,
+                company_id=po.get("company_id"),
+                project_id=po.get("project_id"),
+                requested_by=current_user["user_id"],
+                dedupe_key=dedupe,
+                metadata={"purchase_order_id": po["id"], "external_id": po.get("external_id"), "exceeded": gate.get("exceeded")},
+            )
+            await db.purchase_orders.update_one({"id": po_id}, {"$set": {
+                "budget_gate_status": BudgetGateStatus.EXCEPTION_PENDING.value,
+                "posting_status": PostingStatus.NOT_POSTED.value,
+                "budget_exception_approval_id": approval.get("id"),
+                "budget_check_snapshot_json": gate,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }})
+            raise HTTPException(status_code=409, detail={"code": "purchase_order_budget_exception", "message": "La orden de compra excede el presupuesto disponible y no puede postearse.", "meta": {"purchase_order_id": po_id, "approval_request_id": approval.get("id"), "buckets_exceeded": gate.get("exceeded")}})
+
+        movement_ids = []
+        for line in po.get("lines", []):
+            dedupe_key = f"{po_id}:{line.get('id')}:OC_APPROVE"
+            existing_mv = await db.movements.find_one({"purchase_order_line_id": line.get("id"), "origin_event": "OC_APPROVE"}, {"_id": 0})
+            if existing_mv:
+                movement_ids.append(existing_mv.get("id"))
+                continue
+            movement_doc = {
+                "id": str(uuid.uuid4()),
+                "project_id": po.get("project_id"),
+                "partida_codigo": line.get("partida_codigo"),
+                "provider_id": None,
+                "date": po.get("order_date"),
+                "currency": po.get("currency"),
+                "amount_original": float(money_dec(line.get("line_total", 0))),
+                "exchange_rate": float(decimal_from_value(po.get("exchange_rate", 1), "exchange_rate")),
+                "amount_mxn": float(money_dec(line.get("line_total", 0))),
+                "reference": po.get("external_id"),
+                "description": f"OC {po.get('external_id')} línea {line.get('line_no')}",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": current_user["user_id"],
+                "status": MovementStatus.POSTED.value,
+                "purchase_order_id": po_id,
+                "purchase_order_line_id": line.get("id"),
+                "origin_event": "OC_APPROVE",
+                "idempotency_key": dedupe_key,
+                "is_active": True,
+            }
+            await db.movements.insert_one(movement_doc)
+            await log_audit(current_user, "CREATE", "movements", movement_doc["id"], {"origin_event": "OC_APPROVE", "purchase_order_id": po_id})
+            movement_ids.append(movement_doc["id"])
+
+        odoo_sync = await _sync_po_odoo_stub(po)
+        await db.purchase_orders.update_one({"id": po_id}, {"$set": {
+            "status": PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value,
+            "approved_by_user_id": current_user["user_id"],
+            "approved_at": datetime.now(timezone.utc).isoformat(),
+            "budget_gate_status": BudgetGateStatus.OK.value,
+            "posting_status": PostingStatus.POSTED.value,
+            "budget_check_snapshot_json": gate,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }})
+        await db.authorizations.update_many(
+            {"approval_type": ApprovalType.PURCHASE_ORDER_WORKFLOW.value, "purchase_order_id": po_id, "status": AuthorizationStatus.PENDING.value},
+            {"$set": {"status": AuthorizationStatus.APPROVED.value, "decision_by": current_user["user_id"], "decision_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        saved = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+        await log_audit(current_user, "APPROVE", "purchase_orders", po_id, {"movement_ids": movement_ids, "odoo_purchase_order_id": odoo_sync.get("odoo_purchase_order_id")})
+        return {"purchase_order": normalize_purchase_order_response(saved), "movement_ids": movement_ids, "odoo": sanitize_mongo_document(odoo_sync)}
+
+
+@api_router.post("/purchase-orders/{po_id}/reject")
+async def reject_purchase_order(po_id: str, payload: PurchaseOrderRejectInput, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+    lock = _po_lock(po_id)
+    async with lock:
+        po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+        if not po:
+            raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
+        enforce_company_access(current_user, po.get("company_id"))
+        if po.get("status") != PurchaseOrderStatus.PENDING_APPROVAL.value:
+            raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "Estado inválido para reject"})
+        if not payload.reason.strip():
+            raise HTTPException(status_code=422, detail={"code": "rejection_reason_required", "message": "reason es obligatorio"})
+        await db.purchase_orders.update_one({"id": po_id}, {"$set": {"status": PurchaseOrderStatus.REJECTED.value, "rejected_by_user_id": current_user["user_id"], "rejected_at": datetime.now(timezone.utc).isoformat(), "rejection_reason": payload.reason.strip(), "updated_at": datetime.now(timezone.utc).isoformat()}})
+        await db.authorizations.update_many(
+            {"approval_type": ApprovalType.PURCHASE_ORDER_WORKFLOW.value, "purchase_order_id": po_id, "status": AuthorizationStatus.PENDING.value},
+            {"$set": {"status": AuthorizationStatus.REJECTED.value, "decision_by": current_user["user_id"], "decision_at": datetime.now(timezone.utc).isoformat(), "comment": payload.reason.strip()}},
+        )
+        await log_audit(current_user, "REJECT", "purchase_orders", po_id, {"reason": payload.reason.strip()})
+        saved = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+        return {"purchase_order": normalize_purchase_order_response(saved)}
+
+
+@api_router.delete("/purchase-orders/{po_id}")
+async def cancel_purchase_order(po_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS))):
+    lock = _po_lock(po_id)
+    async with lock:
+        po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+        if not po:
+            raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
+        enforce_company_access(current_user, po.get("company_id"))
+        if po.get("status") == PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value:
+            raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "No se puede cancelar OC aprobada"})
+        if po.get("status") not in {PurchaseOrderStatus.DRAFT.value, PurchaseOrderStatus.REJECTED.value, PurchaseOrderStatus.PENDING_APPROVAL.value}:
+            raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "Estado inválido para cancelar"})
+        await db.purchase_orders.update_one({"id": po_id}, {"$set": {"status": PurchaseOrderStatus.CANCELLED.value, "cancelled_by_user_id": current_user["user_id"], "cancelled_at": datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()}})
+        await log_audit(current_user, "CANCEL", "purchase_orders", po_id, {})
+        return {"message": "OC cancelada"}
+
+
+@api_router.get("/purchase-orders")
+async def list_purchase_orders(status: Optional[str] = None, project_id: Optional[str] = None, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS, UserRole.DIRECTOR))):
+    query = {}
+    if status:
+        query["status"] = status
+    if project_id:
+        query["project_id"] = project_id
+    rows = await db.purchase_orders.find(query, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    out = []
+    for row in rows:
+        if has_company_access(current_user, row.get("company_id")):
+            out.append(normalize_purchase_order_response(row))
+    return out
+
+
+@api_router.get("/purchase-orders/{po_id}")
+async def get_purchase_order(po_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS, UserRole.DIRECTOR))):
+    po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
+    enforce_company_access(current_user, po.get("company_id"))
+    return normalize_purchase_order_response(po)
+
+
+@api_router.get("/purchase-orders/{po_id}/pdf")
+async def purchase_order_pdf(po_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS, UserRole.DIRECTOR))):
+    po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
+    enforce_company_access(current_user, po.get("company_id"))
+    project = await db.projects.find_one({"id": po.get("project_id")}, {"_id": 0}) if po.get("project_id") else None
+    company_id = po.get("company_id") or (project or {}).get("empresa_id")
+    empresa = await db.empresas.find_one({"id": company_id}, {"_id": 0}) if company_id else None
+    render_payload = {**po, "company_name": (empresa or {}).get("nombre"), "project_name": (project or {}).get("name"), "project_code": (project or {}).get("code")}
+    logo_path = os.getenv("QF_OC_LOGO_PATH")
+    if logo_path and not Path(logo_path).exists():
+        logger.warning("QF_OC_LOGO_PATH no existe: %s", logo_path)
+    pdf_bytes = render_purchase_order_pdf(render_payload)
+    await log_audit(current_user, "PDF", "purchase_orders", po_id, {"folio": po.get("folio") or po.get("external_id")})
+    filename = oc_pdf_filename(po.get("folio") or po.get("external_id") or po_id)
+    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"inline; filename={filename}.pdf"})
+
+
 @api_router.post("/budget-requests", status_code=201)
 async def create_budget_request(payload: BudgetRequestBase, current_user: dict = Depends(require_permission(Permission.REQUEST_BUDGETS, Permission.MANAGE_BUDGETS))):
     validate_year_in_range(payload.year)
@@ -2329,6 +3403,10 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     # VALIDACIÓN BLOQUEANTE: partida debe existir en catálogo
     await validate_partida(movement_data.partida_codigo)
     enforce_capture_budget_scope(current_user, movement_data.partida_codigo)
+    if enforce_oc_for_finanzas_egress_enabled() and current_user.get("role") == UserRole.FINANZAS.value and not is_ingresos_partida(movement_data.partida_codigo):
+        raise HTTPException(status_code=403, detail={"code": "egress_manual_forbidden", "message": "FINANZAS no puede capturar egresos manuales; use Órdenes de Compra"})
+    if current_user.get("role") == UserRole.CAPTURA_INGRESOS.value and not is_ingresos_partida(movement_data.partida_codigo):
+        raise HTTPException(status_code=403, detail={"code": "captura_ingresos_only_402_403", "message": "CAPTURA_INGRESOS solo puede registrar ingresos 402/403"})
 
     customer_name = normalize_customer_name(movement_data.customer_name)
     no_provider_flow = str(movement_data.partida_codigo) in NO_PROVIDER_BUDGET_CODES
@@ -2901,6 +3979,79 @@ async def get_authorizations(
     
     enriched_auths = []
     for auth in auths:
+        if auth.get("approval_type") == ApprovalType.PURCHASE_ORDER_WORKFLOW.value and auth.get("purchase_order_id"):
+            po = await db.purchase_orders.find_one({"id": auth.get("purchase_order_id")}, {"_id": 0})
+            if not po:
+                continue
+            if empresa_id and po.get("company_id") != empresa_id:
+                continue
+            if project_id and po.get("project_id") != project_id:
+                continue
+            po_date = date_parser.parse(po.get("order_date")) if po.get("order_date") else None
+            if year and po_date and po_date.year != year:
+                continue
+            if month and po_date and po_date.month != month:
+                continue
+            partidas = sorted({str((line or {}).get("partida_codigo") or "") for line in (po.get("lines") or []) if (line or {}).get("partida_codigo")})
+            auth["movement_details"] = {
+                "date": po.get("order_date"),
+                "empresa_id": po.get("company_id"),
+                "empresa_nombre": empresa_map.get(po.get("company_id"), {}).get("nombre", "N/A"),
+                "project_id": po.get("project_id"),
+                "project_code": project_map.get(po.get("project_id"), {}).get("code", "N/A"),
+                "project_name": project_map.get(po.get("project_id"), {}).get("name", "N/A"),
+                "partida_codigo": ", ".join(partidas) if partidas else None,
+                "partida_nombre": "Partidas OC",
+                "provider_name": po.get("vendor_name") or "N/A",
+                "provider_rfc": po.get("vendor_rfc") or "N/A",
+                "moneda": po.get("currency"),
+                "monto_original": po.get("total"),
+                "tipo_cambio": po.get("exchange_rate"),
+                "monto_mxn": float(po.get("total", 0) or 0),
+                "referencia": po.get("invoice_folio") or po.get("folio") or po.get("external_id"),
+                "descripcion": f"Orden de Compra {po.get('folio') or po.get('external_id')}",
+            }
+            partial_value = auth.get("partial_amount") or po.get("pending_amount")
+            budget_summary = await build_purchase_order_budget_summary(po, money_dec(partial_value) if partial_value is not None else None)
+            auth["purchase_order_details"] = {
+                "id": po.get("id"),
+                "folio": canonicalize_oc_folio(po.get("folio") or po.get("external_id")),
+                "invoice_folio": po.get("invoice_folio"),
+                "status": po.get("status"),
+                "empresa_id": po.get("company_id"),
+                "empresa_nombre": empresa_map.get(po.get("company_id"), {}).get("nombre"),
+                "proyecto_id": po.get("project_id"),
+                "proyecto_nombre": project_map.get(po.get("project_id"), {}).get("name"),
+                "project_id": po.get("project_id"),
+                "project": project_map.get(po.get("project_id"), {}).get("name"),
+                "project_code": project_map.get(po.get("project_id"), {}).get("code"),
+                "company_id": po.get("company_id"),
+                "company": empresa_map.get(po.get("company_id"), {}).get("nombre"),
+                "proveedor_nombre": po.get("vendor_name"),
+                "proveedor_rfc": po.get("vendor_rfc"),
+                "vendor_name": po.get("vendor_name"),
+                "vendor_rfc": po.get("vendor_rfc"),
+                "subtotal": po.get("subtotal_tax_base"),
+                "iva_total": po.get("tax_total"),
+                "ret_isr_total": po.get("withholding_isr_total"),
+                "total": po.get("total"),
+                "totals": {
+                    "subtotal": po.get("subtotal_tax_base"),
+                    "iva": po.get("tax_total"),
+                    "ret_isr": po.get("withholding_isr_total"),
+                    "total": po.get("total"),
+                },
+                "approved_amount_total": po.get("approved_amount_total") or "0.00",
+                "pending_amount": po.get("pending_amount") or po.get("total"),
+            }
+            auth["budget_gate_summary"] = budget_summary
+            auth["budget_preview"] = budget_summary
+            auth["partial_approved_accumulated"] = po.get("approved_amount_total") or "0.00"
+            auth["pending_amount_oc"] = po.get("pending_amount") or po.get("total")
+            auth["next_estimated_impact"] = budget_summary.get("restante_proyectado_si_aprueba")
+            enriched_auths.append(sanitize_mongo_document(auth))
+            continue
+
         movement = None
         if auth.get('movement_id'):
             movement = await db.movements.find_one({"id": auth['movement_id']}, {"_id": 0})
@@ -3004,14 +4155,126 @@ async def resolve_authorization(
 ):
     auth = await db.authorizations.find_one({"id": auth_id}, {"_id": 0})
     if not auth:
-        raise HTTPException(status_code=404, detail="Autorización no encontrada")
-    
-    if auth['status'] != 'pending':
-        raise HTTPException(status_code=400, detail="Autorización ya resuelta")
-    
+        raise HTTPException(status_code=404, detail=structured_error("authorization_not_found", "Autorización no encontrada"))
+
+    if auth.get('status') != 'pending':
+        raise HTTPException(status_code=409, detail=structured_error("authorization_already_resolved", "Autorización ya resuelta", {"status": auth.get("status")}))
+
     # Reject requires notes/motivo
-    if resolution.status == AuthorizationStatus.REJECTED and not resolution.notes:
-        raise HTTPException(status_code=400, detail="Rechazo requiere motivo/notas")
+    if resolution.status == AuthorizationStatus.REJECTED and not (resolution.notes or "").strip():
+        raise HTTPException(status_code=422, detail=structured_error("notes_required_for_rejection", "Rechazo requiere motivo/notas"))
+
+    if auth.get("approval_type") == ApprovalType.PURCHASE_ORDER_WORKFLOW.value and auth.get("purchase_order_id"):
+        po = await db.purchase_orders.find_one({"id": auth.get("purchase_order_id")}, {"_id": 0})
+        if not po:
+            raise HTTPException(status_code=404, detail=structured_error("purchase_order_not_found", "OC no encontrada"))
+        enforce_company_access(current_user, po.get("company_id"))
+
+        po_total = money_dec(po.get("total", 0))
+        already_approved = money_dec(po.get("approved_amount_total", 0))
+        pending_amount = (po_total - already_approved).quantize(TWO_DECIMALS)
+
+        if resolution.status == AuthorizationStatus.REJECTED:
+            await db.authorizations.update_one({"id": auth_id}, {"$set": {
+                "status": AuthorizationStatus.REJECTED.value,
+                "resolved_at": datetime.now(timezone.utc).isoformat(),
+                "resolved_by": current_user["user_id"],
+                "resolved_by_email": current_user["email"],
+                "notes": resolution.notes,
+            }})
+            await db.purchase_orders.update_one({"id": po.get("id")}, {"$set": {"status": PurchaseOrderStatus.REJECTED.value, "rejection_reason": resolution.notes or "", "updated_at": datetime.now(timezone.utc).isoformat()}})
+            await log_audit(current_user, "AUTH_REJECTED", "purchase_orders", po.get("id"), {"reason": resolution.notes})
+            return {"message": "Autorización rejected"}
+
+        partial_amount = money_dec(resolution.partial_amount) if resolution.partial_amount is not None else pending_amount
+        if partial_amount <= 0:
+            raise HTTPException(status_code=422, detail=structured_error("invalid_partial_amount", "Monto parcial debe ser mayor a 0", {"pending_amount": str(pending_amount)}))
+        if partial_amount > pending_amount:
+            raise HTTPException(status_code=422, detail=structured_error("partial_amount_exceeds_pending", "Monto parcial excede saldo pendiente", {"pending_amount": str(pending_amount), "partial_amount": str(partial_amount)}))
+
+        approve_event_id = str(uuid.uuid4())
+        ratio = (partial_amount / po_total) if po_total > 0 else Decimal("0")
+        created_movements = []
+        for line in po.get("lines", []):
+            line_total = money_dec(line.get("line_total", 0))
+            line_partial = (line_total * ratio).quantize(TWO_DECIMALS)
+            if line_partial <= 0:
+                continue
+            origin_event = f"OC_APPROVE_PARTIAL:{approve_event_id}"
+            existing_mv = await db.movements.find_one({"purchase_order_line_id": line.get("id"), "origin_event": origin_event}, {"_id": 0})
+            if existing_mv:
+                created_movements.append(existing_mv.get("id"))
+                continue
+            movement_doc = {
+                "id": str(uuid.uuid4()),
+                "project_id": po.get("project_id"),
+                "partida_codigo": line.get("partida_codigo"),
+                "provider_id": None,
+                "date": po.get("order_date"),
+                "currency": po.get("currency"),
+                "amount_original": float(line_partial),
+                "exchange_rate": float(decimal_from_value(po.get("exchange_rate", 1), "exchange_rate")),
+                "amount_mxn": float(line_partial),
+                "reference": po.get("invoice_folio") or po.get("folio") or po.get("external_id"),
+                "description": f"OC parcial {po.get('folio') or po.get('external_id')} línea {line.get('line_no')}",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": current_user["user_id"],
+                "status": MovementStatus.POSTED.value,
+                "purchase_order_id": po.get("id"),
+                "purchase_order_line_id": line.get("id"),
+                "origin_event": origin_event,
+                "is_active": True,
+            }
+            await db.movements.insert_one(movement_doc)
+            created_movements.append(movement_doc["id"])
+
+        new_approved_total = (already_approved + partial_amount).quantize(TWO_DECIMALS)
+        new_pending = (po_total - new_approved_total).quantize(TWO_DECIMALS)
+        new_status = PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value if new_pending <= 0 else "partially_approved"
+        posting_status = PostingStatus.POSTED.value if new_pending <= 0 else "partially_posted"
+
+        await db.purchase_orders.update_one({"id": po.get("id")}, {"$set": {
+            "approved_amount_total": str(new_approved_total),
+            "pending_amount": str(new_pending if new_pending > 0 else Decimal("0.00")),
+            "status": new_status,
+            "posting_status": posting_status,
+            "approved_by_user_id": current_user["user_id"],
+            "approved_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }})
+        await db.authorizations.update_one({"id": auth_id}, {"$set": {
+            "status": AuthorizationStatus.APPROVED.value,
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+            "resolved_by": current_user["user_id"],
+            "resolved_by_email": current_user["email"],
+            "notes": resolution.notes,
+            "partial_amount": str(partial_amount),
+            "approval_event_id": approve_event_id,
+            "movement_ids": created_movements,
+        }})
+        if new_pending > 0:
+            await ensure_pending_approval(
+                approval_type=ApprovalType.PURCHASE_ORDER_WORKFLOW,
+                company_id=po.get("company_id"),
+                project_id=po.get("project_id"),
+                requested_by=current_user["user_id"],
+                purchase_order_id=po.get("id"),
+                dedupe_key=f"purchase_order_workflow:{po.get('id')}:{str(new_pending)}",
+                metadata={"folio": po.get("folio") or po.get("external_id"), "purchase_order_id": po.get("id"), "pending_amount": str(new_pending)},
+            )
+
+        updated_po = await db.purchase_orders.find_one({"id": po.get("id")}, {"_id": 0})
+        budget_summary = await build_purchase_order_budget_summary(updated_po, new_pending if new_pending > 0 else Decimal("0.00"))
+        await log_audit(current_user, "AUTH_APPROVED", "purchase_orders", po.get("id"), {"partial_amount": str(partial_amount), "approved_amount_total": str(new_approved_total), "pending_amount": str(new_pending), "movement_ids": created_movements})
+        return {
+            "message": "Autorización approved",
+            "purchase_order_id": po.get("id"),
+            "approved_amount": str(partial_amount),
+            "approved_amount_total": str(new_approved_total),
+            "pending_amount": str(new_pending if new_pending > 0 else Decimal("0.00")),
+            "movement_ids": created_movements,
+            "budget_gate_summary": budget_summary,
+        }
     
     update_data = {
         "status": resolution.status.value,
@@ -4382,6 +5645,9 @@ async def setup_indexes():
     await db.users.create_index([("email", ASCENDING)], unique=True)
     await db.users.create_index([("name", ASCENDING)], unique=True)
     await db.budget_plans.create_index([("project_id", ASCENDING), ("partida_codigo", ASCENDING)], unique=True)
+    await ensure_purchase_order_indexes()
+    await ensure_partial_indexes_for_movements()
+    await db.odoo_sync_purchase_orders.create_index([("purchase_order_id", ASCENDING)], unique=True)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
