@@ -1690,33 +1690,105 @@ def _oc_numeric_display(folio: str) -> str:
 
 
 def oc_pdf_filename(raw_folio: Optional[str]) -> str:
-    normalized = canonicalize_oc_folio(raw_folio)
-    if normalized == "N/A":
+    base = str(raw_folio or "").strip()
+    if not base:
         return "OC-SIN-FOLIO"
-    if normalized.startswith("OC"):
-        normalized = normalized[2:]
-    normalized = normalized.lstrip("-")
-    return f"OC-{normalized}" if normalized else "OC-SIN-FOLIO"
+    base = re.sub(r"[^A-Za-z0-9_-]", "-", base)
+    base = re.sub(r"-+", "-", base).strip("-")
+    if not base:
+        return "OC-SIN-FOLIO"
+
+    upper = base.upper()
+    if upper.startswith("OC-"):
+        return f"OC-{base[3:]}"
+    if upper.startswith("OC"):
+        return f"OC-{base}"
+    return f"OC-{base}"
+
+
+def build_purchase_order_pdf_payload(po: dict) -> dict:
+    folio = canonicalize_oc_folio(po.get("folio") or po.get("external_id"))
+    order_date = _pdf_format_date_local(po.get("order_date"), "%Y-%m-%d")
+    planned_date = _pdf_format_date_local(po.get("planned_date"), "%Y-%m-%d") if po.get("planned_date") else "N/A"
+
+    buyer = {
+        "name": po.get("company_name") or po.get("empresa_nombre") or po.get("company_id") or "S/I",
+        "rfc": po.get("company_rfc") or "S/I",
+        "address": po.get("company_address") or "S/I",
+        "contact": po.get("company_contact") or "S/I",
+    }
+    vendor = {
+        "name": po.get("vendor_name") or po.get("proveedor_nombre") or "S/I",
+        "rfc": po.get("vendor_rfc") or po.get("proveedor_rfc") or "S/I",
+        "address": po.get("vendor_address") or "S/I",
+        "contact": po.get("vendor_email") or po.get("vendor_phone") or "S/I",
+    }
+
+    lines_payload = []
+    for idx, line in enumerate(po.get("lines") or [], start=1):
+        lines_payload.append({
+            "line_no": line.get("line_no") or idx,
+            "code": line.get("partida_codigo") or "SERV",
+            "description": line.get("description") or "S/I",
+            "uom": line.get("uom") or "—",
+            "qty": line.get("qty") or "0",
+            "price_unit": line.get("price_unit") or "0",
+            "amount": line.get("line_total") or "0",
+            "iva_amount": line.get("iva_amount") or "0",
+            "ret_isr": line.get("isr_withholding_amount") or "0",
+        })
+
+    subtotal = money_dec(po.get("subtotal_tax_base", 0)).quantize(TWO_DECIMALS)
+    tax = money_dec(po.get("tax_total", 0)).quantize(TWO_DECIMALS)
+    total = money_dec(po.get("total", 0)).quantize(TWO_DECIMALS)
+    generated_at = datetime.now(TIMEZONE)
+    generated_label = generated_at.strftime("%d/%m/%Y, %I:%M %p").lower().replace("am", "a.m.").replace("pm", "p.m.")
+
+    payload = {
+        "folio": folio,
+        "date": order_date,
+        "planned_date": planned_date,
+        "buyer": buyer,
+        "vendor": vendor,
+        "project": po.get("project_name") or po.get("proyecto_nombre") or po.get("project_id") or "S/I",
+        "currency": po.get("currency") or "MXN",
+        "exchange_rate": po.get("exchange_rate") or "1",
+        "lines": lines_payload,
+        "subtotal": str(subtotal),
+        "tax": str(tax),
+        "total": str(total),
+        "bank": po.get("bank_details") or None,
+        "notes": po.get("notes") or "S/I",
+        "payment_terms": po.get("payment_terms") or "S/I",
+        "status": po.get("status") or "draft",
+        "approved_amount_total": str(money_dec(po.get("approved_amount_total", 0)).quantize(TWO_DECIMALS)),
+        "pending_amount": str(money_dec(po.get("pending_amount", 0)).quantize(TWO_DECIMALS)),
+        "generated_at": generated_label,
+        "branding": {"company": "Quantum", "site": "quantumgrupo.mx"},
+    }
+    return payload
 
 
 def render_purchase_order_pdf(po: dict) -> bytes:
-    folio = canonicalize_oc_folio(po.get("folio") or po.get("external_id"))
-    order_date = _pdf_format_date_local(po.get("order_date"))
-    planned_date = _pdf_format_date_local(po.get("planned_date")) if po.get("planned_date") else "N/A"
+    payload = build_purchase_order_pdf_payload(po)
+    folio = payload["folio"]
+    order_date = payload["date"]
+    planned_date = payload["planned_date"]
     oc_number = _oc_numeric_display(folio)
 
-    company_name = po.get("company_name") or po.get("empresa_nombre") or po.get("company_id") or "N/A"
-    project_name = po.get("project_name") or po.get("proyecto_nombre") or po.get("project_id") or "N/A"
-    vendor_name = po.get("vendor_name") or po.get("proveedor_nombre") or "N/A"
-    vendor_rfc = po.get("vendor_rfc") or po.get("proveedor_rfc") or "N/A"
+    company_name = payload["buyer"]["name"]
+    project_name = payload.get("project")
+    vendor_name = payload["vendor"]["name"]
+    vendor_rfc = payload["vendor"]["rfc"]
+
     payment_state = "Pendiente"
-    if money_dec(po.get("approved_amount_total", 0)) > 0 and money_dec(po.get("pending_amount", 0)) > 0:
+    if money_dec(payload.get("approved_amount_total", 0)) > 0 and money_dec(payload.get("pending_amount", 0)) > 0:
         payment_state = "Parcial"
-    elif money_dec(po.get("pending_amount", 0)) <= 0 and po.get("status") == PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value:
+    elif money_dec(payload.get("pending_amount", 0)) <= 0 and payload.get("status") == PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value:
         payment_state = "Total"
 
-    lines = po.get("lines") or []
-    notes_lines = _pdf_wrap(po.get("notes") or "N/A", 95)
+    lines = payload.get("lines") or []
+    notes_lines = _pdf_wrap(payload.get("notes") or "S/I", 95)
 
     page_streams: List[bytes] = []
 
@@ -1813,14 +1885,14 @@ def render_purchase_order_pdf(po: dict) -> bytes:
 
             base_y = y_cursor - 9
             text_cmd(cmds, 54, base_y, line.get("line_no") or i + 1, 8)
-            text_cmd(cmds, 78, base_y, line.get("partida_codigo") or "", 8)
+            text_cmd(cmds, 78, base_y, line.get("code") or "", 8)
             for idx_desc, d in enumerate(desc_lines):
                 text_cmd(cmds, 142, base_y - (idx_desc * 10), d, 8)
             text_cmd(cmds, 350, base_y, line.get("qty") or "0", 8)
             text_cmd(cmds, 394, base_y, line.get("price_unit") or "0", 8)
             text_cmd(cmds, 438, base_y, line.get("iva_amount") or "0", 8)
-            text_cmd(cmds, 484, base_y, line.get("isr_withholding_amount") or "0", 8)
-            text_cmd(cmds, 528, base_y, line.get("line_total") or "0", 8)
+            text_cmd(cmds, 484, base_y, line.get("ret_isr") or "0", 8)
+            text_cmd(cmds, 528, base_y, line.get("amount") or "0", 8)
 
             y_cursor -= row_height
             i += 1
@@ -1829,10 +1901,10 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             box_y = max(120, y_cursor - 96)
             cmds += ["0.95 0.95 0.97 rg", f"360 {box_y:.2f} 212 90 re f", "0 0 0 rg"]
             totals = [
-                f"Subtotal: {po.get('subtotal_tax_base')}",
-                f"IVA: {po.get('tax_total')}",
+                f"Subtotal: {payload.get('subtotal')}",
+                f"IVA: {payload.get('tax')}",
                 f"Ret ISR: {po.get('withholding_isr_total')}",
-                f"TOTAL: {po.get('total')}",
+                f"TOTAL: {payload.get('total')}",
             ]
             ty = box_y + 70
             for t in totals:
@@ -1846,7 +1918,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
                 text_cmd(cmds, 50, notes_y, n, 8)
 
         generated_label = datetime.now(TIMEZONE).strftime("%I:%M %p").lower().replace("am", "a.m.").replace("pm", "p.m.")
-        generated_human = f"Generado: {datetime.now(TIMEZONE).strftime('%d %b %Y')}, {generated_label}"
+        generated_human = f"Generado: {payload.get('generated_at')}"
         # Footer matches requested brand text/domain
         cmds += ["0.80 0.80 0.80 rg", "50 46 522 1 re f", "0 0 0 rg"]
         text_cmd(cmds, 50, 34, generated_human, 8)
@@ -1882,7 +1954,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
 
     font_obj_num = content_obj_start + page_count
     objects.append(f"{font_obj_num} 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n".encode("latin-1"))
-    objects.insert(2, b"3 0 obj << /Creator (QFinance) /Producer (QFinance | quantumgrupo.mx) >> endobj\n")
+    objects.insert(2, f"3 0 obj << /Title (Orden de Compra {folio}) /Creator (QFinance / quantumgrupo.mx) /Producer (QFinance / quantumgrupo.mx) >> endobj\n".encode("latin-1", errors="replace"))
 
     pdf = bytearray(b"%PDF-1.4\n")
     offsets = [0]

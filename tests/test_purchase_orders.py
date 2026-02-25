@@ -221,7 +221,7 @@ def test_purchase_order_pdf_endpoint_returns_pdf_and_contains_folio():
     assert pdf_res.status_code == 200
     assert b"%PDF" in pdf_res.content[:10]
     assert b"ORDEN DE COMPRA" in pdf_res.content
-    assert "inline; filename=OC-000002.pdf" in pdf_res.headers.get("content-disposition", "")
+    assert "inline; filename=OC-2.pdf" in pdf_res.headers.get("content-disposition", "")
     assert "OC-OC" not in pdf_res.headers.get("content-disposition", "")
     import re
     text = pdf_res.content.decode("latin-1", errors="ignore")
@@ -317,3 +317,78 @@ def test_pdf_filename_avoids_oc_duplication_with_prefixed_external_id():
     cd = pdf_res.headers.get("content-disposition", "")
     assert "inline; filename=OC-000123.pdf" in cd
     assert "OC-OC" not in cd
+
+
+
+def test_build_oc_pdf_payload_minimal():
+    po = {
+        "folio": "OC000003",
+        "order_date": "2026-02-24",
+        "company_name": "EJEMPLO Q",
+        "project_name": "Proyecto Demo",
+        "vendor_name": "Proveedor",
+        "lines": [],
+        "subtotal_tax_base": "0.00",
+        "tax_total": "0.00",
+        "total": "0.00",
+    }
+    payload = server.build_purchase_order_pdf_payload(po)
+    assert payload["folio"] == "OC000003"
+    assert payload["date"] == "2026-02-24"
+    assert payload["buyer"]["name"] == "EJEMPLO Q"
+    assert payload["vendor"]["name"] == "Proveedor"
+    assert payload["lines"] == []
+
+
+def test_build_oc_pdf_payload_full():
+    po = {
+        "folio": "OC000004",
+        "order_date": "2026-02-24",
+        "planned_date": "2026-03-01",
+        "company_name": "EJEMPLO Q",
+        "company_rfc": "ABC123",
+        "company_address": "CALLE 1",
+        "project_name": "Proyecto Demo",
+        "vendor_name": "Proveedor Largo",
+        "vendor_rfc": "RFC123",
+        "vendor_address": "AV 2",
+        "vendor_email": "ventas@demo.com",
+        "currency": "USD",
+        "exchange_rate": "17.25",
+        "lines": [{"line_no": 1, "partida_codigo": "205", "description": "Servicio", "qty": "2", "price_unit": "100.00", "line_total": "200.00", "iva_amount": "32.00", "isr_withholding_amount": "0.00"}],
+        "subtotal_tax_base": "200.00",
+        "tax_total": "32.00",
+        "total": "232.00",
+        "bank_details": {"clabe": "0123"},
+        "notes": "nota",
+        "payment_terms": "contado",
+    }
+    payload = server.build_purchase_order_pdf_payload(po)
+    assert payload["buyer"]["rfc"] == "ABC123"
+    assert payload["vendor"]["rfc"] == "RFC123"
+    assert payload["bank"] == {"clabe": "0123"}
+    assert payload["lines"][0]["code"] == "205"
+    assert payload["lines"][0]["amount"] == "200.00"
+
+
+def test_render_pdf_bytes_has_metadata_strings_and_filename_rules():
+    po = {
+        "folio": "OC000005",
+        "order_date": "2026-02-24",
+        "company_name": "EJEMPLO Q",
+        "project_name": "Proyecto",
+        "vendor_name": "Proveedor",
+        "lines": [{"line_no": 1, "partida_codigo": "205", "description": "Servicio", "qty": "1", "price_unit": "100.00", "line_total": "116.00", "iva_amount": "16.00", "isr_withholding_amount": "0.00"}],
+        "subtotal_tax_base": "100.00",
+        "tax_total": "16.00",
+        "total": "116.00",
+    }
+    pdf = server.render_purchase_order_pdf(po)
+    assert pdf.startswith(b"%PDF")
+    assert len(pdf) > 1200
+    txt = pdf.decode("latin-1", errors="ignore")
+    assert "QFinance / quantumgrupo.mx" in txt
+    assert "Orden de Compra OC000005" in txt
+    assert server.oc_pdf_filename("OC-000123") == "OC-000123"
+    assert server.oc_pdf_filename("OC000123") == "OC-OC000123"
+    assert server.oc_pdf_filename("  F-77 ") == "OC-F-77"
