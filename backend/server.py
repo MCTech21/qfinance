@@ -1641,6 +1641,29 @@ def _pdf_escape(text: Any) -> str:
     return str(text or "").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
+def _pdf_wrap(text: Any, max_chars: int) -> List[str]:
+    raw = str(text or "").strip() or "N/A"
+    words = raw.split()
+    if not words:
+        return ["N/A"]
+    lines: List[str] = []
+    line = ""
+    for word in words:
+        candidate = f"{line} {word}".strip()
+        if len(candidate) <= max_chars:
+            line = candidate
+            continue
+        if line:
+            lines.append(line)
+        while len(word) > max_chars:
+            lines.append(word[:max_chars])
+            word = word[max_chars:]
+        line = word
+    if line:
+        lines.append(line)
+    return lines or ["N/A"]
+
+
 def render_purchase_order_pdf(po: dict) -> bytes:
     folio = canonicalize_oc_folio(po.get("folio") or po.get("external_id"))
     order_date = (po.get("order_date") or "")[:10] or "N/A"
@@ -1648,88 +1671,161 @@ def render_purchase_order_pdf(po: dict) -> bytes:
 
     company_name = po.get("company_name") or po.get("empresa_nombre") or po.get("company_id") or "N/A"
     project_name = po.get("project_name") or po.get("proyecto_nombre") or po.get("project_id") or "N/A"
+    vendor_name = po.get("vendor_name") or po.get("proveedor_nombre") or "N/A"
+    vendor_rfc = po.get("vendor_rfc") or po.get("proveedor_rfc") or "N/A"
 
-    cmds: List[str] = []
-    cmds += [
-        "0.05 0.18 0.56 rg",
-        "0.05 0.18 0.56 RG",
-        "40 748 532 24 re f",
-        "0 0 0 rg",
-        "BT", "/F1 24 Tf", "50 710 Td", f"({_pdf_escape('ORDEN DE COMPRA')}) Tj", "ET",
-        "BT", "/F1 11 Tf", "50 690 Td", f"({_pdf_escape(f'Folio: {folio}')}) Tj", "ET",
-        "BT", "/F1 10 Tf", "300 690 Td", f"({_pdf_escape(f'Fecha: {order_date} | Programada: {planned_date}')}) Tj", "ET",
-        "0.95 0.95 0.97 rg", "50 636 250 44 re f", "0 0 0 rg",
-        "BT", "/F1 12 Tf", "58 662 Td", f"({_pdf_escape('Quantum | QFinance')}) Tj", "ET",
-        "BT", "/F1 9 Tf", "58 646 Td", f"({_pdf_escape('Documento comercial')}) Tj", "ET",
-        "0.96 0.96 0.96 rg", "315 636 257 120 re f", "0 0 0 rg",
-    ]
+    lines = po.get("lines") or []
+    notes_lines = _pdf_wrap(po.get("notes") or "N/A", 95)
 
-    data_lines = [
-        f"Empresa: {company_name}",
-        f"Proyecto: {project_name}",
-        f"Proveedor: {po.get('vendor_name') or 'N/A'}",
-        f"RFC: {po.get('vendor_rfc') or 'N/A'}",
-        f"Factura proveedor: {po.get('invoice_folio') or 'N/A'}",
-        f"Moneda: {po.get('currency') or 'MXN'}  TC: {po.get('exchange_rate') or '1'}",
-        f"Condiciones: {po.get('payment_terms') or 'N/A'}",
-    ]
-    y = 736
-    for ln in data_lines:
-        cmds += ["BT", "/F1 9 Tf", f"325 {y} Td", f"({_pdf_escape(ln)}) Tj", "ET"]
-        y -= 15
+    page_streams: List[bytes] = []
 
-    cmds += ["0.05 0.18 0.56 rg", "50 598 522 22 re f", "1 1 1 rg"]
-    headers = ["#", "Partida", "Descripción", "Cant", "P.U.", "IVA", "Ret ISR", "Total"]
-    xs = [55, 80, 150, 345, 390, 440, 480, 530]
-    for x, h in zip(xs, headers):
-        cmds += ["BT", "/F1 9 Tf", f"{x} 605 Td", f"({_pdf_escape(h)}) Tj", "ET"]
-    cmds += ["0 0 0 rg"]
+    def text_cmd(cmds: List[str], x: float, y: float, text: Any, size: int = 9):
+        cmds += ["BT", f"/F1 {size} Tf", f"{x:.2f} {y:.2f} Td", f"({_pdf_escape(text)}) Tj", "ET"]
 
-    y = 580
-    for idx, line in enumerate(po.get("lines", [])[:14], start=1):
-        if y < 120:
-            break
-        if idx % 2 == 0:
-            cmds += ["0.98 0.98 0.99 rg", f"50 {y-4} 522 16 re f", "0 0 0 rg"]
-        row = [
-            str(line.get("line_no") or idx),
-            str(line.get("partida_codigo") or ""),
-            str(line.get("description") or "-")[:34],
-            str(line.get("qty") or "0"),
-            str(line.get("price_unit") or "0"),
-            str(line.get("iva_amount") or "0"),
-            str(line.get("isr_withholding_amount") or "0"),
-            str(line.get("line_total") or "0"),
+    def draw_header(cmds: List[str]):
+        cmds += ["0.05 0.18 0.56 rg", "40 744 532 28 re f", "0 0 0 rg"]
+        text_cmd(cmds, 50, 724, "Quantum | QFinance", 11)
+        text_cmd(cmds, 50, 710, "ORDEN DE COMPRA", 20)
+        text_cmd(cmds, 360, 724, f"Folio: {folio}", 10)
+        text_cmd(cmds, 360, 710, f"Fecha: {order_date}", 10)
+        text_cmd(cmds, 470, 710, f"Programada: {planned_date}", 10)
+        text_cmd(cmds, 360, 696, f"Estatus: {po.get('status') or 'N/A'}", 10)
+
+    def draw_party_cards(cmds: List[str]) -> float:
+        left_x, right_x = 50, 315
+        top_y = 674
+        card_h = 86
+        cmds += ["0.95 0.96 0.99 rg", f"{left_x} {top_y-card_h} 250 {card_h} re f", "0 0 0 rg"]
+        cmds += ["0.95 0.96 0.99 rg", f"{right_x} {top_y-card_h} 257 {card_h} re f", "0 0 0 rg"]
+        text_cmd(cmds, left_x+8, top_y-14, "COMPRADOR", 10)
+        text_cmd(cmds, right_x+8, top_y-14, "VENDEDOR", 10)
+
+        buyer = [
+            f"Empresa: {company_name}",
+            f"Proyecto: {project_name}",
+            f"Moneda: {po.get('currency') or 'MXN'} | TC: {po.get('exchange_rate') or '1'}",
+            f"Condiciones: {po.get('payment_terms') or 'N/A'}",
         ]
-        for x, col in zip(xs, row):
-            cmds += ["BT", "/F1 8 Tf", f"{x} {y} Td", f"({_pdf_escape(col)}) Tj", "ET"]
-        y -= 16
+        vendor = [
+            f"Proveedor: {vendor_name}",
+            f"RFC: {vendor_rfc}",
+            f"Factura proveedor: {po.get('invoice_folio') or 'N/A'}",
+            f"Contacto: {po.get('vendor_email') or 'N/A'}",
+        ]
+        y = top_y - 30
+        for t in buyer:
+            text_cmd(cmds, left_x+8, y, t, 8)
+            y -= 15
+        y = top_y - 30
+        for t in vendor:
+            text_cmd(cmds, right_x+8, y, t, 8)
+            y -= 15
+        return top_y - card_h - 10
 
-    cmds += ["0.95 0.95 0.97 rg", "360 80 212 90 re f", "0 0 0 rg"]
-    totals = [
-        f"Subtotal: {po.get('subtotal_tax_base')}",
-        f"IVA: {po.get('tax_total')}",
-        f"Ret ISR: {po.get('withholding_isr_total')}",
-        f"TOTAL: {po.get('total')}",
-        f"Estatus: {po.get('status')}",
-    ]
-    ty = 150
-    for ln in totals:
-        cmds += ["BT", "/F1 10 Tf", f"370 {ty} Td", f"({_pdf_escape(ln)}) Tj", "ET"]
-        ty -= 15
+    def draw_table_header(cmds: List[str], y: float):
+        cmds += ["0.05 0.18 0.56 rg", f"50 {y-16:.2f} 522 16 re f", "1 1 1 rg"]
+        headers = ["#", "Partida", "Descripción", "Cant.", "P.U.", "IVA", "Ret ISR", "Total"]
+        xs = [54, 78, 142, 350, 394, 438, 484, 528]
+        for x, h in zip(xs, headers):
+            text_cmd(cmds, x, y-12, h, 8)
+        cmds += ["0 0 0 rg"]
 
-    cmds += ["BT", "/F1 9 Tf", "50 92 Td", f"({_pdf_escape('Notas: ' + str(po.get('notes') or 'N/A'))}) Tj", "ET"]
-    cmds += ["BT", "/F1 9 Tf", "50 58 Td", f"({_pdf_escape('Creado con QFinance | quantum.mx')}) Tj", "ET"]
+    def draw_footer(cmds: List[str], page_no: int):
+        cmds += ["0.80 0.80 0.80 rg", "50 46 522 1 re f", "0 0 0 rg"]
+        text_cmd(cmds, 50, 34, f"Generado: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", 8)
+        text_cmd(cmds, 250, 34, "Creado con QFinance", 8)
+        text_cmd(cmds, 500, 34, f"Pag. {page_no}", 8)
 
-    stream = "\n".join(cmds).encode("latin-1", errors="replace")
+    row_y_start_first = 548
+    row_y_start_other = 706
+    page_no = 1
+    i = 0
+    while i < len(lines) or page_no == 1:
+        cmds: List[str] = []
+        draw_header(cmds)
+        if page_no == 1:
+            y_table_top = draw_party_cards(cmds)
+            y_cursor = min(y_table_top, row_y_start_first)
+        else:
+            y_cursor = row_y_start_other
 
-    objects = [
-        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
-        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n",
-        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n",
-        b"4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n",
-        f"5 0 obj << /Length {len(stream)} >> stream\n".encode("latin-1") + stream + b"\nendstream endobj\n",
-    ]
+        draw_table_header(cmds, y_cursor)
+        y_cursor -= 20
+
+        shaded = False
+        while i < len(lines):
+            line = lines[i] or {}
+            desc_lines = _pdf_wrap(line.get("description") or "-", 34)
+            row_height = max(13, 10 * len(desc_lines))
+            if y_cursor - row_height < 150:
+                break
+            if shaded:
+                cmds += ["0.98 0.98 0.99 rg", f"50 {y_cursor-row_height+2:.2f} 522 {row_height:.2f} re f", "0 0 0 rg"]
+            shaded = not shaded
+
+            base_y = y_cursor - 9
+            text_cmd(cmds, 54, base_y, line.get("line_no") or i + 1, 8)
+            text_cmd(cmds, 78, base_y, line.get("partida_codigo") or "", 8)
+            for idx_desc, d in enumerate(desc_lines):
+                text_cmd(cmds, 142, base_y - (idx_desc * 10), d, 8)
+            text_cmd(cmds, 350, base_y, line.get("qty") or "0", 8)
+            text_cmd(cmds, 394, base_y, line.get("price_unit") or "0", 8)
+            text_cmd(cmds, 438, base_y, line.get("iva_amount") or "0", 8)
+            text_cmd(cmds, 484, base_y, line.get("isr_withholding_amount") or "0", 8)
+            text_cmd(cmds, 528, base_y, line.get("line_total") or "0", 8)
+
+            y_cursor -= row_height
+            i += 1
+
+        if i >= len(lines):
+            box_y = max(120, y_cursor - 96)
+            cmds += ["0.95 0.95 0.97 rg", f"360 {box_y:.2f} 212 90 re f", "0 0 0 rg"]
+            totals = [
+                f"Subtotal: {po.get('subtotal_tax_base')}",
+                f"IVA: {po.get('tax_total')}",
+                f"Ret ISR: {po.get('withholding_isr_total')}",
+                f"TOTAL: {po.get('total')}",
+            ]
+            ty = box_y + 70
+            for t in totals:
+                text_cmd(cmds, 370, ty, t, 10)
+                ty -= 16
+
+            notes_y = box_y - 8
+            text_cmd(cmds, 50, notes_y, "NOTAS Y TÉRMINOS", 9)
+            for n in notes_lines[:6]:
+                notes_y -= 12
+                text_cmd(cmds, 50, notes_y, n, 8)
+
+        draw_footer(cmds, page_no)
+        page_no += 1
+        page_streams.append("\n".join(cmds).encode("latin-1", errors="replace"))
+
+    objects: List[bytes] = []
+    objects.append(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+
+    page_count = len(page_streams)
+    page_obj_start = 3
+    content_obj_start = page_obj_start + page_count
+
+    kids = " ".join([f"{page_obj_start + idx} 0 R" for idx in range(page_count)])
+    objects.append(f"2 0 obj << /Type /Pages /Kids [{kids}] /Count {page_count} >> endobj\n".encode("latin-1"))
+
+    for idx in range(page_count):
+        page_obj_num = page_obj_start + idx
+        content_obj_num = content_obj_start + idx
+        objects.append(
+            f"{page_obj_num} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {content_obj_start + page_count} 0 R >> >> /Contents {content_obj_num} 0 R >> endobj\n".encode("latin-1")
+        )
+
+    for idx, stream in enumerate(page_streams):
+        content_obj_num = content_obj_start + idx
+        objects.append(
+            f"{content_obj_num} 0 obj << /Length {len(stream)} >> stream\n".encode("latin-1") + stream + b"\nendstream endobj\n"
+        )
+
+    font_obj_num = content_obj_start + page_count
+    objects.append(f"{font_obj_num} 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n".encode("latin-1"))
 
     pdf = bytearray(b"%PDF-1.4\n")
     offsets = [0]

@@ -270,3 +270,34 @@ def test_startup_index_setup_is_idempotent_with_conflicting_folio_index():
     asyncio.run(server.ensure_purchase_order_indexes())
     idx2 = db.purchase_orders.indexes.get("uq_purchase_orders_folio_exists") or {}
     assert idx2.get("partialFilterExpression", {}).get("folio", {}).get("$type") == "string"
+
+
+def test_purchase_order_pdf_handles_long_content_and_paginates_safely():
+    client, _ = client_for("admin")
+    payload = po_payload(ext="OC-999", total_line="100.00")
+    payload["vendor_name"] = "Proveedor con nombre extremadamente largo " * 4
+    payload["vendor_rfc"] = "RFCMUYLARGODEPRUEBA1234567890"
+    payload["notes"] = "Nota extensa de prueba " * 80
+    payload["lines"] = []
+    for i in range(1, 36):
+        payload["lines"].append({
+            "line_no": i,
+            "partida_codigo": "205",
+            "description": ("Descripción muy larga de concepto para validar wrapping y altura dinámica " * 2).strip(),
+            "qty": "1",
+            "price_unit": "10.00",
+            "discount_pct": "0",
+            "iva_rate": "16",
+            "apply_isr_withholding": False,
+            "isr_withholding_rate": "0",
+        })
+
+    created = client.post("/api/purchase-orders", json=payload)
+    assert created.status_code == 200
+    po_id = created.json()["purchase_order"]["id"]
+
+    pdf_res = client.get(f"/api/purchase-orders/{po_id}/pdf")
+    assert pdf_res.status_code == 200
+    assert "application/pdf" in pdf_res.headers.get("content-type", "")
+    assert len(pdf_res.content) > 2000
+    assert b"ORDEN DE COMPRA" in pdf_res.content
