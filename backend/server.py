@@ -1637,52 +1637,112 @@ def render_basic_pdf(lines: List[str]) -> bytes:
     return bytes(pdf)
 
 
+def _pdf_escape(text: Any) -> str:
+    return str(text or "").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
 def render_purchase_order_pdf(po: dict) -> bytes:
     folio = canonicalize_oc_folio(po.get("folio") or po.get("external_id"))
-    order_date = (po.get('order_date') or '')[:10]
-    planned_date = ((po.get('planned_date') or '')[:10]) or 'N/A'
+    order_date = (po.get("order_date") or "")[:10] or "N/A"
+    planned_date = ((po.get("planned_date") or "")[:10]) or "N/A"
 
-    lines = [
-        "QUANTUM | QFinance",
-        "============================================================",
-        "ORDEN DE COMPRA",
-        "DOCUMENTO COMERCIAL",
-        "",
-        f"Folio: {folio}    Fecha: {order_date or 'N/A'}",
-        f"Fecha programada: {planned_date}",
-        "",
-        "[DATOS GENERALES]",
-        f"Empresa: {po.get('company_name') or po.get('company_id') or 'N/A'}",
-        f"Proyecto: {po.get('project_code') or po.get('project_id') or 'N/A'}",
-        f"Proveedor: {po.get('vendor_name') or 'N/A'}",
-        f"RFC proveedor: {po.get('vendor_rfc') or 'N/A'}",
-        f"Folio factura proveedor: {po.get('invoice_folio') or 'N/A'}",
-        f"Condiciones de pago: {po.get('payment_terms') or 'N/A'}",
-        f"Moneda: {po.get('currency') or 'MXN'}    Tipo cambio: {po.get('exchange_rate') or '1'}",
-        "",
-        "[DETALLE DE PARTIDAS]",
-        "# | Partida | Descripción | Cant. | U.M. | P.U. | IVA | Ret ISR | Total",
-        "------------------------------------------------------------",
+    company_name = po.get("company_name") or po.get("empresa_nombre") or po.get("company_id") or "N/A"
+    project_name = po.get("project_name") or po.get("proyecto_nombre") or po.get("project_id") or "N/A"
+
+    cmds: List[str] = []
+    cmds += [
+        "0.05 0.18 0.56 rg",
+        "0.05 0.18 0.56 RG",
+        "40 748 532 24 re f",
+        "0 0 0 rg",
+        "BT", "/F1 24 Tf", "50 710 Td", f"({_pdf_escape('ORDEN DE COMPRA')}) Tj", "ET",
+        "BT", "/F1 11 Tf", "50 690 Td", f"({_pdf_escape(f'Folio: {folio}')}) Tj", "ET",
+        "BT", "/F1 10 Tf", "300 690 Td", f"({_pdf_escape(f'Fecha: {order_date} | Programada: {planned_date}')}) Tj", "ET",
+        "0.95 0.95 0.97 rg", "50 636 250 44 re f", "0 0 0 rg",
+        "BT", "/F1 12 Tf", "58 662 Td", f"({_pdf_escape('Quantum | QFinance')}) Tj", "ET",
+        "BT", "/F1 9 Tf", "58 646 Td", f"({_pdf_escape('Documento comercial')}) Tj", "ET",
+        "0.96 0.96 0.96 rg", "315 636 257 120 re f", "0 0 0 rg",
     ]
-    for line in po.get("lines", []):
-        lines.append(
-            f"{line.get('line_no')} | {line.get('partida_codigo')} | {line.get('description') or '-'} | {line.get('qty')} | {line.get('uom') or '-'} | {line.get('price_unit')} | {line.get('iva_amount')} | {line.get('isr_withholding_amount')} | {line.get('line_total')}"
-        )
 
-    lines.extend([
-        "",
-        "[TOTALES]",
+    data_lines = [
+        f"Empresa: {company_name}",
+        f"Proyecto: {project_name}",
+        f"Proveedor: {po.get('vendor_name') or 'N/A'}",
+        f"RFC: {po.get('vendor_rfc') or 'N/A'}",
+        f"Factura proveedor: {po.get('invoice_folio') or 'N/A'}",
+        f"Moneda: {po.get('currency') or 'MXN'}  TC: {po.get('exchange_rate') or '1'}",
+        f"Condiciones: {po.get('payment_terms') or 'N/A'}",
+    ]
+    y = 736
+    for ln in data_lines:
+        cmds += ["BT", "/F1 9 Tf", f"325 {y} Td", f"({_pdf_escape(ln)}) Tj", "ET"]
+        y -= 15
+
+    cmds += ["0.05 0.18 0.56 rg", "50 598 522 22 re f", "1 1 1 rg"]
+    headers = ["#", "Partida", "Descripción", "Cant", "P.U.", "IVA", "Ret ISR", "Total"]
+    xs = [55, 80, 150, 345, 390, 440, 480, 530]
+    for x, h in zip(xs, headers):
+        cmds += ["BT", "/F1 9 Tf", f"{x} 605 Td", f"({_pdf_escape(h)}) Tj", "ET"]
+    cmds += ["0 0 0 rg"]
+
+    y = 580
+    for idx, line in enumerate(po.get("lines", [])[:14], start=1):
+        if y < 120:
+            break
+        if idx % 2 == 0:
+            cmds += ["0.98 0.98 0.99 rg", f"50 {y-4} 522 16 re f", "0 0 0 rg"]
+        row = [
+            str(line.get("line_no") or idx),
+            str(line.get("partida_codigo") or ""),
+            str(line.get("description") or "-")[:34],
+            str(line.get("qty") or "0"),
+            str(line.get("price_unit") or "0"),
+            str(line.get("iva_amount") or "0"),
+            str(line.get("isr_withholding_amount") or "0"),
+            str(line.get("line_total") or "0"),
+        ]
+        for x, col in zip(xs, row):
+            cmds += ["BT", "/F1 8 Tf", f"{x} {y} Td", f"({_pdf_escape(col)}) Tj", "ET"]
+        y -= 16
+
+    cmds += ["0.95 0.95 0.97 rg", "360 80 212 90 re f", "0 0 0 rg"]
+    totals = [
         f"Subtotal: {po.get('subtotal_tax_base')}",
         f"IVA: {po.get('tax_total')}",
-        f"Retenciones ISR: {po.get('withholding_isr_total')}",
+        f"Ret ISR: {po.get('withholding_isr_total')}",
         f"TOTAL: {po.get('total')}",
-        f"Estado OC: {po.get('status')}",
-        "",
-        f"Notas: {po.get('notes') or 'N/A'}",
-        "------------------------------------------------------------",
-        "Creado con QFinance | quantum.mx",
-    ])
-    return render_basic_pdf(lines)
+        f"Estatus: {po.get('status')}",
+    ]
+    ty = 150
+    for ln in totals:
+        cmds += ["BT", "/F1 10 Tf", f"370 {ty} Td", f"({_pdf_escape(ln)}) Tj", "ET"]
+        ty -= 15
+
+    cmds += ["BT", "/F1 9 Tf", "50 92 Td", f"({_pdf_escape('Notas: ' + str(po.get('notes') or 'N/A'))}) Tj", "ET"]
+    cmds += ["BT", "/F1 9 Tf", "50 58 Td", f"({_pdf_escape('Creado con QFinance | quantum.mx')}) Tj", "ET"]
+
+    stream = "\n".join(cmds).encode("latin-1", errors="replace")
+
+    objects = [
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n",
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n",
+        b"4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n",
+        f"5 0 obj << /Length {len(stream)} >> stream\n".encode("latin-1") + stream + b"\nendstream endobj\n",
+    ]
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(pdf))
+        pdf.extend(obj)
+    xref_start = len(pdf)
+    pdf.extend(f"xref\n0 {len(offsets)}\n".encode("latin-1"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        pdf.extend(f"{off:010d} 00000 n \n".encode("latin-1"))
+    pdf.extend(f"trailer << /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode("latin-1"))
+    return bytes(pdf)
 
 # ========================= AUTH ROUTES =========================
 @api_router.post("/auth/register", response_model=User)
@@ -2508,30 +2568,65 @@ async def _sync_po_odoo_stub(po: dict) -> dict:
 
 
 async def ensure_partial_indexes_for_movements():
+    index_name = "uq_movements_po_line_origin_event_exists"
+    expected_keys = [("purchase_order_line_id", ASCENDING), ("origin_event", ASCENDING)]
+    expected_partial = {
+        "purchase_order_line_id": {"$type": "string"},
+        "origin_event": {"$type": "string"},
+    }
     try:
         existing = await db.movements.index_information()
     except Exception:
         existing = {}
 
-    index_name = "uq_movements_po_line_origin_event_exists"
-    legacy_names = [
-        "purchase_order_line_id_1_origin_event_1",
-    ]
+    legacy_names = ["purchase_order_line_id_1_origin_event_1"]
     for legacy in legacy_names:
         if legacy in existing:
             try:
                 await db.movements.drop_index(legacy)
             except Exception:
                 pass
-    await db.movements.create_index(
-        [("purchase_order_line_id", ASCENDING), ("origin_event", ASCENDING)],
-        name=index_name,
-        unique=True,
-        partialFilterExpression={
-            "purchase_order_line_id": {"$type": "string"},
-            "origin_event": {"$type": "string"},
-        },
-    )
+
+    current = existing.get(index_name)
+    if current:
+        same_key = list(current.get("key", [])) == expected_keys
+        same_unique = bool(current.get("unique"))
+        same_partial = (current.get("partialFilterExpression") or {}) == expected_partial
+        if not (same_key and same_unique and same_partial):
+            try:
+                await db.movements.drop_index(index_name)
+            except Exception:
+                pass
+
+    await db.movements.create_index(expected_keys, name=index_name, unique=True, partialFilterExpression=expected_partial)
+
+
+async def ensure_purchase_order_indexes():
+    await db.purchase_orders.create_index([("company_id", ASCENDING), ("external_id", ASCENDING)], unique=True)
+
+    index_name = "uq_purchase_orders_folio_exists"
+    expected_keys = [("folio", ASCENDING)]
+    expected_partial = {"folio": {"$type": "string"}}
+    try:
+        existing = await db.purchase_orders.index_information()
+    except Exception:
+        existing = {}
+
+    # Cleanup legacy/incorrect folio indexes that can break startup with legacy nulls
+    for name in ["folio_1", index_name]:
+        info = existing.get(name)
+        if not info:
+            continue
+        same_key = list(info.get("key", [])) == expected_keys
+        same_unique = bool(info.get("unique"))
+        same_partial = (info.get("partialFilterExpression") or {}) == expected_partial
+        if not (same_key and same_unique and same_partial):
+            try:
+                await db.purchase_orders.drop_index(name)
+            except Exception:
+                pass
+
+    await db.purchase_orders.create_index(expected_keys, unique=True, name=index_name, partialFilterExpression=expected_partial)
 
 
 def canonicalize_oc_folio(raw_folio: Optional[str]) -> str:
@@ -2544,6 +2639,8 @@ def canonicalize_oc_folio(raw_folio: Optional[str]) -> str:
         body = folio[2:]
         if body.isdigit():
             return f"OC{int(body):06d}"
+    if folio.isdigit():
+        return f"OC{int(folio):06d}"
     return folio
 
 
@@ -2556,73 +2653,115 @@ def structured_error(code: str, message: str, details: Optional[Dict[str, Any]] 
 
 async def build_purchase_order_budget_summary(po: dict, approval_amount: Optional[Decimal] = None) -> dict:
     order_date = date_parser.parse(po.get("order_date")) if po.get("order_date") else datetime.now(timezone.utc)
-    po_total = money_dec(po.get("total", 0))
-    approved_total = money_dec(po.get("approved_amount_total", 0))
+    po_total = money_dec(po.get("total", 0)).quantize(TWO_DECIMALS)
+    approved_total = money_dec(po.get("approved_amount_total", 0)).quantize(TWO_DECIMALS)
     pending_total = (po_total - approved_total).quantize(TWO_DECIMALS)
-    amount_to_approve = (money_dec(approval_amount) if approval_amount is not None else pending_total).quantize(TWO_DECIMALS)
-    if amount_to_approve < 0:
-        amount_to_approve = Decimal("0.00")
+    if pending_total < 0:
+        pending_total = Decimal("0.00")
+    preview_partial = money_dec(approval_amount) if approval_amount is not None else pending_total
+    if preview_partial < 0:
+        preview_partial = Decimal("0.00")
 
-    ratio = (amount_to_approve / po_total) if po_total > 0 else Decimal("0")
-    aggregated: Dict[str, Decimal] = {}
+    partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(2000)
+    partida_map = {str(p.get("codigo")): p.get("nombre") for p in partida_docs}
+
+    ratio_partial = (preview_partial / po_total) if po_total > 0 else Decimal("0")
+    ratio_full = (pending_total / po_total) if po_total > 0 else Decimal("0")
+
+    by_partida = []
+    aggregate = {
+        "budget_total": Decimal("0.00"),
+        "executed_current": Decimal("0.00"),
+        "available_current": Decimal("0.00"),
+        "available_after_partial": Decimal("0.00"),
+        "available_after_full": Decimal("0.00"),
+    }
+
+    lines_by_partida: Dict[str, Decimal] = {}
     for line in po.get("lines", []):
         partida = str(line.get("partida_codigo") or "")
         if not partida:
             continue
-        line_total = money_dec(line.get("line_total", 0))
-        projected = (line_total * ratio).quantize(TWO_DECIMALS)
-        aggregated[partida] = (aggregated.get(partida, Decimal("0.00")) + projected).quantize(TWO_DECIMALS)
+        lines_by_partida[partida] = (lines_by_partida.get(partida, Decimal("0.00")) + money_dec(line.get("line_total", 0))).quantize(TWO_DECIMALS)
 
-    by_partida = []
-    presupuesto_total = Decimal("0.00")
-    ejecutado_actual = Decimal("0.00")
-    disponible_actual = Decimal("0.00")
-    restante_proyectado = Decimal("0.00")
-    for partida, requested in sorted(aggregated.items()):
+    for partida, line_total in sorted(lines_by_partida.items()):
+        approved_line = (line_total * (approved_total / po_total)).quantize(TWO_DECIMALS) if po_total > 0 else Decimal("0.00")
+        pending_line = (line_total - approved_line).quantize(TWO_DECIMALS)
+        partial_line = (line_total * ratio_partial).quantize(TWO_DECIMALS)
+        full_line = (line_total * ratio_full).quantize(TWO_DECIMALS)
+
         if partida in {"400", "401", "402", "403", "404"}:
             by_partida.append({
                 "partida_codigo": partida,
-                "presupuesto_total": None,
-                "ejecutado_actual": None,
-                "disponible_actual": None,
-                "monto_proyectado": str(requested),
-                "restante_proyectado_si_aprueba": None,
+                "partida_nombre": partida_map.get(partida),
                 "budget_validation_applies": False,
+                "budget_total": None,
+                "executed_current": None,
+                "available_current": None,
+                "po_committed_current": None,
+                "oc_line_total": str(line_total),
+                "approved_accumulated_line": str(approved_line),
+                "pending_line_amount": str(pending_line if pending_line > 0 else Decimal("0.00")),
+                "available_after_partial_line": None,
+                "available_after_full_line": None,
                 "scope": "income",
             })
             continue
+
         av = await compute_budget_availability(po.get("project_id"), partida, order_date)
-        b_total = money_dec(av.get("budget_total_amount", 0)) if av.get("budget_total_amount") is not None else Decimal("0.00")
-        b_exec = money_dec(av.get("executed_total", 0)) if av.get("executed_total") is not None else Decimal("0.00")
-        b_avail = money_dec(av.get("remaining_total", 0)) if av.get("remaining_total") is not None else Decimal("0.00")
-        b_projected = (b_avail - requested).quantize(TWO_DECIMALS)
-        presupuesto_total += b_total
-        ejecutado_actual += b_exec
-        disponible_actual += b_avail
-        restante_proyectado += b_projected
+        b_total = money_dec(av.get("budget_total_amount", 0)).quantize(TWO_DECIMALS) if av.get("budget_total_amount") is not None else Decimal("0.00")
+        b_exec = money_dec(av.get("executed_total", 0)).quantize(TWO_DECIMALS) if av.get("executed_total") is not None else Decimal("0.00")
+        b_avail = money_dec(av.get("remaining_total", 0)).quantize(TWO_DECIMALS) if av.get("remaining_total") is not None else Decimal("0.00")
+        after_partial = (b_avail - partial_line).quantize(TWO_DECIMALS)
+        after_full = (b_avail - pending_line).quantize(TWO_DECIMALS)
+
+        aggregate["budget_total"] += b_total
+        aggregate["executed_current"] += b_exec
+        aggregate["available_current"] += b_avail
+        aggregate["available_after_partial"] += after_partial
+        aggregate["available_after_full"] += after_full
+
         by_partida.append({
             "partida_codigo": partida,
-            "presupuesto_total": str(b_total.quantize(TWO_DECIMALS)),
-            "ejecutado_actual": str(b_exec.quantize(TWO_DECIMALS)),
-            "disponible_actual": str(b_avail.quantize(TWO_DECIMALS)),
-            "monto_proyectado": str(requested),
-            "restante_proyectado_si_aprueba": str(b_projected),
+            "partida_nombre": partida_map.get(partida),
             "budget_validation_applies": bool(av.get("budget_validation_applies", True)),
             "scope": av.get("effective_scope") or "total",
+            "budget_total": str(b_total),
+            "executed_current": str(b_exec),
+            "available_current": str(b_avail),
+            "po_committed_current": str(line_total),
+            "oc_line_total": str(line_total),
+            "approved_accumulated_line": str(approved_line),
+            "pending_line_amount": str(pending_line if pending_line > 0 else Decimal("0.00")),
+            "available_after_partial_line": str(after_partial),
+            "available_after_full_line": str(after_full),
         })
 
-    return {
-        "scope": "purchase_order",
-        "presupuesto_total": str(presupuesto_total.quantize(TWO_DECIMALS)),
-        "ejecutado_actual": str(ejecutado_actual.quantize(TWO_DECIMALS)),
-        "disponible_actual": str(disponible_actual.quantize(TWO_DECIMALS)),
-        "monto_oc": str(po_total.quantize(TWO_DECIMALS)),
-        "monto_aprobado_acumulado": str(approved_total.quantize(TWO_DECIMALS)),
-        "monto_pendiente_oc": str(pending_total if pending_total > 0 else Decimal("0.00")),
-        "monto_a_aprobar": str(amount_to_approve),
-        "restante_proyectado_si_aprueba": str(restante_proyectado.quantize(TWO_DECIMALS)),
+    summary = {
+        "scope": "total",
+        "budget_total": str(aggregate["budget_total"].quantize(TWO_DECIMALS)),
+        "executed_current": str(aggregate["executed_current"].quantize(TWO_DECIMALS)),
+        "available_current": str(aggregate["available_current"].quantize(TWO_DECIMALS)),
+        "po_total": str(po_total),
+        "approved_accumulated": str(approved_total),
+        "pending_amount": str(pending_total),
+        "preview_partial_amount": str(preview_partial.quantize(TWO_DECIMALS)),
+        "available_after_partial": str(aggregate["available_after_partial"].quantize(TWO_DECIMALS)),
+        "available_after_full": str(aggregate["available_after_full"].quantize(TWO_DECIMALS)),
         "by_partida": by_partida,
     }
+    # backward-compatible aliases already used by frontend
+    summary.update({
+        "presupuesto_total": summary["budget_total"],
+        "ejecutado_actual": summary["executed_current"],
+        "disponible_actual": summary["available_current"],
+        "monto_oc": summary["po_total"],
+        "monto_aprobado_acumulado": summary["approved_accumulated"],
+        "monto_pendiente_oc": summary["pending_amount"],
+        "monto_a_aprobar": summary["preview_partial_amount"],
+        "restante_proyectado_si_aprueba": summary["available_after_full"],
+    })
+    return summary
 
 
 async def generate_purchase_order_folio() -> str:
@@ -2707,16 +2846,23 @@ async def oc_budget_preview(payload: OCBudgetPreviewInput, current_user: dict = 
         summary_available += money_dec(item.get("remaining_total_current") or 0)
         summary_requested += money_dec(item.get("requested_amount") or 0)
         summary_projected += money_dec(item.get("projected_remaining_total") or 0)
+    summary = {
+        "budget_total": str(summary_budget.quantize(TWO_DECIMALS)),
+        "executed_current": str(summary_executed.quantize(TWO_DECIMALS)),
+        "available_current": str(summary_available.quantize(TWO_DECIMALS)),
+        "po_preview_amount": str(summary_requested.quantize(TWO_DECIMALS)),
+        "available_after_preview": str(summary_projected.quantize(TWO_DECIMALS)),
+        "presupuesto_total": str(summary_budget.quantize(TWO_DECIMALS)),
+        "ejecutado_actual": str(summary_executed.quantize(TWO_DECIMALS)),
+        "disponible_actual": str(summary_available.quantize(TWO_DECIMALS)),
+        "monto_solicitado": str(summary_requested.quantize(TWO_DECIMALS)),
+        "restante_proyectado": str(summary_projected.quantize(TWO_DECIMALS)),
+    }
     return {
         "project_id": payload.project_id,
+        "by_partida": items,
         "lines": items,
-        "summary": {
-            "presupuesto_total": str(summary_budget.quantize(TWO_DECIMALS)),
-            "ejecutado_actual": str(summary_executed.quantize(TWO_DECIMALS)),
-            "disponible_actual": str(summary_available.quantize(TWO_DECIMALS)),
-            "monto_solicitado": str(summary_requested.quantize(TWO_DECIMALS)),
-            "restante_proyectado": str(summary_projected.quantize(TWO_DECIMALS)),
-        },
+        "summary": summary,
     }
 
 
@@ -2995,10 +3141,14 @@ async def purchase_order_pdf(po_id: str, current_user: dict = Depends(require_ro
     if not po:
         raise HTTPException(status_code=404, detail={"code": "purchase_order_not_found", "message": "OC no encontrada"})
     enforce_company_access(current_user, po.get("company_id"))
+    project = await db.projects.find_one({"id": po.get("project_id")}, {"_id": 0}) if po.get("project_id") else None
+    company_id = po.get("company_id") or (project or {}).get("empresa_id")
+    empresa = await db.empresas.find_one({"id": company_id}, {"_id": 0}) if company_id else None
+    render_payload = {**po, "company_name": (empresa or {}).get("nombre"), "project_name": (project or {}).get("name"), "project_code": (project or {}).get("code")}
     logo_path = os.getenv("QF_OC_LOGO_PATH")
     if logo_path and not Path(logo_path).exists():
         logger.warning("QF_OC_LOGO_PATH no existe: %s", logo_path)
-    pdf_bytes = render_purchase_order_pdf(po)
+    pdf_bytes = render_purchase_order_pdf(render_payload)
     await log_audit(current_user, "PDF", "purchase_orders", po_id, {"folio": po.get("folio") or po.get("external_id")})
     filename = canonicalize_oc_folio(po.get("folio") or po.get("external_id") or po_id)
     return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"inline; filename={filename}.pdf"})
@@ -3715,13 +3865,23 @@ async def get_authorizations(
                 "folio": canonicalize_oc_folio(po.get("folio") or po.get("external_id")),
                 "invoice_folio": po.get("invoice_folio"),
                 "status": po.get("status"),
+                "empresa_id": po.get("company_id"),
+                "empresa_nombre": empresa_map.get(po.get("company_id"), {}).get("nombre"),
+                "proyecto_id": po.get("project_id"),
+                "proyecto_nombre": project_map.get(po.get("project_id"), {}).get("name"),
                 "project_id": po.get("project_id"),
                 "project": project_map.get(po.get("project_id"), {}).get("name"),
                 "project_code": project_map.get(po.get("project_id"), {}).get("code"),
                 "company_id": po.get("company_id"),
                 "company": empresa_map.get(po.get("company_id"), {}).get("nombre"),
+                "proveedor_nombre": po.get("vendor_name"),
+                "proveedor_rfc": po.get("vendor_rfc"),
                 "vendor_name": po.get("vendor_name"),
                 "vendor_rfc": po.get("vendor_rfc"),
+                "subtotal": po.get("subtotal_tax_base"),
+                "iva_total": po.get("tax_total"),
+                "ret_isr_total": po.get("withholding_isr_total"),
+                "total": po.get("total"),
                 "totals": {
                     "subtotal": po.get("subtotal_tax_base"),
                     "iva": po.get("tax_total"),
@@ -5332,8 +5492,7 @@ async def setup_indexes():
     await db.users.create_index([("email", ASCENDING)], unique=True)
     await db.users.create_index([("name", ASCENDING)], unique=True)
     await db.budget_plans.create_index([("project_id", ASCENDING), ("partida_codigo", ASCENDING)], unique=True)
-    await db.purchase_orders.create_index([("company_id", ASCENDING), ("external_id", ASCENDING)], unique=True)
-    await db.purchase_orders.create_index([("folio", ASCENDING)], unique=True)
+    await ensure_purchase_order_indexes()
     await ensure_partial_indexes_for_movements()
     await db.odoo_sync_purchase_orders.create_index([("purchase_order_id", ASCENDING)], unique=True)
 

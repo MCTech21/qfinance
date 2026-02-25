@@ -305,8 +305,9 @@ const Authorizations = () => {
             <div className="space-y-4">
               {pendingAuths.map(auth => {
                 const mov = auth.movement_details;
-                const ctx = auth.budget_context;
-                
+                const po = auth.purchase_order_details || {};
+                const summary = auth.budget_gate_summary || auth.budget_preview || null;
+
                 return (
                   <div
                     key={auth.id}
@@ -334,11 +335,23 @@ const Authorizations = () => {
                               <>
                                 <div>
                                   <span className="text-xs text-muted-foreground">OC</span>
-                                  <p className="font-medium">{auth.purchase_order_details.folio || "-"}</p>
+                                  <p className="font-medium">{po.folio || "-"}</p>
                                 </div>
                                 <div>
                                   <span className="text-xs text-muted-foreground">Proveedor</span>
-                                  <p className="font-medium">{auth.purchase_order_details.vendor_name || "-"}</p>
+                                  <p className="font-medium">{po.proveedor_nombre || po.vendor_name || "-"}</p>
+                                </div>
+                                <div>
+                                  <span className="text-xs text-muted-foreground">Total OC</span>
+                                  <p className="font-mono font-semibold">{formatCurrency(po.total || po?.totals?.total)}</p>
+                                </div>
+                                <div>
+                                  <span className="text-xs text-muted-foreground">Aprobado acumulado</span>
+                                  <p className="font-mono">{formatCurrency(po.approved_amount_total)}</p>
+                                </div>
+                                <div>
+                                  <span className="text-xs text-muted-foreground">Pendiente</span>
+                                  <p className="font-mono font-semibold">{formatCurrency(po.pending_amount)}</p>
                                 </div>
                               </>
                             )}
@@ -370,34 +383,28 @@ const Authorizations = () => {
                         )}
                         
                         {/* Budget Impact Preview */}
-                        {ctx && (
+                        {summary && (
                           <div className="mt-3 p-3 bg-muted/50 rounded-lg">
                             <p className="text-xs font-medium mb-2 flex items-center gap-1">
                               <TrendingUp className="h-3 w-3" />
-                              Impacto en Presupuesto:
+                              Impacto en Presupuesto (scope: {summary.scope || "total"}):
                             </p>
-                            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
                               <div>
-                                <span className="text-muted-foreground">Presupuesto</span>
-                                <p className="font-mono">{formatCurrency(ctx.presupuesto)}</p>
+                                <span className="text-muted-foreground">Presupuesto total</span>
+                                <p className="font-mono">{formatCurrency(summary.budget_total || summary.presupuesto_total)}</p>
                               </div>
                               <div>
-                                <span className="text-muted-foreground">Ejecutado Actual</span>
-                                <p className="font-mono">{formatCurrency(ctx.ejecutado_actual)}</p>
+                                <span className="text-muted-foreground">Ejecutado actual</span>
+                                <p className="font-mono">{formatCurrency(summary.executed_current || summary.ejecutado_actual)}</p>
                               </div>
                               <div>
-                                <span className="text-muted-foreground">Este Mov.</span>
-                                <p className="font-mono text-amber-400">+{formatCurrency(ctx.monto_movimiento)}</p>
+                                <span className="text-muted-foreground">Disponible actual</span>
+                                <p className="font-mono">{formatCurrency(summary.available_current || summary.disponible_actual)}</p>
                               </div>
                               <div>
-                                <span className="text-muted-foreground">% Actual</span>
-                                <p className="font-mono">{ctx.porcentaje_actual?.toFixed(1)}%</p>
-                              </div>
-                              <div>
-                                <span className="text-muted-foreground">% Si Aprueba</span>
-                                <p className={`font-mono font-bold ${ctx.porcentaje_si_aprueba > 100 ? 'text-red-400' : 'text-emerald-400'}`}>
-                                  {ctx.porcentaje_si_aprueba?.toFixed(1)}%
-                                </p>
+                                <span className="text-muted-foreground">Disponible si aprueba pendiente</span>
+                                <p className="font-mono font-semibold">{formatCurrency(summary.available_after_full || summary.restante_proyectado_si_aprueba)}</p>
                               </div>
                             </div>
                           </div>
@@ -412,7 +419,7 @@ const Authorizations = () => {
                             className="bg-emerald-600 hover:bg-emerald-700"
                             onClick={() => openResolveDialog(auth, "approved")}
                             disabled={resolving === auth.id}
-                            data-testid={`approve-auth-${auth.id}`}
+                            data-testid="approve-btn"
                           >
                             <CheckCircle className="h-4 w-4 mr-1" />
                             Aprobar / Parcial

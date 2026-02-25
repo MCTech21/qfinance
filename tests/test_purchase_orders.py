@@ -175,7 +175,9 @@ def test_authorization_payload_includes_oc_budget_summary():
     auth = next((a for a in listed.json() if a.get("purchase_order_id") == po_id), None)
     assert auth is not None
     assert auth.get("purchase_order_details", {}).get("folio")
-    assert auth.get("budget_gate_summary", {}).get("presupuesto_total") is not None
+    assert auth.get("purchase_order_details", {}).get("empresa_nombre") == "Empresa 1"
+    assert auth.get("purchase_order_details", {}).get("proyecto_nombre") == "Proyecto 1"
+    assert auth.get("budget_gate_summary", {}).get("budget_total") is not None
     assert isinstance(auth.get("budget_gate_summary", {}).get("by_partida"), list)
 
 
@@ -191,7 +193,7 @@ def test_partial_approval_updates_pending_and_budget_fields():
     assert res.status_code == 200
     payload = res.json()
     assert payload["pending_amount"] == "66.00"
-    assert payload.get("budget_gate_summary", {}).get("monto_pendiente_oc") == "66.00"
+    assert payload.get("budget_gate_summary", {}).get("pending_amount") == "66.00"
 
 
 def test_authorization_resolve_422_does_not_return_unserializable_error():
@@ -219,17 +221,22 @@ def test_purchase_order_pdf_endpoint_returns_pdf_and_contains_folio():
     assert pdf_res.status_code == 200
     assert b"%PDF" in pdf_res.content[:10]
     assert b"ORDEN DE COMPRA" in pdf_res.content
+    assert "inline; filename=OC000002.pdf" in pdf_res.headers.get("content-disposition", "")
 
 
 def test_index_setup_is_mongo_compatible_no_ne_in_partial_expression():
     _, db = client_for("admin")
     import asyncio
     asyncio.run(server.ensure_partial_indexes_for_movements())
+    asyncio.run(server.ensure_purchase_order_indexes())
     idx = db.movements.indexes.get("uq_movements_po_line_origin_event_exists") or {}
     partial = idx.get("partialFilterExpression") or {}
     assert "$type" in partial.get("purchase_order_line_id", {})
     assert "$ne" not in partial.get("purchase_order_line_id", {})
     assert "$type" in partial.get("origin_event", {})
+    po_idx = db.purchase_orders.indexes.get("uq_purchase_orders_folio_exists") or {}
+    po_partial = po_idx.get("partialFilterExpression") or {}
+    assert po_partial.get("folio", {}).get("$type") == "string"
 
 
 def test_oc_preview_budget_calculation_with_iva_and_multi_lines():
@@ -247,3 +254,19 @@ def test_oc_preview_budget_calculation_with_iva_and_multi_lines():
     body = preview.json()
     assert body["lines"][0]["requested_amount"] == "150.00"
     assert body["summary"]["monto_solicitado"] == "150.00"
+
+
+def test_startup_index_setup_is_idempotent_with_conflicting_folio_index():
+    _, db = client_for("admin")
+    db.purchase_orders.indexes["folio_1"] = {
+        "key": [("folio", 1)],
+        "unique": True,
+        "partialFilterExpression": {"folio": {"$exists": True}},
+    }
+    import asyncio
+    asyncio.run(server.ensure_purchase_order_indexes())
+    idx = db.purchase_orders.indexes.get("uq_purchase_orders_folio_exists") or {}
+    assert idx.get("partialFilterExpression", {}).get("folio", {}).get("$type") == "string"
+    asyncio.run(server.ensure_purchase_order_indexes())
+    idx2 = db.purchase_orders.indexes.get("uq_purchase_orders_folio_exists") or {}
+    assert idx2.get("partialFilterExpression", {}).get("folio", {}).get("$type") == "string"
