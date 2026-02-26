@@ -1,6 +1,13 @@
 from fastapi.testclient import TestClient
 import backend.server as server
+from pypdf import PdfReader
 from tests.test_issue_2_5 import FakeDB
+import io
+
+
+def _pdf_text(pdf_bytes: bytes) -> str:
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    return "\n".join((page.extract_text() or "") for page in reader.pages)
 
 
 def client_for(role: str, company_id: str = "e1"):
@@ -392,3 +399,72 @@ def test_render_pdf_bytes_has_metadata_strings_and_filename_rules():
     assert server.oc_pdf_filename("OC-000123") == "OC-000123"
     assert server.oc_pdf_filename("OC000123") == "OC-OC000123"
     assert server.oc_pdf_filename("  F-77 ") == "OC-F-77"
+
+
+def test_logo_resolution(monkeypatch):
+    monkeypatch.setenv("QFINANCE_PDF_LOGO_PATH", "/tmp/does-not-exist-oc-logo.png")
+    resolved = server.resolve_pdf_logo_path()
+    assert resolved is None or resolved.endswith("quantum_logo.png")
+
+
+def test_render_pdf_contains_key_text():
+    po = {
+        "folio": "OC000006",
+        "order_date": "2026-02-24",
+        "company_name": "EJEMPLO Q",
+        "project_name": "Proyecto",
+        "vendor_name": "Proveedor",
+        "lines": [],
+        "subtotal_tax_base": "0.00",
+        "tax_total": "0.00",
+        "total": "0.00",
+    }
+    pdf = server.render_purchase_order_pdf(po)
+    assert pdf.startswith(b"%PDF")
+    txt = pdf.decode("latin-1", errors="ignore")
+    assert "ORDEN DE COMPRA" in txt
+    assert "OC000006" in txt
+
+
+def test_metadata_present():
+    po = {
+        "folio": "OC000007",
+        "order_date": "2026-02-24",
+        "company_name": "EJEMPLO Q",
+        "project_name": "Proyecto",
+        "vendor_name": "Proveedor",
+        "lines": [],
+        "subtotal_tax_base": "0.00",
+        "tax_total": "0.00",
+        "total": "0.00",
+    }
+    txt = server.render_purchase_order_pdf(po).decode("latin-1", errors="ignore")
+    assert "Creator (QFinance / quantumgrupo.mx)" in txt
+    assert "Producer (QFinance / quantumgrupo.mx)" in txt
+    assert "Title (Orden de Compra OC000007)" in txt
+
+
+def test_notes_section_includes_bank_as_bullets():
+    po = {
+        "folio": "OC000008",
+        "order_date": "2026-02-24",
+        "company_name": "EJEMPLO Q",
+        "project_name": "Proyecto",
+        "vendor_name": "Proveedor",
+        "notes": "Urgente",
+        "bank_details": {
+            "banco": "BBVA",
+            "cuenta": "123456",
+            "clabe": "012345678901234567",
+            "beneficiario": "Quantum SA",
+        },
+        "lines": [],
+        "subtotal_tax_base": "0.00",
+        "tax_total": "0.00",
+        "total": "0.00",
+    }
+    txt = _pdf_text(server.render_purchase_order_pdf(po))
+    assert "NOTAS / COMENTARIOS ADICIONALES" in txt
+    assert "Banco" in txt
+    assert "BBVA" in txt
+    assert any(label in txt for label in ("Cuenta", "CLABE", "Beneficiario"))
