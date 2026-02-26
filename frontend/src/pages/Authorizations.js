@@ -27,10 +27,12 @@ const Authorizations = () => {
   const [filters, setFilters] = useState({
     empresa_id: "all",
     project_id: "all",
-    year: 2025,
-    month: 1,
+    year: new Date().getFullYear(),
+    month: new Date().getMonth() + 1,
     status: "pending"
   });
+  const [partialAmount, setPartialAmount] = useState("");
+  const [resolveError, setResolveError] = useState("");
 
   const yearOptions = buildYearOptions();
 
@@ -81,6 +83,28 @@ const Authorizations = () => {
     }
   }, [filters.empresa_id, projects]);
 
+
+  const toNumber = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const getApiMessage = (error, fallback = "Error al procesar autorización") => {
+    const detail = error?.response?.data?.detail;
+    if (typeof detail === "string") return detail;
+    if (detail?.message) return detail.message;
+    if (detail?.code) return detail.code;
+    return fallback;
+  };
+
+  const selectedSummary = selectedAuth?.budget_gate_summary || selectedAuth?.budget_preview || null;
+  const selectedPo = selectedAuth?.purchase_order_details || null;
+  const pendingAmount = toNumber(selectedPo?.pending_amount ?? selectedSummary?.monto_pendiente_oc ?? selectedPo?.totals?.total ?? 0);
+  const approvedAccumulated = toNumber(selectedPo?.approved_amount_total ?? selectedSummary?.monto_aprobado_acumulado ?? 0);
+  const totalOc = toNumber(selectedPo?.totals?.total ?? selectedSummary?.monto_oc ?? selectedAuth?.movement_details?.monto_mxn ?? 0);
+  const requestedApproval = action === "approved" && partialAmount !== "" ? toNumber(partialAmount) : pendingAmount;
+  const projectedRemainingIfPartial = toNumber(selectedSummary?.disponible_actual ?? 0) - requestedApproval;
+
   const handleResolve = async () => {
     if (!selectedAuth || !action) return;
     
@@ -91,19 +115,24 @@ const Authorizations = () => {
     }
     
     setResolving(selectedAuth.id);
+    setResolveError("");
     try {
       await api().put(`/authorizations/${selectedAuth.id}`, {
         status: action,
-        notes: notes
+        notes: notes,
+        partial_amount: action === "approved" && partialAmount !== "" ? Number(partialAmount) : undefined,
       });
-      
-      toast.success(action === "approved" ? "Movimiento aprobado y contabilizado" : "Movimiento rechazado");
+
+      toast.success(action === "approved" ? "Autorización resuelta correctamente" : "Movimiento rechazado");
       setDialogOpen(false);
       setSelectedAuth(null);
       setNotes("");
+      setPartialAmount("");
       fetchData();
     } catch (error) {
-      toast.error(error.response?.data?.detail || "Error al procesar autorización");
+      const msg = getApiMessage(error);
+      setResolveError(msg);
+      toast.error(msg);
     } finally {
       setResolving(null);
     }
@@ -113,6 +142,8 @@ const Authorizations = () => {
     setSelectedAuth(auth);
     setAction(actionType);
     setNotes("");
+    setPartialAmount("");
+    setResolveError("");
     setDialogOpen(true);
   };
 
@@ -125,7 +156,10 @@ const Authorizations = () => {
   };
 
   const formatDate = (dateStr) => {
-    return new Date(dateStr).toLocaleString("es-MX", {
+    if (!dateStr) return "-";
+    const d = new Date(dateStr);
+    if (Number.isNaN(d.getTime())) return "-";
+    return d.toLocaleString("es-MX", {
       day: "2-digit",
       month: "short",
       year: "numeric",
@@ -143,7 +177,7 @@ const Authorizations = () => {
     rejected: { icon: XCircle, color: "text-red-400", bg: "bg-red-500/10", label: "Rechazado" }
   };
 
-  const canResolve = user?.role === "admin" || user?.role === "autorizador";
+  const canResolve = user?.role === "admin" || user?.role === "autorizador" || user?.role === "director";
 
   return (
     <div className="space-y-6" data-testid="authorizations-page">
@@ -271,8 +305,9 @@ const Authorizations = () => {
             <div className="space-y-4">
               {pendingAuths.map(auth => {
                 const mov = auth.movement_details;
-                const ctx = auth.budget_context;
-                
+                const po = auth.purchase_order_details || {};
+                const summary = auth.budget_gate_summary || auth.budget_preview || null;
+
                 return (
                   <div
                     key={auth.id}
@@ -296,6 +331,30 @@ const Authorizations = () => {
                         
                         {mov && (
                           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                            {auth.purchase_order_details && (
+                              <>
+                                <div>
+                                  <span className="text-xs text-muted-foreground">OC</span>
+                                  <p className="font-medium">{po.folio || "-"}</p>
+                                </div>
+                                <div>
+                                  <span className="text-xs text-muted-foreground">Proveedor</span>
+                                  <p className="font-medium">{po.proveedor_nombre || po.vendor_name || "-"}</p>
+                                </div>
+                                <div>
+                                  <span className="text-xs text-muted-foreground">Total OC</span>
+                                  <p className="font-mono font-semibold">{formatCurrency(po.total || po?.totals?.total)}</p>
+                                </div>
+                                <div>
+                                  <span className="text-xs text-muted-foreground">Aprobado acumulado</span>
+                                  <p className="font-mono">{formatCurrency(po.approved_amount_total)}</p>
+                                </div>
+                                <div>
+                                  <span className="text-xs text-muted-foreground">Pendiente</span>
+                                  <p className="font-mono font-semibold">{formatCurrency(po.pending_amount)}</p>
+                                </div>
+                              </>
+                            )}
                             <div>
                               <span className="text-xs text-muted-foreground">Empresa</span>
                               <p className="font-medium">{mov.empresa_nombre}</p>
@@ -305,15 +364,15 @@ const Authorizations = () => {
                               <p className="font-medium">{mov.project_code}</p>
                             </div>
                             <div>
-                              <span className="text-xs text-muted-foreground">Partida</span>
-                              <p className="font-medium">{mov.partida_codigo} - {mov.partida_nombre}</p>
+                              <span className="text-xs text-muted-foreground">Partida(s)</span>
+                              <p className="font-medium">{mov.partida_codigo || "-"}</p>
                             </div>
                             <div>
-                              <span className="text-xs text-muted-foreground">Proveedor</span>
-                              <p className="font-medium">{mov.provider_name}</p>
+                              <span className="text-xs text-muted-foreground">RFC</span>
+                              <p className="font-medium">{mov.provider_rfc || "-"}</p>
                             </div>
                             <div>
-                              <span className="text-xs text-muted-foreground">Referencia</span>
+                              <span className="text-xs text-muted-foreground">Referencia (Factura)</span>
                               <p className="font-mono text-xs">{mov.referencia}</p>
                             </div>
                             <div>
@@ -324,34 +383,28 @@ const Authorizations = () => {
                         )}
                         
                         {/* Budget Impact Preview */}
-                        {ctx && (
+                        {summary && (
                           <div className="mt-3 p-3 bg-muted/50 rounded-lg">
                             <p className="text-xs font-medium mb-2 flex items-center gap-1">
                               <TrendingUp className="h-3 w-3" />
-                              Impacto en Presupuesto:
+                              Impacto en Presupuesto (scope: {summary.scope || "total"}):
                             </p>
-                            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
                               <div>
-                                <span className="text-muted-foreground">Presupuesto</span>
-                                <p className="font-mono">{formatCurrency(ctx.presupuesto)}</p>
+                                <span className="text-muted-foreground">Presupuesto total</span>
+                                <p className="font-mono">{formatCurrency(summary.budget_total || summary.presupuesto_total)}</p>
                               </div>
                               <div>
-                                <span className="text-muted-foreground">Ejecutado Actual</span>
-                                <p className="font-mono">{formatCurrency(ctx.ejecutado_actual)}</p>
+                                <span className="text-muted-foreground">Ejecutado actual</span>
+                                <p className="font-mono">{formatCurrency(summary.executed_current || summary.ejecutado_actual)}</p>
                               </div>
                               <div>
-                                <span className="text-muted-foreground">Este Mov.</span>
-                                <p className="font-mono text-amber-400">+{formatCurrency(ctx.monto_movimiento)}</p>
+                                <span className="text-muted-foreground">Disponible actual</span>
+                                <p className="font-mono">{formatCurrency(summary.available_current || summary.disponible_actual)}</p>
                               </div>
                               <div>
-                                <span className="text-muted-foreground">% Actual</span>
-                                <p className="font-mono">{ctx.porcentaje_actual?.toFixed(1)}%</p>
-                              </div>
-                              <div>
-                                <span className="text-muted-foreground">% Si Aprueba</span>
-                                <p className={`font-mono font-bold ${ctx.porcentaje_si_aprueba > 100 ? 'text-red-400' : 'text-emerald-400'}`}>
-                                  {ctx.porcentaje_si_aprueba?.toFixed(1)}%
-                                </p>
+                                <span className="text-muted-foreground">Disponible si aprueba pendiente</span>
+                                <p className="font-mono font-semibold">{formatCurrency(summary.available_after_full || summary.restante_proyectado_si_aprueba)}</p>
                               </div>
                             </div>
                           </div>
@@ -366,10 +419,10 @@ const Authorizations = () => {
                             className="bg-emerald-600 hover:bg-emerald-700"
                             onClick={() => openResolveDialog(auth, "approved")}
                             disabled={resolving === auth.id}
-                            data-testid={`approve-auth-${auth.id}`}
+                            data-testid="approve-btn"
                           >
                             <CheckCircle className="h-4 w-4 mr-1" />
-                            Aprobar
+                            Aprobar / Parcial
                           </Button>
                           <Button
                             size="sm"
@@ -471,12 +524,17 @@ const Authorizations = () => {
               )}
             </div>
             
-            {action === "approved" && selectedAuth?.budget_context && (
-              <div className="p-3 bg-emerald-500/10 rounded-lg border border-emerald-500/20">
-                <p className="text-sm text-emerald-400">
-                  Al aprobar, el % avance pasará de {selectedAuth.budget_context.porcentaje_actual?.toFixed(1)}% 
-                  a <strong>{selectedAuth.budget_context.porcentaje_si_aprueba?.toFixed(1)}%</strong>
-                </p>
+            {action === "approved" && selectedSummary && (
+              <div className="p-3 bg-emerald-500/10 rounded-lg border border-emerald-500/20 space-y-1 text-sm">
+                <p>Presupuesto total: <span className="font-mono font-semibold">{formatCurrency(selectedSummary.presupuesto_total)}</span></p>
+                <p>Disponible actual: <span className="font-mono font-semibold">{formatCurrency(selectedSummary.disponible_actual)}</span></p>
+                <p>Monto total OC: <span className="font-mono">{formatCurrency(totalOc)}</span></p>
+                <p>Aprobado acumulado: <span className="font-mono">{formatCurrency(approvedAccumulated)}</span></p>
+                <p>Pendiente OC: <span className="font-mono">{formatCurrency(pendingAmount)}</span></p>
+                <p>Restante proyectado si aprueba pendiente completo: <span className="font-mono">{formatCurrency(selectedSummary.restante_proyectado_si_aprueba)}</span></p>
+                {partialAmount !== "" && (
+                  <p>Restante proyectado con parcial capturado: <span className="font-mono font-semibold">{formatCurrency(projectedRemainingIfPartial)}</span></p>
+                )}
               </div>
             )}
             
@@ -499,7 +557,22 @@ const Authorizations = () => {
                 <p className="text-xs text-red-400">* El motivo es obligatorio para rechazar</p>
               )}
             </div>
+
+            {action === "approved" && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Monto parcial a aprobar (opcional)</label>
+                <input
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  value={partialAmount}
+                  onChange={(e) => setPartialAmount(e.target.value)}
+                  placeholder="Vacío = aprobar monto completo pendiente"
+                />
+              </div>
+            )}
           </div>
+            {resolveError && (
+              <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2 text-sm text-red-300">{resolveError}</div>
+            )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>
               Cancelar
