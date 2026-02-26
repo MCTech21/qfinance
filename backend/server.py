@@ -1870,8 +1870,12 @@ def render_purchase_order_pdf(po: dict) -> bytes:
         cmds += ["0.87 0.89 0.94 RG", "0.4 w", f"{col2_x} {header_y-header_h:.2f} 0 {header_h} m {col2_x} {header_y:.2f} l S"]
         cmds += ["0.87 0.89 0.94 RG", "0.4 w", f"{col3_x} {header_y-header_h:.2f} 0 {header_h} m {col3_x} {header_y:.2f} l S", "0 0 0 rg"]
 
-        logo_max_h = 34.0
-        logo_max_w = 116.0
+        # Left mini-table layout: [logo][Quantum | QFinance]
+        left_cell_logo_x = col1_x + 8
+        left_cell_logo_w = 46.0
+        left_cell_text_x = left_cell_logo_x + left_cell_logo_w + 4
+        logo_max_h = 30.0
+        logo_max_w = left_cell_logo_w
         logo_drawn = False
         if logo_image:
             ratio = logo_image["width_px"] / max(1, logo_image["height_px"])
@@ -1880,15 +1884,15 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             if logo_w > logo_max_w:
                 logo_w = logo_max_w
                 logo_h = logo_w / max(ratio, 0.001)
-            logo_x = col1_x + 8
-            logo_y = header_y - 8 - logo_h
+            logo_x = left_cell_logo_x + ((left_cell_logo_w - logo_w) / 2)
+            logo_y = header_y - 10 - logo_h
             cmds += ["1 1 1 rg", f"{logo_x-2:.2f} {logo_y-2:.2f} {logo_w+4:.2f} {logo_h+4:.2f} re f", "0 0 0 rg"]
             cmds += ["q", f"{logo_w:.2f} 0 0 {logo_h:.2f} {logo_x:.2f} {logo_y:.2f} cm", "/Im1 Do", "Q"]
             logo_drawn = True
 
         if not logo_drawn:
             text_cmd(cmds, col1_x + 8, header_y - 28, "Quantum", 13)
-        text_cmd(cmds, col1_x + 8, header_y - 46, "Quantum | QFinance", 8)
+        text_cmd(cmds, left_cell_text_x, header_y - 30, "Quantum | QFinance", 8)
 
         text_cmd(cmds, col2_x + 10, header_y - 28, "ORDEN DE COMPRA", 20)
         text_cmd(cmds, col2_x + 10, header_y - 44, "DOCUMENTO COMERCIAL", 10)
