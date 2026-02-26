@@ -23,6 +23,7 @@ import bcrypt
 from enum import Enum
 import csv
 import io
+from PIL import Image
 from openpyxl import Workbook, load_workbook
 from dateutil import parser as date_parser
 import pytz
@@ -1706,6 +1707,24 @@ def oc_pdf_filename(raw_folio: Optional[str]) -> str:
     return f"OC-{base}"
 
 
+def resolve_pdf_logo_path() -> Optional[str]:
+    env_logo = os.environ.get("QFINANCE_PDF_LOGO_PATH", "").strip()
+    candidates: List[Path] = []
+    if env_logo:
+        candidates.append(Path(env_logo).expanduser())
+    candidates.append(Path("/var/www/qfinance/brand/quantum_logo.png"))
+    candidates.append(ROOT_DIR.parent / "frontend" / "public" / "brand" / "quantum_logo.png")
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except Exception:
+            continue
+        if resolved.is_file() and os.access(str(resolved), os.R_OK):
+            return str(resolved)
+    return None
+
+
 def build_purchase_order_pdf_payload(po: dict) -> dict:
     folio = canonicalize_oc_folio(po.get("folio") or po.get("external_id"))
     order_date = _pdf_format_date_local(po.get("order_date"), "%Y-%m-%d")
@@ -1788,32 +1807,99 @@ def render_purchase_order_pdf(po: dict) -> bytes:
         payment_state = "Total"
 
     lines = payload.get("lines") or []
-    notes_lines = _pdf_wrap(payload.get("notes") or "S/I", 95)
+    notes_text = payload.get("notes") or "S/I"
+    bank = payload.get("bank") or {}
+
+    logo_path = resolve_pdf_logo_path()
+    logo_image: Optional[Dict[str, Any]] = None
+    if logo_path:
+        try:
+            with Image.open(logo_path) as img:
+                img_rgb = img.convert("RGB")
+                width_px, height_px = img_rgb.size
+                logo_image = {
+                    "width_px": width_px,
+                    "height_px": height_px,
+                    "data": img_rgb.tobytes(),
+                }
+        except Exception:
+            logo_image = None
 
     page_streams: List[bytes] = []
 
     def text_cmd(cmds: List[str], x: float, y: float, text: Any, size: int = 9):
         cmds += ["BT", f"/F1 {size} Tf", f"{x:.2f} {y:.2f} Td", f"({_pdf_escape(text)}) Tj", "ET"]
 
+    def draw_wrapped(cmds: List[str], x: float, y: float, text: Any, size: int, width_chars: int, line_step: float = 12.0) -> float:
+        lines_local = _pdf_wrap(text, width_chars)
+        cursor = y
+        for line in lines_local:
+            text_cmd(cmds, x, cursor, line, size)
+            cursor -= line_step
+        return cursor
+
     def draw_header(cmds: List[str]):
-        cmds += ["0.05 0.18 0.56 rg", "40 748 532 20 re f", "0 0 0 rg"]
-        text_cmd(cmds, 50, 732, "Quantum | QFinance", 11)
-        text_cmd(cmds, 50, 716, "ORDEN DE COMPRA", 22)
-        text_cmd(cmds, 50, 703, "DOCUMENTO COMERCIAL", 9)
+        header_x = 40
+        header_y = 748
+        header_w = 532
+        header_h = 92
 
-        # Right metadata block (no overlap)
-        text_cmd(cmds, 390, 731, f"N°: {oc_number}", 11)
-        text_cmd(cmds, 390, 717, f"Fecha: {order_date}", 10)
-        text_cmd(cmds, 390, 704, f"Folio: {folio}", 9)
+        col1_w = 130
+        col3_w = 180
+        col2_w = header_w - col1_w - col3_w
 
-        # Badges/chips
-        cmds += ["0.92 0.92 0.94 rg", "390 684 88 16 re f", "0.90 0.90 0.92 rg", "484 684 88 16 re f", "0 0 0 rg"]
-        text_cmd(cmds, 396, 688, f"Envío: {po.get('shipping_status') or 'Pendiente'}", 8)
-        text_cmd(cmds, 490, 688, f"Pago: {payment_state}", 8)
+        col1_x = header_x
+        col2_x = col1_x + col1_w
+        col3_x = col2_x + col2_w
+
+        cmds += ["0.94 0.95 0.98 rg", f"{header_x} {header_y-header_h:.2f} {header_w} {header_h} re f", "0 0 0 rg"]
+        cmds += ["0.82 0.85 0.92 RG", "0.5 w", f"{header_x} {header_y-header_h:.2f} {header_w} {header_h} re S"]
+        cmds += ["0.87 0.89 0.94 RG", "0.4 w", f"{col2_x} {header_y-header_h:.2f} 0 {header_h} m {col2_x} {header_y:.2f} l S"]
+        cmds += ["0.87 0.89 0.94 RG", "0.4 w", f"{col3_x} {header_y-header_h:.2f} 0 {header_h} m {col3_x} {header_y:.2f} l S", "0 0 0 rg"]
+
+        logo_max_h = 34.0
+        logo_max_w = 116.0
+        logo_drawn = False
+        if logo_image:
+            ratio = logo_image["width_px"] / max(1, logo_image["height_px"])
+            logo_h = logo_max_h
+            logo_w = logo_h * ratio
+            if logo_w > logo_max_w:
+                logo_w = logo_max_w
+                logo_h = logo_w / max(ratio, 0.001)
+            logo_x = col1_x + 8
+            logo_y = header_y - 8 - logo_h
+            cmds += ["q", f"{logo_w:.2f} 0 0 {logo_h:.2f} {logo_x:.2f} {logo_y:.2f} cm", "/Im1 Do", "Q"]
+            logo_drawn = True
+
+        if not logo_drawn:
+            text_cmd(cmds, col1_x + 8, header_y - 28, "Quantum", 13)
+        text_cmd(cmds, col1_x + 8, header_y - 46, "Quantum | QFinance", 8)
+
+        text_cmd(cmds, col2_x + 10, header_y - 28, "ORDEN DE COMPRA", 20)
+        text_cmd(cmds, col2_x + 10, header_y - 44, "DOCUMENTO COMERCIAL", 10)
+
+        # right column content (wrapped in fixed width)
+        y = header_y - 18
+        text_cmd(cmds, col3_x + 8, y, f"N°: {oc_number}", 10)
+        y -= 12
+        text_cmd(cmds, col3_x + 8, y, f"Fecha: {order_date}", 9)
+        y -= 11
+        y = draw_wrapped(cmds, col3_x + 8, y, f"Folio: {folio}", 8, 26, 10)
+
+        ship_text = f"Envío: {po.get('shipping_status') or 'Pendiente'}"
+        pay_text = f"Pago: {payment_state}"
+        chip_y = header_y - header_h + 10
+        chip_h = 14
+        chip_w = (col3_w - 28) / 2
+        cmds += ["0.92 0.92 0.94 rg", f"{col3_x+8:.2f} {chip_y:.2f} {chip_w:.2f} {chip_h} re f"]
+        cmds += ["0.90 0.90 0.92 rg", f"{col3_x+14+chip_w:.2f} {chip_y:.2f} {chip_w:.2f} {chip_h} re f", "0 0 0 rg"]
+        text_cmd(cmds, col3_x + 11, chip_y + 4, ship_text[:26], 7)
+        text_cmd(cmds, col3_x + 17 + chip_w, chip_y + 4, pay_text[:26], 7)
 
     def draw_party_cards(cmds: List[str]) -> float:
         left_x, right_x = 50, 315
-        top_y = 674
+        top_y = 644
         card_h = 86
         cmds += ["0.95 0.96 0.99 rg", f"{left_x} {top_y-card_h} 250 {card_h} re f", "0 0 0 rg"]
         cmds += ["0.95 0.96 0.99 rg", f"{right_x} {top_y-card_h} 257 {card_h} re f", "0 0 0 rg"]
@@ -1824,13 +1910,13 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             f"Empresa: {company_name}",
             f"Proyecto: {project_name}",
             f"Moneda: {po.get('currency') or 'MXN'} | TC: {po.get('exchange_rate') or '1'}",
-            f"Condiciones: {po.get('payment_terms') or 'N/A'}",
+            f"Condiciones: {po.get('payment_terms') or 'S/I'}",
         ]
         vendor = [
             f"Proveedor: {vendor_name}",
             f"RFC: {vendor_rfc}",
-            f"Factura proveedor: {po.get('invoice_folio') or 'N/A'}",
-            f"Contacto: {po.get('vendor_email') or 'N/A'}",
+            f"Factura proveedor: {po.get('invoice_folio') or 'S/I'}",
+            f"Contacto: {po.get('vendor_email') or 'S/I'}",
         ]
         y = top_y - 30
         for t in buyer:
@@ -1850,13 +1936,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             text_cmd(cmds, x, y-12, h, 8)
         cmds += ["0 0 0 rg"]
 
-    def draw_footer(cmds: List[str], page_no: int):
-        cmds += ["0.80 0.80 0.80 rg", "50 46 522 1 re f", "0 0 0 rg"]
-        text_cmd(cmds, 50, 34, f"Generado: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", 8)
-        text_cmd(cmds, 250, 34, "Creado con QFinance", 8)
-        text_cmd(cmds, 500, 34, f"Pag. {page_no}", 8)
-
-    row_y_start_first = 548
+    row_y_start_first = 518
     row_y_start_other = 706
     page_no = 1
     i = 0
@@ -1877,7 +1957,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             line = lines[i] or {}
             desc_lines = _pdf_wrap(line.get("description") or "-", 34)
             row_height = max(13, 10 * len(desc_lines))
-            if y_cursor - row_height < 150:
+            if y_cursor - row_height < 170:
                 break
             if shaded:
                 cmds += ["0.98 0.98 0.99 rg", f"50 {y_cursor-row_height+2:.2f} 522 {row_height:.2f} re f", "0 0 0 rg"]
@@ -1898,7 +1978,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             i += 1
 
         if i >= len(lines):
-            box_y = max(120, y_cursor - 96)
+            box_y = max(140, y_cursor - 110)
             cmds += ["0.95 0.95 0.97 rg", f"360 {box_y:.2f} 212 90 re f", "0 0 0 rg"]
             totals = [
                 f"Subtotal: {payload.get('subtotal')}",
@@ -1911,15 +1991,27 @@ def render_purchase_order_pdf(po: dict) -> bytes:
                 text_cmd(cmds, 370, ty, t, 10)
                 ty -= 16
 
-            notes_y = box_y - 8
-            text_cmd(cmds, 50, notes_y, "NOTAS Y TÉRMINOS", 9)
-            for n in notes_lines[:6]:
-                notes_y -= 12
-                text_cmd(cmds, 50, notes_y, n, 8)
+            notes_title_y = box_y + 26
+            text_cmd(cmds, 50, notes_title_y, "NOTAS / COMENTARIOS ADICIONALES", 9)
 
-        generated_label = datetime.now(TIMEZONE).strftime("%I:%M %p").lower().replace("am", "a.m.").replace("pm", "p.m.")
+            notes_lines = [] if notes_text == "S/I" else _pdf_wrap(notes_text, 95)
+            bank_lines = []
+            if bank and isinstance(bank, dict):
+                mapping = [("banco", "Banco"), ("cuenta", "Cuenta"), ("clabe", "CLABE"), ("beneficiario", "Beneficiario")]
+                for key, label in mapping:
+                    value = str(bank.get(key) or "").strip()
+                    if value:
+                        bank_lines.append(f"• {label}: {value}")
+            combined = notes_lines + bank_lines
+            if not combined:
+                combined = ["S/I"]
+
+            notes_y = notes_title_y - 12
+            for n in combined[:8]:
+                text_cmd(cmds, 50, notes_y, n, 8)
+                notes_y -= 11
+
         generated_human = f"Generado: {payload.get('generated_at')}"
-        # Footer matches requested brand text/domain
         cmds += ["0.80 0.80 0.80 rg", "50 46 522 1 re f", "0 0 0 rg"]
         text_cmd(cmds, 50, 34, generated_human, 8)
         text_cmd(cmds, 250, 34, "Creado con QFinance", 8)
@@ -1935,6 +2027,21 @@ def render_purchase_order_pdf(po: dict) -> bytes:
     page_count = len(page_streams)
     page_obj_start = 4
     content_obj_start = page_obj_start + page_count
+    font_obj_num = content_obj_start + page_count
+    next_obj_num = font_obj_num + 1
+
+    logo_obj_num: Optional[int] = None
+    logo_object: Optional[bytes] = None
+    if logo_image:
+        logo_obj_num = next_obj_num
+        next_obj_num += 1
+        img_data = logo_image["data"]
+        compressed = zlib.compress(img_data)
+        logo_object = (
+            f"{logo_obj_num} 0 obj << /Type /XObject /Subtype /Image /Width {logo_image['width_px']} /Height {logo_image['height_px']} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length {len(compressed)} >> stream\n".encode("latin-1")
+            + compressed
+            + b"\nendstream endobj\n"
+        )
 
     kids = " ".join([f"{page_obj_start + idx} 0 R" for idx in range(page_count)])
     objects.append(f"2 0 obj << /Type /Pages /Kids [{kids}] /Count {page_count} >> endobj\n".encode("latin-1"))
@@ -1942,8 +2049,9 @@ def render_purchase_order_pdf(po: dict) -> bytes:
     for idx in range(page_count):
         page_obj_num = page_obj_start + idx
         content_obj_num = content_obj_start + idx
+        xobj_part = f" /XObject << /Im1 {logo_obj_num} 0 R >>" if logo_obj_num else ""
         objects.append(
-            f"{page_obj_num} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {content_obj_start + page_count} 0 R >> >> /Contents {content_obj_num} 0 R >> endobj\n".encode("latin-1")
+            f"{page_obj_num} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {font_obj_num} 0 R >>{xobj_part} >> /Contents {content_obj_num} 0 R >> endobj\n".encode("latin-1")
         )
 
     for idx, stream in enumerate(page_streams):
@@ -1952,8 +2060,9 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             f"{content_obj_num} 0 obj << /Length {len(stream)} >> stream\n".encode("latin-1") + stream + b"\nendstream endobj\n"
         )
 
-    font_obj_num = content_obj_start + page_count
     objects.append(f"{font_obj_num} 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n".encode("latin-1"))
+    if logo_object:
+        objects.append(logo_object)
     objects.insert(2, f"3 0 obj << /Title (Orden de Compra {folio}) /Creator (QFinance / quantumgrupo.mx) /Producer (QFinance / quantumgrupo.mx) >> endobj\n".encode("latin-1", errors="replace"))
 
     pdf = bytearray(b"%PDF-1.4\n")
