@@ -1693,18 +1693,34 @@ def _oc_numeric_display(folio: str) -> str:
 def oc_pdf_filename(raw_folio: Optional[str]) -> str:
     base = str(raw_folio or "").strip()
     if not base:
-        return "OC-SIN-FOLIO"
-    base = re.sub(r"[^A-Za-z0-9_-]", "-", base)
-    base = re.sub(r"-+", "-", base).strip("-")
+        return "purchase-order.pdf"
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base)
+    base = re.sub(r"_+", "_", base).strip("._-")
     if not base:
-        return "OC-SIN-FOLIO"
+        return "purchase-order.pdf"
+    return f"{base}.pdf"
 
-    upper = base.upper()
-    if upper.startswith("OC-"):
-        return f"OC-{base[3:]}"
-    if upper.startswith("OC"):
-        return f"OC-{base}"
-    return f"OC-{base}"
+
+def derive_delivery_status(po: dict) -> Optional[str]:
+    for key in ("sent_to_vendor", "submitted_to_vendor"):
+        if po.get(key) is True:
+            return "Enviado"
+    for key in ("sent_at", "submitted_at", "vendor_sent_at"):
+        if po.get(key):
+            return "Enviado"
+    return None
+
+
+def derive_payment_status(po: dict) -> Optional[str]:
+    if po.get("odoo_payment_id") or po.get("payment_odoo_id"):
+        return "Enviado a Odoo"
+    if po.get("paid_at"):
+        return "Pagado"
+    if po.get("payment_approved_at"):
+        return "Aprobado"
+    if po.get("approved_at") or po.get("status") == PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value:
+        return "Aprobado"
+    return None
 
 
 def resolve_pdf_logo_path() -> Optional[str]:
@@ -1800,11 +1816,8 @@ def render_purchase_order_pdf(po: dict) -> bytes:
     vendor_name = payload["vendor"]["name"]
     vendor_rfc = payload["vendor"]["rfc"]
 
-    payment_state = "Pendiente"
-    if money_dec(payload.get("approved_amount_total", 0)) > 0 and money_dec(payload.get("pending_amount", 0)) > 0:
-        payment_state = "Parcial"
-    elif money_dec(payload.get("pending_amount", 0)) <= 0 and payload.get("status") == PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value:
-        payment_state = "Total"
+    delivery_status = derive_delivery_status(po)
+    payment_status = derive_payment_status(po)
 
     lines = payload.get("lines") or []
     notes_text = payload.get("notes") or "S/I"
@@ -1869,6 +1882,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
                 logo_h = logo_w / max(ratio, 0.001)
             logo_x = col1_x + 8
             logo_y = header_y - 8 - logo_h
+            cmds += ["1 1 1 rg", f"{logo_x-2:.2f} {logo_y-2:.2f} {logo_w+4:.2f} {logo_h+4:.2f} re f", "0 0 0 rg"]
             cmds += ["q", f"{logo_w:.2f} 0 0 {logo_h:.2f} {logo_x:.2f} {logo_y:.2f} cm", "/Im1 Do", "Q"]
             logo_drawn = True
 
@@ -1887,15 +1901,19 @@ def render_purchase_order_pdf(po: dict) -> bytes:
         y -= 11
         y = draw_wrapped(cmds, col3_x + 8, y, f"Folio: {folio}", 8, 26, 10)
 
-        ship_text = f"Envío: {po.get('shipping_status') or 'Pendiente'}"
-        pay_text = f"Pago: {payment_state}"
-        chip_y = header_y - header_h + 10
-        chip_h = 14
-        chip_w = (col3_w - 28) / 2
-        cmds += ["0.92 0.92 0.94 rg", f"{col3_x+8:.2f} {chip_y:.2f} {chip_w:.2f} {chip_h} re f"]
-        cmds += ["0.90 0.90 0.92 rg", f"{col3_x+14+chip_w:.2f} {chip_y:.2f} {chip_w:.2f} {chip_h} re f", "0 0 0 rg"]
-        text_cmd(cmds, col3_x + 11, chip_y + 4, ship_text[:26], 7)
-        text_cmd(cmds, col3_x + 17 + chip_w, chip_y + 4, pay_text[:26], 7)
+        chips = []
+        if delivery_status:
+            chips.append(("Envío", delivery_status))
+        if payment_status:
+            chips.append(("Pago", payment_status))
+        if chips:
+            chip_y = header_y - header_h + 10
+            chip_h = 14
+            chip_w = (col3_w - 24) / max(1, len(chips))
+            for idx_chip, (label, value) in enumerate(chips):
+                cx = col3_x + 8 + idx_chip * chip_w
+                cmds += ["0.92 0.92 0.94 rg", f"{cx:.2f} {chip_y:.2f} {chip_w-4:.2f} {chip_h} re f", "0 0 0 rg"]
+                text_cmd(cmds, cx + 3, chip_y + 4, f"{label}: {value}"[:30], 7)
 
     def draw_party_cards(cmds: List[str]) -> float:
         left_x, right_x = 50, 315
@@ -3485,7 +3503,7 @@ async def purchase_order_pdf(po_id: str, current_user: dict = Depends(require_ro
     pdf_bytes = render_purchase_order_pdf(render_payload)
     await log_audit(current_user, "PDF", "purchase_orders", po_id, {"folio": po.get("folio") or po.get("external_id")})
     filename = oc_pdf_filename(po.get("folio") or po.get("external_id") or po_id)
-    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"inline; filename={filename}.pdf"})
+    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"inline; filename={filename}"})
 
 
 @api_router.post("/budget-requests", status_code=201)

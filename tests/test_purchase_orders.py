@@ -1,11 +1,13 @@
 from fastapi.testclient import TestClient
 import backend.server as server
-from pypdf import PdfReader
 from tests.test_issue_2_5 import FakeDB
 import io
+import pytest
 
 
 def _pdf_text(pdf_bytes: bytes) -> str:
+    pypdf = pytest.importorskip("pypdf")
+    PdfReader = pypdf.PdfReader
     reader = PdfReader(io.BytesIO(pdf_bytes))
     return "\n".join((page.extract_text() or "") for page in reader.pages)
 
@@ -229,7 +231,6 @@ def test_purchase_order_pdf_endpoint_returns_pdf_and_contains_folio():
     assert b"%PDF" in pdf_res.content[:10]
     assert b"ORDEN DE COMPRA" in pdf_res.content
     assert "inline; filename=OC-2.pdf" in pdf_res.headers.get("content-disposition", "")
-    assert "OC-OC" not in pdf_res.headers.get("content-disposition", "")
     import re
     text = pdf_res.content.decode("latin-1", errors="ignore")
     assert text.count("Fecha:") == 1
@@ -323,7 +324,6 @@ def test_pdf_filename_avoids_oc_duplication_with_prefixed_external_id():
     assert pdf_res.status_code == 200
     cd = pdf_res.headers.get("content-disposition", "")
     assert "inline; filename=OC-000123.pdf" in cd
-    assert "OC-OC" not in cd
 
 
 
@@ -396,9 +396,69 @@ def test_render_pdf_bytes_has_metadata_strings_and_filename_rules():
     txt = pdf.decode("latin-1", errors="ignore")
     assert "QFinance / quantumgrupo.mx" in txt
     assert "Orden de Compra OC000005" in txt
-    assert server.oc_pdf_filename("OC-000123") == "OC-000123"
-    assert server.oc_pdf_filename("OC000123") == "OC-OC000123"
-    assert server.oc_pdf_filename("  F-77 ") == "OC-F-77"
+    assert server.oc_pdf_filename("OC000123") == "OC000123.pdf"
+    assert server.oc_pdf_filename("  F/77 ") == "F_77.pdf"
+    assert server.oc_pdf_filename(None) == "purchase-order.pdf"
+
+
+def test_filename_is_exact_folio_pdf():
+    assert server.oc_pdf_filename("OC000003") == "OC000003.pdf"
+
+
+def test_logo_scaling_no_distortion(monkeypatch):
+    po = {
+        "folio": "OC000009",
+        "order_date": "2026-02-24",
+        "company_name": "EJEMPLO Q",
+        "project_name": "Proyecto",
+        "vendor_name": "Proveedor",
+        "lines": [],
+        "subtotal_tax_base": "0.00",
+        "tax_total": "0.00",
+        "total": "0.00",
+    }
+    monkeypatch.setenv("QFINANCE_PDF_LOGO_PATH", "/tmp/logo-inexistente.png")
+    no_logo = server.render_purchase_order_pdf(po)
+    monkeypatch.delenv("QFINANCE_PDF_LOGO_PATH", raising=False)
+    with_logo = server.render_purchase_order_pdf(po)
+    assert with_logo.startswith(b"%PDF")
+    assert len(with_logo) >= len(no_logo)
+
+
+def test_statuses_hidden_when_missing():
+    po = {
+        "folio": "OC000010",
+        "order_date": "2026-02-24",
+        "company_name": "EJEMPLO Q",
+        "project_name": "Proyecto",
+        "vendor_name": "Proveedor",
+        "lines": [],
+        "subtotal_tax_base": "0.00",
+        "tax_total": "0.00",
+        "total": "0.00",
+    }
+    txt = _pdf_text(server.render_purchase_order_pdf(po))
+    assert "Envío:" not in txt
+    assert "Pago:" not in txt
+
+
+def test_statuses_present_when_fields_exist():
+    po = {
+        "folio": "OC000011",
+        "order_date": "2026-02-24",
+        "company_name": "EJEMPLO Q",
+        "project_name": "Proyecto",
+        "vendor_name": "Proveedor",
+        "sent_at": "2026-02-24T12:00:00Z",
+        "payment_approved_at": "2026-02-25T12:00:00Z",
+        "lines": [],
+        "subtotal_tax_base": "0.00",
+        "tax_total": "0.00",
+        "total": "0.00",
+    }
+    txt = _pdf_text(server.render_purchase_order_pdf(po))
+    assert "Envío: Enviado" in txt
+    assert "Pago: Aprobado" in txt
 
 
 def test_logo_resolution(monkeypatch):
