@@ -483,7 +483,36 @@ def test_render_pdf_contains_key_text():
     assert pdf.startswith(b"%PDF")
     txt = pdf.decode("latin-1", errors="ignore")
     assert "ORDEN DE COMPRA" in txt
+    assert "Unidad" in txt
     assert "OC000006" in txt
+
+
+def test_pdf_contains_formatted_money_with_currency_symbol():
+    po = {
+        "folio": "OC000012",
+        "order_date": "2026-02-24",
+        "company_name": "EJEMPLO Q",
+        "project_name": "Proyecto",
+        "vendor_name": "Proveedor",
+        "currency": "MXN",
+        "lines": [{
+            "line_no": 1,
+            "partida_codigo": "205",
+            "description": "Servicio",
+            "qty": "1",
+            "uom": "PZA",
+            "price_unit": "120000",
+            "line_total": "129600",
+            "iva_amount": "9600",
+            "isr_withholding_amount": "0",
+        }],
+        "subtotal_tax_base": "120000",
+        "tax_total": "9600",
+        "total": "129600",
+    }
+    txt = _pdf_text(server.render_purchase_order_pdf(po))
+    assert "Unidad" in txt
+    assert "$120,000.00" in txt
 
 
 def test_metadata_present():

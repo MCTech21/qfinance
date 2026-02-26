@@ -1690,6 +1690,18 @@ def _oc_numeric_display(folio: str) -> str:
     return f"{int(digits):04d}"
 
 
+def format_money(amount: Any, currency: str = "MXN") -> str:
+    if amount is None:
+        return "—"
+    try:
+        value = money_dec(amount).quantize(TWO_DECIMALS)
+    except Exception:
+        return "—"
+    code = str(currency or "MXN").upper()
+    symbol = "US$" if code == "USD" else "$"
+    return f"{symbol}{value:,.2f}"
+
+
 def oc_pdf_filename(raw_folio: Optional[str]) -> str:
     base = str(raw_folio or "").strip()
     if not base:
@@ -1761,11 +1773,19 @@ def build_purchase_order_pdf_payload(po: dict) -> dict:
 
     lines_payload = []
     for idx, line in enumerate(po.get("lines") or [], start=1):
+        unit_value = (
+            line.get("unit")
+            or line.get("unidad")
+            or line.get("uom")
+            or line.get("uom_code")
+            or line.get("unit_code")
+            or "—"
+        )
         lines_payload.append({
             "line_no": line.get("line_no") or idx,
             "code": line.get("partida_codigo") or "SERV",
             "description": line.get("description") or "S/I",
-            "uom": line.get("uom") or "—",
+            "uom": unit_value,
             "qty": line.get("qty") or "0",
             "price_unit": line.get("price_unit") or "0",
             "amount": line.get("line_total") or "0",
@@ -1952,8 +1972,8 @@ def render_purchase_order_pdf(po: dict) -> bytes:
 
     def draw_table_header(cmds: List[str], y: float):
         cmds += ["0.05 0.18 0.56 rg", f"50 {y-16:.2f} 522 16 re f", "1 1 1 rg"]
-        headers = ["#", "Partida", "Descripción", "Cant.", "P.U.", "IVA", "Ret ISR", "Total"]
-        xs = [54, 78, 142, 350, 394, 438, 484, 528]
+        headers = ["#", "Partida", "Descripción", "Cant.", "Unidad", "P.U.", "IVA", "Ret ISR", "Total"]
+        xs = [54, 78, 142, 340, 380, 418, 455, 492, 530]
         for x, h in zip(xs, headers):
             text_cmd(cmds, x, y-12, h, 8)
         cmds += ["0 0 0 rg"]
@@ -1991,10 +2011,11 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             for idx_desc, d in enumerate(desc_lines):
                 text_cmd(cmds, 142, base_y - (idx_desc * 10), d, 8)
             text_cmd(cmds, 350, base_y, line.get("qty") or "0", 8)
-            text_cmd(cmds, 394, base_y, line.get("price_unit") or "0", 8)
-            text_cmd(cmds, 438, base_y, line.get("iva_amount") or "0", 8)
-            text_cmd(cmds, 484, base_y, line.get("ret_isr") or "0", 8)
-            text_cmd(cmds, 528, base_y, line.get("amount") or "0", 8)
+            text_cmd(cmds, 384, base_y, line.get("uom") or "—", 8)
+            text_cmd(cmds, 418, base_y, format_money(line.get("price_unit"), payload.get("currency")), 8)
+            text_cmd(cmds, 455, base_y, format_money(line.get("iva_amount"), payload.get("currency")), 8)
+            text_cmd(cmds, 492, base_y, format_money(line.get("ret_isr"), payload.get("currency")), 8)
+            text_cmd(cmds, 530, base_y, format_money(line.get("amount"), payload.get("currency")), 8)
 
             y_cursor -= row_height
             i += 1
@@ -2003,10 +2024,10 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             box_y = max(140, y_cursor - 110)
             cmds += ["0.95 0.95 0.97 rg", f"360 {box_y:.2f} 212 90 re f", "0 0 0 rg"]
             totals = [
-                f"Subtotal: {payload.get('subtotal')}",
-                f"IVA: {payload.get('tax')}",
-                f"Ret ISR: {po.get('withholding_isr_total')}",
-                f"TOTAL: {payload.get('total')}",
+                f"Subtotal: {format_money(payload.get('subtotal'), payload.get('currency'))}",
+                f"IVA: {format_money(payload.get('tax'), payload.get('currency'))}",
+                f"Ret ISR: {format_money(po.get('withholding_isr_total'), payload.get('currency'))}",
+                f"TOTAL: {format_money(payload.get('total'), payload.get('currency'))}",
             ]
             ty = box_y + 70
             for t in totals:
