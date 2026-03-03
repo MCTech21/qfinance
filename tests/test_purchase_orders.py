@@ -230,7 +230,7 @@ def test_purchase_order_pdf_endpoint_returns_pdf_and_contains_folio():
     assert pdf_res.status_code == 200
     assert b"%PDF" in pdf_res.content[:10]
     assert b"ORDEN DE COMPRA" in pdf_res.content
-    assert "inline; filename=OC-2.pdf" in pdf_res.headers.get("content-disposition", "")
+    assert "inline; filename=OC000002.pdf" in pdf_res.headers.get("content-disposition", "")
     import re
     text = pdf_res.content.decode("latin-1", errors="ignore")
     assert text.count("Fecha:") == 1
@@ -323,7 +323,7 @@ def test_pdf_filename_avoids_oc_duplication_with_prefixed_external_id():
     pdf_res = client.get(f"/api/purchase-orders/{po_id}/pdf")
     assert pdf_res.status_code == 200
     cd = pdf_res.headers.get("content-disposition", "")
-    assert "inline; filename=OC-000123.pdf" in cd
+    assert "inline; filename=OC000123.pdf" in cd
 
 
 
