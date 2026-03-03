@@ -6,9 +6,7 @@ import KPICard from "../components/KPICard";
 import TrafficLight from "../components/TrafficLight";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { Wallet, TrendingUp, AlertTriangle, CheckCircle, Building, FileWarning, Clock } from "lucide-react";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from "recharts";
-import { Link } from "react-router-dom";
+import { Wallet, TrendingUp, AlertTriangle, CheckCircle, Building } from "lucide-react";
 
 const Dashboard = () => {
   const { api } = useAuth();
@@ -20,9 +18,9 @@ const Dashboard = () => {
   const [selectedProject, setSelectedProject] = useState("all");
   const [selectedYear, setSelectedYear] = useState(2025);
   const [selectedMonth, setSelectedMonth] = useState(1);
-  const [selectedPeriod, setSelectedPeriod] = useState("monthly");
+  const [selectedQuarter, setSelectedQuarter] = useState(1);
+  const [selectedPeriod, setSelectedPeriod] = useState("month");
   const [isLoading, setIsLoading] = useState(true);
-  const [chartsReady, setChartsReady] = useState(false);
 
   const yearOptions = buildYearOptions();
 
@@ -33,353 +31,160 @@ const Dashboard = () => {
     { value: 10, label: "Octubre" }, { value: 11, label: "Noviembre" }, { value: 12, label: "Diciembre" },
   ];
 
-
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => setChartsReady(true));
-    return () => cancelAnimationFrame(frame);
-  }, []);
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const endpointByPeriod = { total: "/dashboard/total", monthly: "/dashboard/monthly", quarterly: "/dashboard/quarterly", annual: "/dashboard/annual" };
       const params = {
-        empresa_id: selectedEmpresa !== "all" ? selectedEmpresa : undefined,
-        project_id: selectedProject !== "all" ? selectedProject : undefined,
+        empresa_id: selectedEmpresa,
+        project_id: selectedProject,
+        period: selectedPeriod,
         year: selectedYear,
-        month: selectedMonth,
       };
-      const [periodRes, reportsRes, empresasRes, projectsRes] = await Promise.all([
-        api().get(endpointByPeriod[selectedPeriod] || "/dashboard/monthly", { params }),
+      if (selectedPeriod === "month") params.month = selectedMonth;
+      if (selectedPeriod === "quarter") params.quarter = selectedQuarter;
+
+      const [reportsRes, empresasRes, projectsRes] = await Promise.all([
         api().get("/reports/dashboard", { params }),
         api().get("/empresas"),
         api().get("/projects")
       ]);
 
-      setDashboardData({
-        ...reportsRes.data,
-        totals: periodRes.data?.totals || reportsRes.data?.totals,
-        by_partida: periodRes.data?.by_partida || reportsRes.data?.by_partida || [],
-        period: periodRes.data?.period || selectedPeriod,
-      });
-      setEmpresas(empresasRes.data);
-      setProjects(projectsRes.data);
+      setDashboardData(reportsRes.data);
+      setEmpresas(empresasRes.data || []);
+      setProjects(projectsRes.data || []);
     } catch (error) {
-      toast.error("Error al cargar datos del dashboard");
+      toast.error(error?.response?.data?.detail?.message || "Error al cargar dashboard");
     } finally {
       setIsLoading(false);
     }
-  }, [api, selectedEmpresa, selectedProject, selectedYear, selectedMonth, selectedPeriod]);
+  }, [api, selectedEmpresa, selectedProject, selectedYear, selectedMonth, selectedQuarter, selectedPeriod]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
-  // Filter projects when empresa changes
   useEffect(() => {
     if (selectedEmpresa === "all") {
       setFilteredProjects(projects);
     } else {
-      setFilteredProjects(projects.filter(p => p.empresa_id === selectedEmpresa));
+      setFilteredProjects(projects.filter((p) => p.empresa_id === selectedEmpresa));
     }
     setSelectedProject("all");
   }, [selectedEmpresa, projects]);
 
-  const formatCurrency = (num) => {
-    return new Intl.NumberFormat("es-MX", {
-      style: "currency",
-      currency: "MXN",
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    }).format(num);
-  };
-
-  const getBarColor = (percentage) => {
-    if (percentage <= 90) return "#10B981";
-    if (percentage <= 100) return "#F59E0B";
-    return "#EF4444";
-  };
+  const formatCurrency = (num) => new Intl.NumberFormat("es-MX", {
+    style: "currency",
+    currency: "MXN",
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(num || 0);
 
   if (isLoading) {
-    return (
-      <div className="space-y-6 animate-pulse">
-        <div className="h-8 w-48 bg-muted rounded" />
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          {[...Array(4)].map((_, i) => (
-            <div key={i} className="h-32 bg-card rounded-lg border border-border" />
-          ))}
-        </div>
-      </div>
-    );
+    return <div className="space-y-6 animate-pulse"><div className="h-8 w-48 bg-muted rounded" /></div>;
   }
 
   return (
     <div className="space-y-6" data-testid="dashboard-page">
-      {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <h1 className="font-heading text-3xl font-bold tracking-tight">Dashboard</h1>
-          <p className="text-muted-foreground">Resumen financiero del período</p>
+          <p className="text-muted-foreground">{dashboardData?.filtros?.period_label || "Resumen financiero"}</p>
         </div>
-        
+
         <div className="flex flex-wrap gap-3">
-          {/* Empresa filter */}
           <Select value={selectedEmpresa} onValueChange={setSelectedEmpresa}>
-            <SelectTrigger className="w-[200px]" data-testid="filter-empresa">
-              <SelectValue placeholder="Empresa" />
-            </SelectTrigger>
+            <SelectTrigger className="w-[200px]"><SelectValue placeholder="Empresa" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Todas las empresas</SelectItem>
-              {empresas.map((e) => (
-                <SelectItem key={e.id} value={e.id}>{e.nombre}</SelectItem>
-              ))}
+              {empresas.map((e) => <SelectItem key={e.id} value={e.id}>{e.nombre}</SelectItem>)}
             </SelectContent>
           </Select>
-          
-          {/* Project filter (filtered by empresa) */}
+
           <Select value={selectedProject} onValueChange={setSelectedProject}>
-            <SelectTrigger className="w-[180px]" data-testid="filter-project">
-              <SelectValue placeholder="Proyecto" />
-            </SelectTrigger>
+            <SelectTrigger className="w-[180px]"><SelectValue placeholder="Proyecto" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Todos los proyectos</SelectItem>
-              {filteredProjects.map((p) => (
-                <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-              ))}
+              {filteredProjects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
             </SelectContent>
           </Select>
-          
 
           <Select value={selectedPeriod} onValueChange={setSelectedPeriod}>
-            <SelectTrigger className="w-[150px]" data-testid="filter-period">
-              <SelectValue />
-            </SelectTrigger>
+            <SelectTrigger className="w-[150px]"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="total">TODO</SelectItem>
-              <SelectItem value="monthly">Mensual</SelectItem>
-              <SelectItem value="quarterly">Trimestral</SelectItem>
-              <SelectItem value="annual">Anual</SelectItem>
+              <SelectItem value="all">TODO</SelectItem>
+              <SelectItem value="month">Mensual</SelectItem>
+              <SelectItem value="quarter">Trimestral</SelectItem>
+              <SelectItem value="year">Anual</SelectItem>
             </SelectContent>
           </Select>
 
-          <Select value={String(selectedMonth)} onValueChange={(v) => setSelectedMonth(Number(v))}>
-            <SelectTrigger className="w-[140px]" data-testid="filter-month">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {months.map((m) => (
-                <SelectItem key={m.value} value={String(m.value)}>{m.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          
-          <Select value={String(selectedYear)} onValueChange={(v) => setSelectedYear(Number(v))}>
-            <SelectTrigger className="w-[100px]" data-testid="filter-year">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {yearOptions.map((y) => (
-                <SelectItem key={y} value={String(y)}>{y}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      {/* KPIs */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-        <KPICard
-          title="Presupuesto"
-          value={dashboardData?.totals?.budget || 0}
-          icon={Wallet}
-          subtitle="Total asignado"
-        />
-        <KPICard
-          title="Ejecutado"
-          value={dashboardData?.totals?.real || 0}
-          icon={TrendingUp}
-          trendValue={dashboardData?.totals?.percentage}
-          trend={dashboardData?.totals?.percentage > 100 ? "up" : "neutral"}
-          variant="inverse"
-        />
-        <KPICard
-          title="Variación"
-          value={dashboardData?.totals?.variation || 0}
-          icon={dashboardData?.totals?.variation >= 0 ? CheckCircle : AlertTriangle}
-          subtitle={dashboardData?.totals?.variation >= 0 ? "Bajo presupuesto" : "Sobre presupuesto"}
-        />
-        {/* Pending KPI */}
-        <div className="metric-card" data-testid="pending-kpi">
-          <div className="flex items-start justify-between mb-3">
-            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              Pendiente por Autorizar
-            </span>
-            <div className="p-2 rounded-md bg-amber-500/10 text-amber-400">
-              <Clock className="h-4 w-4" />
-            </div>
-          </div>
-          <p className="text-2xl font-bold font-mono">
-            {formatCurrency(dashboardData?.pending?.total_mxn || 0)}
-          </p>
-          <p className="text-xs text-muted-foreground mt-2">
-            {dashboardData?.pending?.count || 0} movimientos pendientes
-          </p>
-          {(dashboardData?.pending?.count || 0) > 0 && (
-            <Link to="/authorizations" className="text-xs text-amber-400 hover:underline mt-1 inline-block">
-              Ver autorizaciones →
-            </Link>
+          {selectedPeriod === "month" && (
+            <Select value={String(selectedMonth)} onValueChange={(v) => setSelectedMonth(Number(v))}>
+              <SelectTrigger className="w-[140px]"><SelectValue /></SelectTrigger>
+              <SelectContent>{months.map((m) => <SelectItem key={m.value} value={String(m.value)}>{m.label}</SelectItem>)}</SelectContent>
+            </Select>
           )}
-        </div>
-        <div className="metric-card">
-          <div className="flex items-start justify-between mb-3">
-            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              Estado General
-            </span>
-            <div className="p-2 rounded-md bg-primary/10 text-primary">
-              <FileWarning className="h-4 w-4" />
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <TrafficLight 
-              status={dashboardData?.totals?.traffic_light} 
-              percentage={dashboardData?.totals?.percentage}
-              size="lg"
-            />
-          </div>
-          <p className="text-xs text-muted-foreground mt-2">
-            {dashboardData?.pending_authorizations || 0} autorizaciones totales
-          </p>
+
+          {selectedPeriod === "quarter" && (
+            <Select value={String(selectedQuarter)} onValueChange={(v) => setSelectedQuarter(Number(v))}>
+              <SelectTrigger className="w-[120px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="1">Q1</SelectItem>
+                <SelectItem value="2">Q2</SelectItem>
+                <SelectItem value="3">Q3</SelectItem>
+                <SelectItem value="4">Q4</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
+
+          <Select value={String(selectedYear)} onValueChange={(v) => setSelectedYear(Number(v))}>
+            <SelectTrigger className="w-[100px]"><SelectValue /></SelectTrigger>
+            <SelectContent>{yearOptions.map((y) => <SelectItem key={y} value={String(y)}>{y}</SelectItem>)}</SelectContent>
+          </Select>
         </div>
       </div>
 
-      {/* Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* By Partida */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-heading text-lg">Avance por Partida</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="h-[300px] min-h-[300px]">
-              {chartsReady && (
-              <ResponsiveContainer width="100%" height="100%" debounce={200}>
-                <BarChart data={dashboardData?.by_partida || []} layout="vertical">
-                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(240 5% 17%)" />
-                  <XAxis type="number" domain={[0, 120]} stroke="hsl(240 5% 65%)" fontSize={12} />
-                  <YAxis 
-                    dataKey="partida_codigo" 
-                    type="category" 
-                    width={50} 
-                    stroke="hsl(240 5% 65%)" 
-                    fontSize={11}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "hsl(240 10% 7%)",
-                      border: "1px solid hsl(240 5% 17%)",
-                      borderRadius: "8px"
-                    }}
-                    formatter={(value) => [`${value.toFixed(1)}%`, "Avance"]}
-                    labelFormatter={(label) => {
-                      const p = dashboardData?.by_partida?.find(x => x.partida_codigo === label);
-                      return `${label} - ${p?.partida_nombre || ''}`;
-                    }}
-                  />
-                  <Bar dataKey="percentage" radius={[0, 4, 4, 0]}>
-                    {(dashboardData?.by_partida || []).map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={getBarColor(entry.percentage)} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* By Project */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-heading text-lg">Avance por Proyecto</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="h-[300px] min-h-[300px]">
-              {chartsReady && (
-              <ResponsiveContainer width="100%" height="100%" debounce={200}>
-                <BarChart data={dashboardData?.by_project || []} layout="vertical">
-                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(240 5% 17%)" />
-                  <XAxis type="number" domain={[0, 120]} stroke="hsl(240 5% 65%)" fontSize={12} />
-                  <YAxis 
-                    dataKey="project_code" 
-                    type="category" 
-                    width={70} 
-                    stroke="hsl(240 5% 65%)" 
-                    fontSize={11}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "hsl(240 10% 7%)",
-                      border: "1px solid hsl(240 5% 17%)",
-                      borderRadius: "8px"
-                    }}
-                    formatter={(value) => [`${value.toFixed(1)}%`, "Avance"]}
-                    labelFormatter={(label) => `Proyecto: ${label}`}
-                  />
-                  <Bar dataKey="percentage" radius={[0, 4, 4, 0]}>
-                    {(dashboardData?.by_project || []).map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={getBarColor(entry.percentage)} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <KPICard title="Presupuesto" value={dashboardData?.totals?.presupuesto_total || 0} icon={Wallet} subtitle="Total" />
+        <KPICard title="Ejecutado" value={dashboardData?.totals?.ejecutado_total || 0} icon={TrendingUp} trendValue={dashboardData?.totals?.porcentaje_avance} variant="inverse" />
+        <KPICard title="Variación" value={dashboardData?.totals?.variacion_total || 0} icon={(dashboardData?.totals?.variacion_total || 0) >= 0 ? CheckCircle : AlertTriangle} />
+        <Card><CardContent className="pt-6"><TrafficLight status={dashboardData?.totals?.traffic_light} percentage={dashboardData?.totals?.porcentaje_avance} size="lg" /></CardContent></Card>
       </div>
 
-      {/* Partidas Table */}
       <Card>
         <CardHeader>
-          <CardTitle className="font-heading text-lg flex items-center gap-2">
-            <Building className="h-5 w-5" />
-            Detalle por Partida
-          </CardTitle>
+          <CardTitle className="font-heading text-lg flex items-center gap-2"><Building className="h-5 w-5" />Consolidado por Partida</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
-            <table className="data-table" data-testid="partidas-table">
-              <thead>
-                <tr>
-                  <th>Código</th>
-                  <th>Partida</th>
-                  <th>Grupo</th>
-                  <th className="text-right">Presupuesto</th>
-                  <th className="text-right">Ejecutado</th>
-                  <th className="text-right">Variación</th>
-                  <th className="text-right">% Avance</th>
-                  <th>Estado</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(dashboardData?.by_partida || []).map((partida) => (
-                  <tr key={partida.partida_codigo}>
-                    <td className="font-mono text-sm">{partida.partida_codigo}</td>
-                    <td>{partida.partida_nombre}</td>
-                    <td className="text-xs text-muted-foreground uppercase">{partida.partida_grupo}</td>
-                    <td className="mono-number">{formatCurrency(partida.budget)}</td>
-                    <td className="mono-number">{formatCurrency(partida.real)}</td>
-                    <td className={`mono-number ${partida.variation >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                      {formatCurrency(partida.variation)}
-                    </td>
-                    <td className="mono-number">{partida.percentage.toFixed(1)}%</td>
-                    <td>
-                      <TrafficLight status={partida.traffic_light} showLabel={false} size="sm" />
-                    </td>
+          {!(dashboardData?.by_partida || []).length ? (
+            <p className="text-muted-foreground">Sin datos para los filtros seleccionados.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="data-table" data-testid="partidas-table">
+                <thead>
+                  <tr>
+                    <th>Código</th><th>Partida</th><th>Grupo</th>
+                    <th className="text-right">Presupuesto</th><th className="text-right">Ejecutado</th><th className="text-right">Variación</th>
+                    <th className="text-right">% Avance</th><th>Semáforo</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {dashboardData.by_partida.map((partida) => (
+                    <tr key={partida.partida_codigo}>
+                      <td className="font-mono text-sm">{partida.partida_codigo}</td>
+                      <td>{partida.partida_nombre}</td>
+                      <td className="text-xs text-muted-foreground uppercase">{partida.partida_grupo}</td>
+                      <td className="mono-number">{formatCurrency(partida.presupuesto)}</td>
+                      <td className="mono-number">{formatCurrency(partida.ejecutado)}</td>
+                      <td className={`mono-number ${partida.variacion >= 0 ? "text-emerald-400" : "text-red-400"}`}>{formatCurrency(partida.variacion)}</td>
+                      <td className="mono-number">{(partida.porcentaje || 0).toFixed(1)}%</td>
+                      <td><TrafficLight status={partida.traffic_light} showLabel={false} size="sm" /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>

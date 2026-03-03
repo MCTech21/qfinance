@@ -760,13 +760,22 @@ async def assert_no_references(entity: str, entity_id: str):
         if await db[collection].find_one(query, {"_id": 0}):
             raise HTTPException(status_code=409, detail=f"No se puede eliminar físicamente: tiene referencias en {label}")
 
-def get_traffic_light(percentage: float) -> str:
-    if percentage <= 90:
+def get_traffic_light(percentage: float, threshold_yellow: float = 90.0, threshold_red: float = 100.0) -> str:
+    if percentage < threshold_yellow:
         return "green"
-    elif percentage <= 100:
+    if percentage < threshold_red:
         return "yellow"
-    else:
-        return "red"
+    return "red"
+
+
+async def get_dashboard_thresholds() -> tuple[Decimal, Decimal]:
+    rows = await db.config.find({"key": {"$in": ["threshold_yellow", "threshold_red"]}}, {"_id": 0}).to_list(20)
+    values = {r.get("key"): r.get("value") for r in rows}
+    yellow = decimal_from_value(values.get("threshold_yellow", "90"), "threshold_yellow")
+    red = decimal_from_value(values.get("threshold_red", "100"), "threshold_red")
+    if red < yellow:
+        yellow, red = red, yellow
+    return yellow, red
 
 def parse_date_tijuana(date_str: str) -> datetime:
     parsed = date_parser.parse(date_str)
@@ -4535,164 +4544,318 @@ async def resolve_authorization(
     return {"message": f"Autorización {resolution.status.value}"}
 
 # ========================= REPORTS ROUTES =========================
+
+
+def _to_period_decimal(value: Any) -> Decimal:
+    try:
+        return decimal_from_value(value or 0, "amount").quantize(TWO_DECIMALS)
+    except HTTPException:
+        return Decimal("0.00")
+
+
+def _dashboard_decimal_to_float(value: Decimal) -> float:
+    return float(value.quantize(TWO_DECIMALS))
+
+
+def _month_keys_for_period(period: str, year: int, month: Optional[int], quarter: Optional[int]) -> List[str]:
+    if period == "month":
+        if month is None:
+            raise HTTPException(status_code=422, detail={"code": "month_required", "message": "month es requerido cuando period=month"})
+        if month < 1 or month > 12:
+            raise HTTPException(status_code=422, detail={"code": "month_out_of_range", "message": "month debe estar entre 1 y 12"})
+        return [f"{year:04d}-{month:02d}"]
+    if period == "quarter":
+        if quarter is None:
+            raise HTTPException(status_code=422, detail={"code": "quarter_required", "message": "quarter es requerido cuando period=quarter"})
+        if quarter < 1 or quarter > 4:
+            raise HTTPException(status_code=422, detail={"code": "quarter_out_of_range", "message": "quarter debe estar entre 1 y 4"})
+        start = (quarter - 1) * 3 + 1
+        return [f"{year:04d}-{m:02d}" for m in range(start, start + 3)]
+    return [f"{year:04d}-{m:02d}" for m in range(1, 13)]
+
+
+def _match_dashboard_period(dt: datetime, period: str, year: int, month: Optional[int], quarter: Optional[int]) -> bool:
+    if dt.year != year:
+        return False
+    if period == "month":
+        return dt.month == month
+    if period == "quarter":
+        q = ((dt.month - 1) // 3) + 1
+        return q == quarter
+    return True
+
+
+def _fmt_period_label(period: str, year: int, month: Optional[int], quarter: Optional[int]) -> str:
+    if period == "all":
+        return f"TODO {year}"
+    if period == "year":
+        return f"Anual {year}"
+    if period == "quarter":
+        return f"Q{quarter} {year}"
+    return f"{year:04d}-{(month or 1):02d}"
+
+
+async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str], project_id: Optional[str], period: str, year: Optional[int], month: Optional[int], quarter: Optional[int], include_pending: bool = False):
+    now = to_tijuana(datetime.now(timezone.utc))
+    normalized_period = (period or "month").strip().lower()
+    if normalized_period not in {"all", "month", "quarter", "year"}:
+        raise HTTPException(status_code=422, detail={"code": "invalid_period", "message": "period debe ser all|month|quarter|year"})
+
+    selected_year = year or now.year
+    validate_year_in_range(selected_year)
+    if month is not None and (month < 1 or month > 12):
+        raise HTTPException(status_code=422, detail={"code": "month_out_of_range", "message": "month debe estar entre 1 y 12"})
+    if quarter is not None and (quarter < 1 or quarter > 4):
+        raise HTTPException(status_code=422, detail={"code": "quarter_out_of_range", "message": "quarter debe estar entre 1 y 4"})
+
+    company_selector = (empresa_id or "all").strip() or "all"
+    project_selector = (project_id or "all").strip() or "all"
+    if company_selector != "all":
+        enforce_company_access(current_user, company_selector)
+
+    role = current_user.get("role")
+    project_query = {}
+    if role not in {UserRole.ADMIN.value, UserRole.FINANZAS.value}:
+        allowed_company_ids = list(current_user.get("empresa_ids") or [])
+        active_company = get_user_company_id(current_user)
+        if active_company and active_company not in allowed_company_ids:
+            allowed_company_ids.append(active_company)
+        if not allowed_company_ids:
+            raise HTTPException(status_code=403, detail={"code": "forbidden_company", "message": "Usuario sin empresas permitidas"})
+        project_query["empresa_id"] = {"$in": allowed_company_ids}
+
+    if company_selector != "all":
+        project_query["empresa_id"] = company_selector
+    if project_selector != "all":
+        project_query["id"] = project_selector
+
+    projects = await db.projects.find(project_query, {"_id": 0}).to_list(5000)
+    if project_selector != "all" and not projects:
+        raise HTTPException(status_code=403, detail={"code": "forbidden_project", "message": "Proyecto fuera de alcance"})
+
+    project_ids = [str(p.get("id")) for p in projects if p.get("id")]
+    if not project_ids:
+        y, r = await get_dashboard_thresholds()
+        return {
+            "filtros": {
+                "empresa_id": company_selector,
+                "empresa_nombre": "Todas" if company_selector == "all" else company_selector,
+                "project_id": project_selector,
+                "project_nombre": "Todos" if project_selector == "all" else project_selector,
+                "period": normalized_period,
+                "period_label": _fmt_period_label(normalized_period, selected_year, month, quarter),
+                "year": selected_year,
+                "month": month,
+                "quarter": quarter,
+            },
+            "totals": {
+                "presupuesto_total": 0.0,
+                "ejecutado_total": 0.0,
+                "variacion_total": 0.0,
+                "porcentaje_avance": 0.0,
+                "traffic_light": get_traffic_light(0, float(y), float(r)),
+            },
+            "by_partida": [],
+            "pending": {"count": 0, "total_mxn": 0.0},
+            "pending_authorizations": await db.authorizations.count_documents({"status": "pending"}),
+            "movements_count": 0,
+            "include_pending": include_pending,
+            "meta": {"pending_budget_policy": "excluded_from_official_budget"},
+        }
+
+    company_ids = sorted({str(p.get("empresa_id")) for p in projects if p.get("empresa_id")})
+    empresa_docs = await db.empresas.find({"id": {"$in": company_ids}}, {"_id": 0}).to_list(500)
+    empresa_map = {e.get("id"): e.get("nombre") for e in empresa_docs}
+    project_map = {p.get("id"): p for p in projects}
+
+    posted_statuses = [MovementStatus.POSTED.value]
+    if include_pending:
+        posted_statuses.append(MovementStatus.PENDING_APPROVAL.value)
+    movement_query = movement_active_query(extra={"status": {"$in": posted_statuses}, "project_id": {"$in": project_ids}})
+    movement_rows = await db.movements.find(movement_query, {"_id": 0}).to_list(20000)
+
+    pending_rows = await db.movements.find(movement_active_query(extra={"status": MovementStatus.PENDING_APPROVAL.value, "project_id": {"$in": project_ids}}), {"_id": 0}).to_list(20000)
+
+    month_keys = _month_keys_for_period(normalized_period, selected_year, month, quarter)
+
+    by_partida: Dict[str, Dict[str, Decimal]] = {}
+
+    plan_rows = await db.budget_plans.find({"project_id": {"$in": project_ids}}, {"_id": 0}).to_list(8000)
+    plan_pairs = set()
+    for plan in plan_rows:
+        if plan.get("approval_status") in {BudgetApprovalStatus.PENDING.value, BudgetApprovalStatus.REJECTED.value}:
+            # Convención por seguridad: no contar presupuestos pendientes/rechazados en dashboard oficial.
+            continue
+        proj_id = str(plan.get("project_id"))
+        partida = str(plan.get("partida_codigo") or "N/A")
+        if not proj_id or proj_id not in project_map:
+            continue
+        plan_pairs.add((proj_id, partida))
+        total_amount = _to_period_decimal(plan.get("total_amount", 0))
+        annual_map = plan.get("annual_breakdown") or {}
+        monthly_map = plan.get("monthly_breakdown") or {}
+
+        amount = Decimal("0.00")
+        if normalized_period == "month":
+            mk = month_keys[0]
+            if mk in monthly_map:
+                amount = _to_period_decimal(monthly_map.get(mk))
+        elif normalized_period == "quarter":
+            for mk in month_keys:
+                if mk in monthly_map:
+                    amount += _to_period_decimal(monthly_map.get(mk))
+        else:
+            year_key = str(selected_year)
+            monthly_sum = Decimal("0.00")
+            has_monthly = False
+            for mk in month_keys:
+                if mk in monthly_map:
+                    has_monthly = True
+                    monthly_sum += _to_period_decimal(monthly_map.get(mk))
+            if has_monthly:
+                amount = monthly_sum
+            elif year_key in annual_map:
+                amount = _to_period_decimal(annual_map.get(year_key))
+            else:
+                amount = total_amount
+
+        row = by_partida.setdefault(partida, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
+        row["presupuesto"] += amount
+
+    legacy_query = {"project_id": {"$in": project_ids}, "year": selected_year}
+    if normalized_period == "month":
+        legacy_query["month"] = month
+    elif normalized_period == "quarter":
+        legacy_query["month"] = {"$in": [int(k[-2:]) for k in month_keys]}
+    else:
+        legacy_query["month"] = {"$in": list(range(1, 13))}
+    legacy_rows = await db.budgets.find(legacy_query, {"_id": 0}).to_list(12000)
+    for row_doc in legacy_rows:
+        proj_id = str(row_doc.get("project_id") or "")
+        partida = str(row_doc.get("partida_codigo") or "N/A")
+        if (proj_id, partida) in plan_pairs:
+            continue
+        row = by_partida.setdefault(partida, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
+        row["presupuesto"] += _to_period_decimal(row_doc.get("amount_mxn", 0))
+
+    movements_in_period = []
+    for mv in movement_rows:
+        mv_date = date_parser.parse(mv.get("date")) if isinstance(mv.get("date"), str) else mv.get("date")
+        if not mv_date:
+            continue
+        if _match_dashboard_period(to_tijuana(mv_date), normalized_period, selected_year, month, quarter):
+            movements_in_period.append(mv)
+            partida = str(mv.get("partida_codigo") or mv.get("partida_id") or "N/A")
+            row = by_partida.setdefault(partida, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
+            row["ejecutado"] += _to_period_decimal(abs(float(mv.get("amount_mxn", 0))))
+
+    pending_in_period = []
+    for mv in pending_rows:
+        mv_date = date_parser.parse(mv.get("date")) if isinstance(mv.get("date"), str) else mv.get("date")
+        if mv_date and _match_dashboard_period(to_tijuana(mv_date), normalized_period, selected_year, month, quarter):
+            pending_in_period.append(mv)
+
+    partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(1000)
+    partida_map = {str(p.get("codigo")): p for p in partida_docs}
+    yellow, red = await get_dashboard_thresholds()
+
+    detail = []
+    total_budget = Decimal("0.00")
+    total_exec = Decimal("0.00")
+    for code, values in by_partida.items():
+        presupuesto = values["presupuesto"].quantize(TWO_DECIMALS)
+        ejecutado = values["ejecutado"].quantize(TWO_DECIMALS)
+        variacion = (presupuesto - ejecutado).quantize(TWO_DECIMALS)
+        porcentaje = ((ejecutado / presupuesto) * Decimal("100")).quantize(TWO_DECIMALS) if presupuesto > 0 else (Decimal("100.00") if ejecutado > 0 else Decimal("0.00"))
+        part = partida_map.get(code, {})
+        detail.append({
+            "partida_codigo": code,
+            "partida_nombre": part.get("nombre", code),
+            "partida_grupo": part.get("grupo", "N/A"),
+            "presupuesto": _dashboard_decimal_to_float(presupuesto),
+            "ejecutado": _dashboard_decimal_to_float(ejecutado),
+            "variacion": _dashboard_decimal_to_float(variacion),
+            "porcentaje": _dashboard_decimal_to_float(porcentaje),
+            "disponible": _dashboard_decimal_to_float(variacion),
+            "traffic_light": get_traffic_light(float(porcentaje), float(yellow), float(red)),
+        })
+        total_budget += presupuesto
+        total_exec += ejecutado
+
+    total_variacion = (total_budget - total_exec).quantize(TWO_DECIMALS)
+    total_porcentaje = ((total_exec / total_budget) * Decimal("100")).quantize(TWO_DECIMALS) if total_budget > 0 else Decimal("0.00")
+
+    pending_total = sum((_to_period_decimal(m.get("amount_mxn", 0)) for m in pending_in_period), Decimal("0.00"))
+    company_name = "Todas" if company_selector == "all" else empresa_map.get(company_selector, company_selector)
+    if project_selector == "all":
+        project_name = "Todos"
+    else:
+        project_name = (project_map.get(project_selector) or {}).get("name", project_selector)
+
+    return {
+        "filtros": {
+            "empresa_id": company_selector,
+            "empresa_nombre": company_name,
+            "project_id": project_selector,
+            "project_nombre": project_name,
+            "period": normalized_period,
+            "period_label": _fmt_period_label(normalized_period, selected_year, month, quarter),
+            "year": selected_year,
+            "month": month,
+            "quarter": quarter,
+        },
+        "year": selected_year,
+        "month": month,
+        "quarter": quarter,
+        "period": normalized_period,
+        "totals": {
+            "presupuesto_total": _dashboard_decimal_to_float(total_budget),
+            "ejecutado_total": _dashboard_decimal_to_float(total_exec),
+            "variacion_total": _dashboard_decimal_to_float(total_variacion),
+            "porcentaje_avance": _dashboard_decimal_to_float(total_porcentaje),
+            "traffic_light": get_traffic_light(float(total_porcentaje), float(yellow), float(red)),
+            # Compat fields
+            "budget": _dashboard_decimal_to_float(total_budget),
+            "real": _dashboard_decimal_to_float(total_exec),
+            "variation": _dashboard_decimal_to_float(total_variacion),
+            "percentage": _dashboard_decimal_to_float(total_porcentaje),
+        },
+        "pending": {
+            "count": len(pending_in_period),
+            "total_mxn": _dashboard_decimal_to_float(pending_total.quantize(TWO_DECIMALS)),
+        },
+        "by_partida": sorted(detail, key=lambda x: x.get("porcentaje", 0), reverse=True),
+        "by_project": [],
+        "pending_authorizations": await db.authorizations.count_documents({"status": "pending"}),
+        "movements_count": len(movements_in_period),
+        "include_pending": include_pending,
+        "meta": {
+            "threshold_yellow": _dashboard_decimal_to_float(yellow),
+            "threshold_red": _dashboard_decimal_to_float(red),
+            "pending_budget_policy": "excluded_from_official_budget",
+        }
+    }
 @api_router.get("/reports/dashboard")
 async def get_dashboard(
     empresa_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    period: str = "month",
     year: Optional[int] = None,
     month: Optional[int] = None,
-    include_pending: bool = False,  # Toggle para ver posted vs total incluyendo pendientes
+    quarter: Optional[int] = None,
+    include_pending: bool = False,  # compat legacy response field
     current_user: dict = Depends(require_permission(Permission.VIEW_DASHBOARD))
 ):
-    now = to_tijuana(datetime.now(timezone.utc))
-    year = year or now.year
-    validate_year_in_range(year)
-    month = month or now.month
-    
-    # Get projects filtered by empresa
-    project_query = {}
-    if empresa_id:
-        project_query["empresa_id"] = empresa_id
-    all_projects = await db.projects.find(project_query, {"_id": 0}).to_list(1000)
-    project_ids = [p['id'] for p in all_projects]
-    
-    # Get budgets
-    budget_query = {"year": year, "month": month}
-    if project_id:
-        budget_query["project_id"] = project_id
-    elif empresa_id:
-        budget_query["project_id"] = {"$in": project_ids}
-    
-    budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(1000)
-    
-    # Get movements - SOLO posted por default (ejecutado real)
-    posted_statuses = [MovementStatus.POSTED.value]
-    if include_pending:
-        posted_statuses.append(MovementStatus.PENDING_APPROVAL.value)
-    
-    movement_query = {"status": {"$in": posted_statuses}}
-    if project_id:
-        movement_query["project_id"] = project_id
-    elif empresa_id:
-        movement_query["project_id"] = {"$in": project_ids}
-    
-    all_movements = await db.movements.find(movement_active_query(extra=movement_query), {"_id": 0}).to_list(5000)
-    
-    # Filter by date
-    movements = [
-        m for m in all_movements
-        if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
-    ]
-    
-    # Get pending movements for KPI (separate query)
-    pending_query = {"status": MovementStatus.PENDING_APPROVAL.value}
-    if project_id:
-        pending_query["project_id"] = project_id
-    elif empresa_id:
-        pending_query["project_id"] = {"$in": project_ids}
-    
-    all_pending = await db.movements.find(movement_active_query(extra=pending_query), {"_id": 0}).to_list(5000)
-    pending_movements = [
-        m for m in all_pending
-        if date_parser.parse(m['date']).year == year and date_parser.parse(m['date']).month == month
-    ]
-    pending_total_mxn = sum(m['amount_mxn'] for m in pending_movements)
-    pending_count = len(pending_movements)
-    
-    # Calculate totals
-    total_budget = sum(b['amount_mxn'] for b in budgets)
-    total_real = sum(abs(float(m.get('amount_mxn',0))) for m in movements)
-    variation = total_budget - total_real
-    percentage = (total_real / total_budget * 100) if total_budget > 0 else 0
-    
-    # By partida (using partida_codigo from catalogo)
-    partidas_data = {}
-    for b in budgets:
-        key = b.get('partida_codigo', b.get('partida_id', 'N/A'))
-        if key not in partidas_data:
-            partidas_data[key] = {"budget": 0, "real": 0}
-        partidas_data[key]["budget"] += b['amount_mxn']
-    
-    for m in movements:
-        key = m.get('partida_codigo', m.get('partida_id', 'N/A'))
-        if key not in partidas_data:
-            partidas_data[key] = {"budget": 0, "real": 0}
-        partidas_data[key]["real"] += abs(float(m.get('amount_mxn',0)))
-    
-    # Get partida names from catalogo
-    partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(1000)
-    partida_map = {p['codigo']: p for p in partida_docs}
-    
-    partidas_summary = []
-    for partida_codigo, data in partidas_data.items():
-        pct = (data['real'] / data['budget'] * 100) if data['budget'] > 0 else (100 if data['real'] > 0 else 0)
-        partida_info = partida_map.get(partida_codigo, {})
-        partidas_summary.append({
-            "partida_codigo": partida_codigo,
-            "partida_nombre": partida_info.get('nombre', partida_codigo),
-            "partida_grupo": partida_info.get('grupo', 'N/A'),
-            "budget": data['budget'],
-            "real": data['real'],
-            "variation": data['budget'] - data['real'],
-            "percentage": pct,
-            "traffic_light": get_traffic_light(pct)
-        })
-    
-    # By project
-    projects_data = {}
-    for b in budgets:
-        key = b['project_id']
-        if key not in projects_data:
-            projects_data[key] = {"budget": 0, "real": 0}
-        projects_data[key]["budget"] += b['amount_mxn']
-    
-    for m in movements:
-        key = m['project_id']
-        if key not in projects_data:
-            projects_data[key] = {"budget": 0, "real": 0}
-        projects_data[key]["real"] += m['amount_mxn']
-    
-    project_docs = await db.projects.find({}, {"_id": 0}).to_list(1000)
-    project_map = {p['id']: p for p in project_docs}
-    
-    projects_summary = []
-    for proj_id, data in projects_data.items():
-        pct = (data['real'] / data['budget'] * 100) if data['budget'] > 0 else (100 if data['real'] > 0 else 0)
-        proj_info = project_map.get(proj_id, {})
-        projects_summary.append({
-            "project_id": proj_id,
-            "project_code": proj_info.get('code', 'N/A'),
-            "project_name": proj_info.get('name', 'N/A'),
-            "budget": data['budget'],
-            "real": data['real'],
-            "variation": data['budget'] - data['real'],
-            "percentage": pct,
-            "traffic_light": get_traffic_light(pct)
-        })
-    
-    # Pending authorizations count (for badge in menu)
-    pending_auths = await db.authorizations.count_documents({"status": "pending"})
-    
-    return {
-        "year": year,
-        "month": month,
-        "totals": {
-            "budget": total_budget,
-            "real": total_real,
-            "variation": variation,
-            "percentage": percentage,
-            "traffic_light": get_traffic_light(percentage)
-        },
-        "pending": {
-            "count": pending_count,
-            "total_mxn": pending_total_mxn
-        },
-        "by_partida": sorted(partidas_summary, key=lambda x: x['percentage'], reverse=True),
-        "by_project": sorted(projects_summary, key=lambda x: x['percentage'], reverse=True),
-        "pending_authorizations": pending_auths,
-        "movements_count": len(movements),
-        "include_pending": include_pending
-    }
+    return await _dashboard_summary_data(
+        current_user=current_user,
+        empresa_id=empresa_id,
+        project_id=project_id,
+        period=period,
+        year=year,
+        month=month,
+        quarter=quarter,
+        include_pending=include_pending,
+    )
 
 @api_router.get("/reports/partida-detail/{partida_codigo}")
 async def get_partida_detail(
@@ -5871,6 +6034,7 @@ async def setup_indexes():
     await db.budget_plans.create_index([("project_id", ASCENDING), ("partida_codigo", ASCENDING)], unique=True)
     await ensure_purchase_order_indexes()
     await ensure_partial_indexes_for_movements()
+    await db.movements.create_index([("project_id", ASCENDING), ("date", ASCENDING), ("partida_codigo", ASCENDING), ("is_deleted", ASCENDING)])
     await db.odoo_sync_purchase_orders.create_index([("purchase_order_id", ASCENDING)], unique=True)
 
 @app.on_event("shutdown")
