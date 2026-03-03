@@ -23,6 +23,7 @@ import bcrypt
 from enum import Enum
 import csv
 import io
+import xmlrpc.client
 from PIL import Image
 from openpyxl import Workbook, load_workbook
 from dateutil import parser as date_parser
@@ -498,6 +499,15 @@ class ConfigSetting(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_by: str
 
+class OdooIntegrationConfigInput(BaseModel):
+    odoo_mode: str = "stub"
+    odoo_url: Optional[str] = ""
+    odoo_db: Optional[str] = ""
+    odoo_username: Optional[str] = ""
+    odoo_api_key: Optional[str] = ""
+    default_model: Optional[str] = "purchase.order"
+
+
 class CSVImportResult(BaseModel):
     total_filas: int
     insertadas: int
@@ -766,6 +776,39 @@ def get_traffic_light(percentage: float, threshold_yellow: float = 90.0, thresho
     if percentage < threshold_red:
         return "yellow"
     return "red"
+
+
+def build_budget_signal(budget_total: Decimal, executed_total: Decimal, threshold_yellow: Decimal, threshold_red: Decimal) -> dict:
+    budget = money_dec(budget_total).quantize(TWO_DECIMALS)
+    executed = money_dec(executed_total).quantize(TWO_DECIMALS)
+    variation = (budget - executed).quantize(TWO_DECIMALS)
+    if budget == 0 and executed == 0:
+        return {
+            "traffic_light": "green",
+            "status_label": "SIN PRESUPUESTO (sin gasto)",
+            "porcentaje": Decimal("0.00"),
+            "porcentaje_label": "0.00",
+            "variation_color": "neutral",
+            "variacion": variation,
+        }
+    if budget == 0 and executed > 0:
+        return {
+            "traffic_light": "yellow",
+            "status_label": "SIN PRESUPUESTO (con gasto)",
+            "porcentaje": None,
+            "porcentaje_label": "N/A",
+            "variation_color": "yellow",
+            "variacion": variation,
+        }
+    porcentaje = ((executed / budget) * Decimal("100")).quantize(TWO_DECIMALS)
+    return {
+        "traffic_light": get_traffic_light(float(porcentaje), float(threshold_yellow), float(threshold_red)),
+        "status_label": "OK" if executed <= budget else "EXCEDIDO",
+        "porcentaje": porcentaje,
+        "porcentaje_label": str(porcentaje),
+        "variation_color": "green" if variation >= 0 else "red",
+        "variacion": variation,
+    }
 
 
 async def get_dashboard_thresholds() -> tuple[Decimal, Decimal]:
@@ -1712,14 +1755,14 @@ def format_money(amount: Any, currency: str = "MXN") -> str:
 
 
 def oc_pdf_filename(raw_folio: Optional[str]) -> str:
-    base = str(raw_folio or "").strip()
-    if not base:
+    base = canonicalize_oc_folio(raw_folio)
+    if not base or base == "N/A":
         return "purchase-order.pdf"
-    base = re.sub(r"[^A-Za-z0-9._-]", "_", base)
-    base = re.sub(r"_+", "_", base).strip("._-")
-    if not base:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", base)
+    safe = re.sub(r"_+", "_", safe).strip("._-")
+    if not safe:
         return "purchase-order.pdf"
-    return f"{base}.pdf"
+    return f"{safe}.pdf"
 
 
 def derive_delivery_status(po: dict) -> Optional[str]:
@@ -3030,6 +3073,164 @@ def canonicalize_oc_folio(raw_folio: Optional[str]) -> str:
     return folio
 
 
+def sanitize_sensitive_dict(payload: Optional[dict]) -> dict:
+    data = dict(payload or {})
+    for key in list(data.keys()):
+        if key.lower() in {"odoo_api_key", "api_key", "token", "password", "access_token"}:
+            data[key] = "***"
+    return data
+
+
+async def upsert_collection_doc(collection, query: dict, payload: dict):
+    existing = await collection.find_one(query, {"_id": 0})
+    if existing:
+        await collection.update_one(query, {"$set": payload})
+    else:
+        doc = dict(query)
+        doc.update(payload)
+        await collection.insert_one(doc)
+
+
+async def get_odoo_config() -> dict:
+    config_col = getattr(db, "config", None)
+    if config_col is None:
+        return {
+            "odoo_mode": "stub",
+            "odoo_url": "",
+            "odoo_db": "",
+            "odoo_username": "",
+            "odoo_api_key": "",
+            "default_model": "purchase.order",
+        }
+    row = await config_col.find_one({"key": "odoo_integration"}, {"_id": 0})
+    cfg = row.get("value", {}) if row else {}
+    return {
+        "odoo_mode": str(cfg.get("odoo_mode", "stub")).lower(),
+        "odoo_url": str(cfg.get("odoo_url", "")).strip(),
+        "odoo_db": str(cfg.get("odoo_db", "")).strip(),
+        "odoo_username": str(cfg.get("odoo_username", "")).strip(),
+        "odoo_api_key": str(cfg.get("odoo_api_key", "")).strip(),
+        "default_model": str(cfg.get("default_model", "purchase.order")).strip() or "purchase.order",
+    }
+
+
+async def save_odoo_config(current_user: dict, cfg: dict):
+    await upsert_collection_doc(
+        db.config,
+        {"key": "odoo_integration"},
+        {"value": cfg, "updated_at": datetime.now(timezone.utc).isoformat(), "updated_by": current_user.get("user_id")},
+    )
+
+
+async def _odoo_send_purchase_order(po: dict, actor: dict, manual_retry: bool = False) -> dict:
+    cfg = await get_odoo_config()
+    mode = cfg.get("odoo_mode", "stub")
+    payload = {
+        "purchase_order_id": po.get("id"),
+        "folio": po.get("folio") or po.get("external_id"),
+        "vendor": {"name": po.get("vendor_name"), "vat": po.get("vendor_rfc"), "email": po.get("vendor_email"), "phone": po.get("vendor_phone"), "street": po.get("vendor_address")},
+        "lines": [
+            {
+                "name": line.get("description") or f"Partida {line.get('partida_codigo')}",
+                "product_qty": float(money_dec(line.get("qty", 0))),
+                "price_unit": float(money_dec(line.get("price_unit", 0))),
+            }
+            for line in (po.get("lines") or [])
+        ],
+    }
+    event = "ODOO_RETRY" if manual_retry else "ODOO_AUTO_SEND"
+    if mode != "live":
+        doc = {
+            "id": str(uuid.uuid4()),
+            "purchase_order_id": po.get("id"),
+            "odoo_status": "stubbed",
+            "odoo_model": "purchase.order",
+            "odoo_record_id": None,
+            "payload_json": payload,
+            "last_error": None,
+            "last_sync_mode": "stub",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await upsert_collection_doc(db.odoo_sync_purchase_orders, {"purchase_order_id": po.get("id")}, doc)
+        await db.purchase_orders.update_one({"id": po.get("id")}, {"$set": {"odoo_status": "stubbed", "odoo_payload_json": payload, "updated_at": datetime.now(timezone.utc).isoformat()}})
+        await log_audit(actor, event, "purchase_orders", po.get("id"), {"odoo_status": "stubbed", "mode": "stub"})
+        return doc
+
+    if not cfg.get("odoo_url") or not cfg.get("odoo_db") or not cfg.get("odoo_username") or not cfg.get("odoo_api_key"):
+        raise HTTPException(status_code=422, detail=structured_error("odoo_config_incomplete", "Configuración Odoo incompleta para modo LIVE"))
+
+    try:
+        common = xmlrpc.client.ServerProxy(f"{cfg['odoo_url'].rstrip('/')}/xmlrpc/2/common")
+        uid = common.authenticate(cfg["odoo_db"], cfg["odoo_username"], cfg["odoo_api_key"], {})
+        if not uid:
+            raise HTTPException(status_code=403, detail=structured_error("odoo_auth_failed", "Autenticación Odoo fallida"))
+        models = xmlrpc.client.ServerProxy(f"{cfg['odoo_url'].rstrip('/')}/xmlrpc/2/object")
+        vendor = payload["vendor"]
+        partner_ids = []
+        if vendor.get("vat"):
+            partner_ids = models.execute_kw(cfg["odoo_db"], uid, cfg["odoo_api_key"], "res.partner", "search", [[("vat", "=", vendor["vat"])]] , {"limit": 1})
+        if not partner_ids and vendor.get("name"):
+            partner_ids = models.execute_kw(cfg["odoo_db"], uid, cfg["odoo_api_key"], "res.partner", "search", [[("name", "ilike", vendor["name"])]] , {"limit": 1})
+        if partner_ids:
+            partner_id = partner_ids[0]
+        else:
+            partner_id = models.execute_kw(cfg["odoo_db"], uid, cfg["odoo_api_key"], "res.partner", "create", [{
+                "name": vendor.get("name") or "Proveedor OC",
+                "vat": vendor.get("vat") or False,
+                "email": vendor.get("email") or False,
+                "phone": vendor.get("phone") or False,
+                "street": vendor.get("street") or False,
+                "supplier_rank": 1,
+            }])
+
+        odoo_lines = [[0, 0, line] for line in payload["lines"]]
+        vals = {
+            "partner_id": partner_id,
+            "origin": payload.get("folio"),
+            "date_order": po.get("order_date"),
+            "order_line": odoo_lines,
+        }
+        model_name = cfg.get("default_model") or "purchase.order"
+        record_id = models.execute_kw(cfg["odoo_db"], uid, cfg["odoo_api_key"], model_name, "create", [vals])
+        url_record = f"{cfg['odoo_url'].rstrip('/')}/web#id={record_id}&model={model_name}&view_type=form"
+        doc = {
+            "id": str(uuid.uuid4()),
+            "purchase_order_id": po.get("id"),
+            "odoo_status": "sent",
+            "odoo_model": model_name,
+            "odoo_record_id": str(record_id),
+            "odoo_url_to_record": url_record,
+            "payload_json": payload,
+            "last_error": None,
+            "last_sync_mode": "live",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await upsert_collection_doc(db.odoo_sync_purchase_orders, {"purchase_order_id": po.get("id")}, doc)
+        await db.purchase_orders.update_one({"id": po.get("id")}, {"$set": {"odoo_status": "sent", "odoo_model": model_name, "odoo_record_id": str(record_id), "odoo_payload_json": payload, "odoo_url_to_record": url_record, "updated_at": datetime.now(timezone.utc).isoformat()}})
+        await log_audit(actor, event, "purchase_orders", po.get("id"), {"odoo_status": "sent", "odoo_model": model_name, "odoo_record_id": str(record_id), "mode": "live"})
+        return doc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        msg = str(exc)
+        await upsert_collection_doc(db.odoo_sync_purchase_orders, {"purchase_order_id": po.get("id")}, {
+            "id": str(uuid.uuid4()),
+            "purchase_order_id": po.get("id"),
+            "odoo_status": "failed",
+            "odoo_model": cfg.get("default_model") or "purchase.order",
+            "odoo_record_id": None,
+            "payload_json": payload,
+            "last_error": msg,
+            "last_sync_mode": "live",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        await db.purchase_orders.update_one({"id": po.get("id")}, {"$set": {"odoo_status": "failed", "odoo_last_error": msg, "odoo_payload_json": payload, "updated_at": datetime.now(timezone.utc).isoformat()}})
+        await log_audit(actor, event, "purchase_orders", po.get("id"), {"odoo_status": "failed", "mode": "live", "error": msg})
+        raise HTTPException(status_code=409, detail=structured_error("odoo_send_failed", "No se pudo enviar a Odoo", {"error": msg}))
+
+
 def structured_error(code: str, message: str, details: Optional[Dict[str, Any]] = None) -> dict:
     payload = {"code": code, "message": message}
     if details:
@@ -3439,7 +3640,11 @@ async def approve_purchase_order(po_id: str, current_user: dict = Depends(requir
             await log_audit(current_user, "CREATE", "movements", movement_doc["id"], {"origin_event": "OC_APPROVE", "purchase_order_id": po_id})
             movement_ids.append(movement_doc["id"])
 
-        odoo_sync = await _sync_po_odoo_stub(po)
+        try:
+            odoo_sync = await _odoo_send_purchase_order(po, current_user, manual_retry=False)
+        except HTTPException as exc:
+            odoo_sync = {"odoo_status": "failed", "last_error": str(exc.detail)}
+
         await db.purchase_orders.update_one({"id": po_id}, {"$set": {
             "status": PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value,
             "approved_by_user_id": current_user["user_id"],
@@ -4595,6 +4800,67 @@ def _fmt_period_label(period: str, year: int, month: Optional[int], quarter: Opt
     return f"{year:04d}-{(month or 1):02d}"
 
 
+def _derive_partida_group(code: str, partida_catalog: dict) -> str:
+    part = partida_catalog.get(str(code), {}) or {}
+    if part.get("grupo"):
+        return str(part.get("grupo"))
+    code_int = int(''.join(ch for ch in str(code) if ch.isdigit())[:3] or 0)
+    if 100 <= code_int <= 199:
+        return "COSTOS DIRECTOS"
+    if 200 <= code_int <= 299:
+        return "GASTOS VTA/ADM"
+    if 300 <= code_int <= 399:
+        return "GASTOS FINANCIEROS"
+    if 400 <= code_int <= 499:
+        return "INGRESOS"
+    return "OTROS"
+
+
+def _build_corrida_rows(by_partida: List[dict], total_income: Decimal) -> dict:
+    rows = []
+    grouped: Dict[str, Dict[str, Decimal]] = {}
+    for row in by_partida:
+        group = str(row.get("partida_grupo") or "OTROS").upper()
+        g = grouped.setdefault(group, {"presupuesto": Decimal("0.00"), "real": Decimal("0.00")})
+        g["presupuesto"] += money_dec(row.get("presupuesto", 0))
+        g["real"] += money_dec(row.get("ejecutado", 0))
+
+    for row in by_partida:
+        presupuesto = money_dec(row.get("presupuesto", 0)).quantize(TWO_DECIMALS)
+        real = money_dec(row.get("ejecutado", 0)).quantize(TWO_DECIMALS)
+        pct_income = ((real / total_income) * Decimal("100")).quantize(TWO_DECIMALS) if total_income > 0 else None
+        flujo = (presupuesto - real).quantize(TWO_DECIMALS) if presupuesto > 0 else None
+        rows.append({
+            "type": "partida",
+            "concepto": f"{row.get('partida_codigo')} {row.get('partida_nombre')}",
+            "%_sobre_ingreso": float(pct_income) if pct_income is not None else None,
+            "presupuesto": float(presupuesto),
+            "real": float(real),
+            "flujo_por_ejercer": float(flujo) if flujo is not None else None,
+            "semaforo": row.get("traffic_light"),
+            "status_label": row.get("status_label"),
+            "grupo": row.get("partida_grupo"),
+        })
+
+    ingresos = grouped.get("INGRESOS", {"presupuesto": Decimal("0.00"), "real": Decimal("0.00")})
+    costos = sum((v["real"] for k,v in grouped.items() if "DIRECT" in k or k in {"OBRA", "COSTO DIRECTO", "COSTOS DIRECTOS"}), Decimal("0.00"))
+    gya = sum((v["real"] for k,v in grouped.items() if "VTA" in k or "ADM" in k or k in {"GYA"}), Decimal("0.00"))
+    fin = sum((v["real"] for k,v in grouped.items() if "FINAN" in k), Decimal("0.00"))
+    utilidad_bruta = ingresos["real"] - costos
+    utilidad_operativa = utilidad_bruta - gya
+    utilidad_antes_impuestos = utilidad_operativa - fin
+
+    subtotals = [
+        ("UTILIDAD BRUTA", utilidad_bruta),
+        ("UTILIDAD OPERATIVA", utilidad_operativa),
+        ("UTILIDAD ANTES IMPUESTOS", utilidad_antes_impuestos),
+    ]
+    for label, real in subtotals:
+        pct_income = ((real / total_income) * Decimal("100")).quantize(TWO_DECIMALS) if total_income > 0 else None
+        rows.append({"type": "subtotal", "concepto": label, "%_sobre_ingreso": float(pct_income) if pct_income is not None else None, "presupuesto": None, "real": float(real.quantize(TWO_DECIMALS)), "flujo_por_ejercer": None, "semaforo": "green" if real >= 0 else "red"})
+    return {"rows": rows}
+
+
 async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str], project_id: Optional[str], period: str, year: Optional[int], month: Optional[int], quarter: Optional[int], include_pending: bool = False):
     now = to_tijuana(datetime.now(timezone.utc))
     normalized_period = (period or "month").strip().lower()
@@ -4653,7 +4919,10 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
                 "ejecutado_total": 0.0,
                 "variacion_total": 0.0,
                 "porcentaje_avance": 0.0,
+                "porcentaje_label": "0.00",
                 "traffic_light": get_traffic_light(0, float(y), float(r)),
+                "status_label": "SIN PRESUPUESTO (sin gasto)",
+                "variation_color": "neutral",
             },
             "by_partida": [],
             "pending": {"count": 0, "total_mxn": 0.0},
@@ -4765,25 +5034,26 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     for code, values in by_partida.items():
         presupuesto = values["presupuesto"].quantize(TWO_DECIMALS)
         ejecutado = values["ejecutado"].quantize(TWO_DECIMALS)
-        variacion = (presupuesto - ejecutado).quantize(TWO_DECIMALS)
-        porcentaje = ((ejecutado / presupuesto) * Decimal("100")).quantize(TWO_DECIMALS) if presupuesto > 0 else (Decimal("100.00") if ejecutado > 0 else Decimal("0.00"))
+        signal = build_budget_signal(presupuesto, ejecutado, yellow, red)
         part = partida_map.get(code, {})
         detail.append({
             "partida_codigo": code,
             "partida_nombre": part.get("nombre", code),
-            "partida_grupo": part.get("grupo", "N/A"),
+            "partida_grupo": _derive_partida_group(code, partida_map),
             "presupuesto": _dashboard_decimal_to_float(presupuesto),
             "ejecutado": _dashboard_decimal_to_float(ejecutado),
-            "variacion": _dashboard_decimal_to_float(variacion),
-            "porcentaje": _dashboard_decimal_to_float(porcentaje),
-            "disponible": _dashboard_decimal_to_float(variacion),
-            "traffic_light": get_traffic_light(float(porcentaje), float(yellow), float(red)),
+            "variacion": _dashboard_decimal_to_float(signal["variacion"]),
+            "porcentaje": _dashboard_decimal_to_float(signal["porcentaje"]) if signal["porcentaje"] is not None else None,
+            "porcentaje_label": signal["porcentaje_label"],
+            "disponible": _dashboard_decimal_to_float(signal["variacion"]),
+            "traffic_light": signal["traffic_light"],
+            "status_label": signal["status_label"],
+            "variation_color": signal["variation_color"],
         })
         total_budget += presupuesto
         total_exec += ejecutado
 
-    total_variacion = (total_budget - total_exec).quantize(TWO_DECIMALS)
-    total_porcentaje = ((total_exec / total_budget) * Decimal("100")).quantize(TWO_DECIMALS) if total_budget > 0 else Decimal("0.00")
+    total_signal = build_budget_signal(total_budget, total_exec, yellow, red)
 
     pending_total = sum((_to_period_decimal(m.get("amount_mxn", 0)) for m in pending_in_period), Decimal("0.00"))
     company_name = "Todas" if company_selector == "all" else empresa_map.get(company_selector, company_selector)
@@ -4791,6 +5061,9 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
         project_name = "Todos"
     else:
         project_name = (project_map.get(project_selector) or {}).get("name", project_selector)
+
+    income_total = sum((money_dec(r.get("ejecutado", 0)) for r in detail if str(r.get("partida_codigo", "")).startswith("4")), Decimal("0.00"))
+    corrida = _build_corrida_rows(detail, income_total)
 
     return {
         "filtros": {
@@ -4811,14 +5084,17 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
         "totals": {
             "presupuesto_total": _dashboard_decimal_to_float(total_budget),
             "ejecutado_total": _dashboard_decimal_to_float(total_exec),
-            "variacion_total": _dashboard_decimal_to_float(total_variacion),
-            "porcentaje_avance": _dashboard_decimal_to_float(total_porcentaje),
-            "traffic_light": get_traffic_light(float(total_porcentaje), float(yellow), float(red)),
+            "variacion_total": _dashboard_decimal_to_float(total_signal["variacion"]),
+            "porcentaje_avance": _dashboard_decimal_to_float(total_signal["porcentaje"]) if total_signal["porcentaje"] is not None else None,
+            "porcentaje_label": total_signal["porcentaje_label"],
+            "traffic_light": total_signal["traffic_light"],
+            "status_label": total_signal["status_label"],
+            "variation_color": total_signal["variation_color"],
             # Compat fields
             "budget": _dashboard_decimal_to_float(total_budget),
             "real": _dashboard_decimal_to_float(total_exec),
-            "variation": _dashboard_decimal_to_float(total_variacion),
-            "percentage": _dashboard_decimal_to_float(total_porcentaje),
+            "variation": _dashboard_decimal_to_float(total_signal["variacion"]),
+            "percentage": _dashboard_decimal_to_float(total_signal["porcentaje"]) if total_signal["porcentaje"] is not None else None,
         },
         "pending": {
             "count": len(pending_in_period),
@@ -4826,6 +5102,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
         },
         "by_partida": sorted(detail, key=lambda x: x.get("porcentaje", 0), reverse=True),
         "by_project": [],
+        "corrida": corrida,
         "pending_authorizations": await db.authorizations.count_documents({"status": "pending"}),
         "movements_count": len(movements_in_period),
         "include_pending": include_pending,
@@ -4835,6 +5112,39 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "pending_budget_policy": "excluded_from_official_budget",
         }
     }
+@api_router.get("/reports/corrida")
+async def get_corrida(
+    empresa_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    period: str = "month",
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    quarter: Optional[int] = None,
+    include_pending: bool = False,
+    current_user: dict = Depends(require_permission(Permission.VIEW_DASHBOARD))
+):
+    data = await _dashboard_summary_data(
+        current_user=current_user,
+        empresa_id=empresa_id,
+        project_id=project_id,
+        period=period,
+        year=year,
+        month=month,
+        quarter=quarter,
+        include_pending=include_pending,
+    )
+    return {
+        "filtros": data.get("filtros", {}),
+        "periodo": {
+            "period": data.get("period"),
+            "year": data.get("year"),
+            "month": data.get("month"),
+            "quarter": data.get("quarter"),
+        },
+        "rows": (data.get("corrida") or {}).get("rows", []),
+        "totals": data.get("totals", {}),
+    }
+
 @api_router.get("/reports/dashboard")
 async def get_dashboard(
     empresa_id: Optional[str] = None,
@@ -5289,6 +5599,67 @@ async def update_config(key: str, value: Any, current_user: dict = Depends(requi
     
     await log_audit(current_user, "UPDATE", "config", key, {"before": old_value, "after": value})
     return {"message": "Configuración actualizada"}
+
+
+
+@api_router.get("/admin/integrations/odoo")
+async def get_odoo_integration(current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+    cfg = await get_odoo_config()
+    masked = dict(cfg)
+    masked["odoo_api_key"] = "***" if masked.get("odoo_api_key") else ""
+    return masked
+
+
+@api_router.put("/admin/integrations/odoo")
+async def put_odoo_integration(payload: OdooIntegrationConfigInput, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+    mode = (payload.odoo_mode or "stub").strip().lower()
+    if mode not in {"stub", "live"}:
+        raise HTTPException(status_code=422, detail=structured_error("invalid_odoo_mode", "odoo_mode debe ser stub o live"))
+    cfg = {
+        "odoo_mode": mode,
+        "odoo_url": (payload.odoo_url or "").strip(),
+        "odoo_db": (payload.odoo_db or "").strip(),
+        "odoo_username": (payload.odoo_username or "").strip(),
+        "odoo_api_key": (payload.odoo_api_key or "").strip(),
+        "default_model": (payload.default_model or "purchase.order").strip() or "purchase.order",
+    }
+    await save_odoo_config(current_user, cfg)
+    await log_audit(current_user, "ODOO_MODE_CHANGE", "config", "odoo_integration", {"after": sanitize_sensitive_dict(cfg)})
+    out = dict(cfg)
+    out["odoo_api_key"] = "***" if out.get("odoo_api_key") else ""
+    return out
+
+
+@api_router.post("/admin/integrations/odoo/test-connection")
+async def test_odoo_integration(current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+    cfg = await get_odoo_config()
+    required = ["odoo_url", "odoo_db", "odoo_username", "odoo_api_key"]
+    missing = [k for k in required if not cfg.get(k)]
+    if missing:
+        raise HTTPException(status_code=422, detail=structured_error("odoo_config_incomplete", "Faltan campos de configuración", {"missing": missing}))
+    try:
+        common = xmlrpc.client.ServerProxy(f"{cfg['odoo_url'].rstrip('/')}/xmlrpc/2/common")
+        uid = common.authenticate(cfg["odoo_db"], cfg["odoo_username"], cfg["odoo_api_key"], {})
+        if not uid:
+            raise HTTPException(status_code=403, detail=structured_error("odoo_auth_failed", "Autenticación Odoo fallida"))
+        await log_audit(current_user, "ODOO_TEST_CONNECTION", "config", "odoo_integration", {"result": "ok", "mode": cfg.get("odoo_mode", "stub")})
+        return {"ok": True, "uid": uid, "mode": cfg.get("odoo_mode", "stub")}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await log_audit(current_user, "ODOO_TEST_CONNECTION", "config", "odoo_integration", {"result": "failed", "error": str(exc)})
+        raise HTTPException(status_code=409, detail=structured_error("odoo_connection_failed", "Error conectando con Odoo", {"error": str(exc)}))
+
+
+@api_router.post("/purchase-orders/{po_id}/odoo-sync")
+async def manual_sync_purchase_order_odoo(po_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN))):
+    po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(status_code=404, detail=structured_error("purchase_order_not_found", "OC no encontrada"))
+    if po.get("status") != PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value:
+        raise HTTPException(status_code=409, detail=structured_error("oc_state_conflict", "Solo se puede enviar a Odoo cuando está approved_for_payment"))
+    result = await _odoo_send_purchase_order(po, current_user, manual_retry=True)
+    return {"purchase_order_id": po_id, "odoo": sanitize_mongo_document(result)}
 
 # ========================= DATA MIGRATION =========================
 @api_router.post("/migrate-movement-status")
