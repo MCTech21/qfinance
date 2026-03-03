@@ -30,6 +30,8 @@ class FakeCollection:
             if self._matches(r, query): r.update(update.get("$set", {}))
     async def delete_one(self, query):
         self.rows = [r for r in self.rows if not self._matches(r, query)]
+    async def count_documents(self, query):
+        return len([r for r in self.rows if self._matches(r, query)])
 
 
 class FakeDB:
@@ -54,6 +56,7 @@ class FakeDB:
         self.clients = FakeCollection([{"id": "cl1", "company_id": "c1", "project_id": "p1", "nombre": "JUAN", "inventory_item_id": "inv1", "saldo_restante": 100000.0}])
         self.import_export_logs = FakeCollection([])
         self.empresas = FakeCollection([{"id": "c1", "nombre": "C1"}, {"id": "c2", "nombre": "C2"}])
+        self.config = FakeCollection([{"key": "threshold_yellow", "value": 80}, {"key": "threshold_red", "value": 95}])
     def __getitem__(self, n): return getattr(self, n)
 
 
@@ -443,3 +446,61 @@ def test_captura_can_read_receipt_in_scope_and_forbidden_out_of_scope():
 
     assert in_scope.status_code == 200
     assert out_scope.status_code == 403
+
+
+def test_reports_dashboard_periods_and_rbac_and_serialization():
+    c, db = make_client(role="captura", empresa_id="c1")
+    db.projects.rows.append({"id": "p3", "empresa_id": "c1", "name": "P3", "code": "P3"})
+    db.budget_plans.rows.extend([
+        {
+            "id": "bp1", "project_id": "p1", "partida_codigo": "205", "total_amount": 1000,
+            "annual_breakdown": {"2026": 600},
+            "monthly_breakdown": {"2026-01": 100, "2026-02": 200, "2026-03": 300},
+            "approval_status": "approved",
+        },
+        {
+            "id": "bp2", "project_id": "p2", "partida_codigo": "205", "total_amount": 9999,
+            "annual_breakdown": {"2026": 9999},
+            "monthly_breakdown": {"2026-01": 9999},
+            "approval_status": "approved",
+        },
+        {
+            "id": "bp3", "project_id": "p1", "partida_codigo": "402", "total_amount": 500,
+            "monthly_breakdown": {"2026-01": 500},
+            "approval_status": "pending",
+        },
+    ])
+    db.movements.rows.extend([
+        {"id": "m1", "project_id": "p1", "partida_codigo": "205", "status": "posted", "is_deleted": False, "date": "2026-01-10T00:00:00+00:00", "amount_mxn": -80},
+        {"id": "m2", "project_id": "p1", "partida_codigo": "205", "status": "posted", "is_deleted": False, "date": "2026-02-10T00:00:00+00:00", "amount_mxn": -20},
+        {"id": "m3", "project_id": "p2", "partida_codigo": "205", "status": "posted", "is_deleted": False, "date": "2026-01-10T00:00:00+00:00", "amount_mxn": -999},
+    ])
+
+    r_month = c.get('/api/reports/dashboard', params={"empresa_id": "all", "project_id": "all", "period": "month", "year": 2026, "month": 1})
+    assert r_month.status_code == 200
+    payload = r_month.json()
+    assert payload["totals"]["presupuesto_total"] == 100.0
+    assert payload["totals"]["ejecutado_total"] == 80.0
+    assert payload["totals"]["traffic_light"] == "yellow"
+    import json
+    assert "\"_id\":" not in json.dumps(payload)
+
+    r_quarter = c.get('/api/reports/dashboard', params={"period": "quarter", "year": 2026, "quarter": 1, "empresa_id": "all", "project_id": "all"})
+    assert r_quarter.status_code == 200
+    assert r_quarter.json()["totals"]["presupuesto_total"] == 600.0
+
+    r_year = c.get('/api/reports/dashboard', params={"period": "year", "year": 2026, "empresa_id": "all", "project_id": "all"})
+    assert r_year.status_code == 200
+    assert r_year.json()["totals"]["presupuesto_total"] == 600.0
+
+    r_all = c.get('/api/reports/dashboard', params={"period": "all", "year": 2026, "empresa_id": "all", "project_id": "all"})
+    assert r_all.status_code == 200
+    assert r_all.json()["totals"]["presupuesto_total"] == 600.0
+
+
+def test_reports_dashboard_validations_422():
+    c, _ = make_client()
+    assert c.get('/api/reports/dashboard', params={"period": "month", "year": 2026, "month": 0}).status_code == 422
+    assert c.get('/api/reports/dashboard', params={"period": "month", "year": 2026, "month": 13}).status_code == 422
+    assert c.get('/api/reports/dashboard', params={"period": "quarter", "year": 2026, "quarter": 0}).status_code == 422
+    assert c.get('/api/reports/dashboard', params={"period": "quarter", "year": 2026, "quarter": 5}).status_code == 422
