@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import { toast } from "sonner";
 import { Button } from "../components/ui/button";
@@ -32,6 +32,7 @@ export default function Clients() {
   const [form, setForm] = useState(initialForm);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const isAdmin = user?.role === "admin";
+  const fileInputRef = useRef(null);
 
   const filteredProjects = useMemo(() => {
     if (!form.company_id) return projects;
@@ -142,6 +143,23 @@ export default function Clients() {
     }
   };
 
+  const importCsv = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await api().post("/clients/import-csv?dry_run=false", formData, { headers: { "Content-Type": "multipart/form-data" } });
+      toast.success(`Importación completada: ${res.data.created_count} creados, ${res.data.updated_count} actualizados, ${res.data.skipped_count} omitidos`);
+      if (res.data.errors?.length) toast.error(`Errores: ${res.data.errors.length}`);
+      fetchData();
+    } catch (error) {
+      toast.error(error?.response?.data?.detail?.message || "Error en importación CSV");
+    } finally {
+      e.target.value = "";
+    }
+  };
+
   const exportExcel = () => {
     const rows = clients.map((c) => ({
       nombre: c.nombre,
@@ -169,7 +187,7 @@ export default function Clients() {
           <p className="text-muted-foreground">Administración de clientes y saldos</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={exportExcel}><FileSpreadsheet className="h-4 w-4 mr-2" />Exportar Excel</Button>
+          <Button variant="outline" onClick={exportExcel}><FileSpreadsheet className="h-4 w-4 mr-2" />Exportar Excel</Button><input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={importCsv} /><Button variant="outline" onClick={() => fileInputRef.current?.click()}>Importar CSV</Button>
           <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
               <Button onClick={openCreate}><Plus className="h-4 w-4 mr-2" />Nuevo cliente</Button>

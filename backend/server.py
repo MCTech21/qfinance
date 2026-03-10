@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 import uuid
 from datetime import datetime, timezone, date
 import zlib
+import unicodedata
 import asyncio
 import jwt
 import bcrypt
@@ -339,6 +340,8 @@ class PurchaseOrderCreate(BaseModel):
     vendor_address: Optional[str] = None
     currency: Currency = Currency.MXN
     exchange_rate: Optional[Decimal] = Decimal("1")
+    apply_iva_withholding: bool = False
+    iva_withholding_rate: Optional[Decimal] = Decimal("0")
     order_date: str
     planned_date: Optional[str] = None
     notes: Optional[str] = None
@@ -349,6 +352,28 @@ class PurchaseOrderCreate(BaseModel):
 
 class PurchaseOrderRejectInput(BaseModel):
     reason: str
+
+
+class InvoiceCreate(BaseModel):
+    empresa_id: str
+    project_id: str
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    invoice_folio: str
+    currency: Currency = Currency.MXN
+    exchange_rate: Optional[Decimal] = Decimal("1")
+    invoice_total_original: Decimal
+    status: Optional[str] = "OPEN"
+
+
+class InvoicePayInput(BaseModel):
+    mode: str
+    advance_pct: Optional[Decimal] = None
+    amount_original: Optional[Decimal] = None
+    date: str
+    reference: str
+    description: Optional[str] = None
+    partida_codigo: str
 
 
 class OCBudgetPreviewInput(BaseModel):
@@ -1015,6 +1040,12 @@ def decimal_map_to_strings(values: Dict[str, Decimal]) -> Dict[str, str]:
     return {k: str(v) for k, v in values.items()}
 
 
+def normalize_for_sort(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    normalized = unicodedata.normalize("NFD", raw)
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+
 TWO_DECIMALS = Decimal("0.01")
 
 
@@ -1084,16 +1115,24 @@ def calculate_oc_line(line: PurchaseOrderLineInput) -> dict:
     }
 
 
-def summarize_oc_lines(lines: List[dict]) -> dict:
+def summarize_oc_lines(lines: List[dict], apply_iva_withholding: bool = False, iva_withholding_rate: Decimal = Decimal("0"), currency: str = "MXN", exchange_rate: Decimal = Decimal("1")) -> dict:
     subtotal_tax_base = sum((money_dec(l.get("taxable_base", 0)) for l in lines), Decimal("0"))
     tax_total = sum((money_dec(l.get("iva_amount", 0)) for l in lines), Decimal("0"))
     withholding_isr_total = sum((money_dec(l.get("isr_withholding_amount", 0)) for l in lines), Decimal("0"))
-    total = (subtotal_tax_base + tax_total - withholding_isr_total).quantize(TWO_DECIMALS)
+    iva_withheld = Decimal("0")
+    if apply_iva_withholding:
+        if iva_withholding_rate <= 0:
+            raise HTTPException(status_code=422, detail={"code": "invalid_iva_withholding_rate", "message": "iva_withholding_rate debe ser mayor a 0 cuando aplica retención IVA"})
+        iva_withheld = (tax_total * (iva_withholding_rate / Decimal("100"))).quantize(TWO_DECIMALS)
+    total = (subtotal_tax_base + tax_total - iva_withheld - withholding_isr_total).quantize(TWO_DECIMALS)
+    total_mxn = total if currency == Currency.MXN.value else (total * exchange_rate).quantize(TWO_DECIMALS)
     return {
         "subtotal_tax_base": str(subtotal_tax_base.quantize(TWO_DECIMALS)),
         "tax_total": str(tax_total.quantize(TWO_DECIMALS)),
+        "iva_withholding_total": str(iva_withheld.quantize(TWO_DECIMALS)),
         "withholding_isr_total": str(withholding_isr_total.quantize(TWO_DECIMALS)),
         "total": str(total),
+        "total_mxn": str(total_mxn),
     }
 
 
@@ -2476,9 +2515,17 @@ async def update_partida(partida_id: str, updates: PartidaBase, current_user: di
 
 # ========================= PROVIDER ROUTES =========================
 @api_router.get("/providers", response_model=List[Provider])
-async def get_providers(include_inactive: bool = False, current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
+async def get_providers(include_inactive: bool = False, q: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
     query = {} if include_inactive else {"is_active": {"$ne": False}}
+    if q and q.strip():
+        safe_q = re.escape(q.strip())
+        query["$or"] = [
+            {"name": {"$regex": safe_q, "$options": "i"}},
+            {"rfc": {"$regex": safe_q, "$options": "i"}},
+            {"code": {"$regex": safe_q, "$options": "i"}},
+        ]
     providers = await db.providers.find(query, {"_id": 0}).to_list(1000)
+    providers.sort(key=lambda item: normalize_for_sort(item.get("name")))
     return [Provider(**p) for p in providers]
 
 @api_router.post("/providers", response_model=Provider)
@@ -3366,6 +3413,10 @@ def normalize_purchase_order_response(doc: dict) -> dict:
     normalized = sanitize_mongo_document(doc)
     normalized.setdefault("folio", normalized.get("external_id"))
     normalized.setdefault("external_id", normalized.get("folio"))
+    normalized["subtotal"] = normalized.get("subtotal_tax_base")
+    normalized["iva"] = normalized.get("tax_total")
+    normalized["iva_retenido"] = normalized.get("iva_withholding_total", "0.00")
+    normalized["total_neto"] = normalized.get("total")
     return normalized
 
 
@@ -3465,7 +3516,16 @@ async def create_purchase_order(payload: PurchaseOrderCreate, current_user: dict
     else:
         existing = None
     lines = [calculate_oc_line(line) for line in payload.lines]
-    totals = summarize_oc_lines(lines)
+    exchange_rate_dec = parse_amount_like(payload.exchange_rate or 1, "exchange_rate")
+    if payload.currency != Currency.MXN and exchange_rate_dec <= 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_exchange_rate", "message": "exchange_rate debe ser mayor a 0 para moneda distinta a MXN"})
+    totals = summarize_oc_lines(
+        lines,
+        apply_iva_withholding=payload.apply_iva_withholding,
+        iva_withholding_rate=parse_amount_like(payload.iva_withholding_rate or 0, "iva_withholding_rate"),
+        currency=payload.currency.value,
+        exchange_rate=exchange_rate_dec,
+    )
     po_base = {
         "folio": folio,
         "external_id": folio,
@@ -3478,7 +3538,9 @@ async def create_purchase_order(payload: PurchaseOrderCreate, current_user: dict
         "vendor_phone": payload.vendor_phone,
         "vendor_address": payload.vendor_address,
         "currency": payload.currency.value,
-        "exchange_rate": str(parse_amount_like(payload.exchange_rate or 1, "exchange_rate")),
+        "exchange_rate": str(exchange_rate_dec),
+        "apply_iva_withholding": payload.apply_iva_withholding,
+        "iva_withholding_rate": str(parse_amount_like(payload.iva_withholding_rate or 0, "iva_withholding_rate")),
         "order_date": parse_date_tijuana(payload.order_date).isoformat(),
         "planned_date": parse_date_tijuana(payload.planned_date).isoformat() if payload.planned_date else None,
         "notes": payload.notes,
@@ -3525,7 +3587,16 @@ async def update_purchase_order(po_id: str, payload: PurchaseOrderCreate, curren
     if po.get("status") not in {PurchaseOrderStatus.DRAFT.value, PurchaseOrderStatus.REJECTED.value}:
         raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "Solo se puede editar DRAFT/REJECTED"})
     lines = [calculate_oc_line(line) for line in payload.lines]
-    totals = summarize_oc_lines(lines)
+    exchange_rate_dec = parse_amount_like(payload.exchange_rate or 1, "exchange_rate")
+    if payload.currency != Currency.MXN and exchange_rate_dec <= 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_exchange_rate", "message": "exchange_rate debe ser mayor a 0 para moneda distinta a MXN"})
+    totals = summarize_oc_lines(
+        lines,
+        apply_iva_withholding=payload.apply_iva_withholding,
+        iva_withholding_rate=parse_amount_like(payload.iva_withholding_rate or 0, "iva_withholding_rate"),
+        currency=payload.currency.value,
+        exchange_rate=exchange_rate_dec,
+    )
     update_doc = {
         "invoice_folio": (payload.supplier_invoice_folio or payload.invoice_folio or "").strip()[:100] or None,
         "vendor_name": payload.vendor_name,
@@ -3533,6 +3604,10 @@ async def update_purchase_order(po_id: str, payload: PurchaseOrderCreate, curren
         "vendor_email": payload.vendor_email,
         "vendor_phone": payload.vendor_phone,
         "vendor_address": payload.vendor_address,
+        "currency": payload.currency.value,
+        "exchange_rate": str(exchange_rate_dec),
+        "apply_iva_withholding": payload.apply_iva_withholding,
+        "iva_withholding_rate": str(parse_amount_like(payload.iva_withholding_rate or 0, "iva_withholding_rate")),
         "order_date": parse_date_tijuana(payload.order_date).isoformat(),
         "planned_date": parse_date_tijuana(payload.planned_date).isoformat() if payload.planned_date else None,
         "lines": lines,
@@ -3833,7 +3908,14 @@ async def get_movements(
                 continue
             filtered.append(m)
         movements = filtered
-    
+
+    for m in movements:
+        if m.get("amount_mxn") is None:
+            amount_original = money_dec(m.get("amount_original") or 0)
+            rate = money_dec(m.get("exchange_rate") or 1)
+            computed = (amount_original * rate).quantize(TWO_DECIMALS)
+            m["amount_mxn"] = float(computed)
+
     return movements
 
 @api_router.post("/movements")
@@ -3895,6 +3977,10 @@ async def create_movement(movement_data: MovementCreate, current_user: dict = De
     exchange_rate_dec = decimal_from_value(movement_data.exchange_rate, "exchange_rate").quantize(Decimal("0.0001"))
     if amount_original_dec <= 0:
         raise HTTPException(status_code=422, detail={"code": "invalid_amount", "message": "Monto debe ser mayor a 0"})
+    if movement_data.currency != Currency.MXN and exchange_rate_dec <= 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_exchange_rate", "message": "exchange_rate debe ser mayor a 0 para moneda distinta a MXN"})
+    if movement_data.currency == Currency.MXN:
+        exchange_rate_dec = Decimal("1")
 
     if project:
         enforce_company_access(current_user, project.get("empresa_id"))
@@ -6541,6 +6627,259 @@ async def create_inventory_item(payload: InventoryItemBase, current_user: dict =
     await log_audit(current_user, "CREATE", "inventory", doc["id"], {"data": doc})
     return sanitize_mongo_document(doc)
 
+
+
+
+def normalize_invoice_response(doc: dict) -> dict:
+    clean = sanitize_mongo_document(doc)
+    clean.setdefault("id", clean.get("_id"))
+    return clean
+
+
+@api_router.post("/invoices")
+async def create_invoice(payload: InvoiceCreate, current_user: dict = Depends(require_permission(Permission.CREATE_MOVEMENT))):
+    project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail={"code": "project_not_found", "message": "Proyecto no encontrado"})
+    enforce_company_access(current_user, payload.empresa_id)
+    if project.get("empresa_id") != payload.empresa_id:
+        raise HTTPException(status_code=422, detail={"code": "project_company_mismatch", "message": "El proyecto no corresponde a la empresa"})
+    provider_name = payload.provider_name
+    if payload.provider_id:
+        provider = await db.providers.find_one({"id": payload.provider_id}, {"_id": 0})
+        if not provider:
+            raise HTTPException(status_code=422, detail={"code": "provider_not_found", "message": "Proveedor no válido"})
+        provider_name = provider.get("name")
+    exchange_rate_dec = parse_amount_like(payload.exchange_rate or 1, "exchange_rate")
+    if payload.currency != Currency.MXN and exchange_rate_dec <= 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_exchange_rate", "message": "exchange_rate debe ser mayor a 0 para moneda distinta a MXN"})
+    if payload.currency == Currency.MXN:
+        exchange_rate_dec = Decimal("1")
+    total_original = money_dec(payload.invoice_total_original)
+    total_mxn = (total_original * exchange_rate_dec).quantize(TWO_DECIMALS)
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "empresa_id": payload.empresa_id,
+        "project_id": payload.project_id,
+        "provider_id": payload.provider_id,
+        "provider_name": provider_name,
+        "invoice_folio": (payload.invoice_folio or "").strip(),
+        "currency": payload.currency.value,
+        "exchange_rate": str(exchange_rate_dec),
+        "invoice_total_original": str(total_original),
+        "invoice_total_mxn": str(total_mxn),
+        "paid_mxn": "0.00",
+        "balance_mxn": str(total_mxn),
+        "status": (payload.status or "OPEN").upper(),
+        "created_at": now,
+        "updated_at": now,
+        "created_by": current_user.get("user_id"),
+    }
+    await db.invoices.insert_one(doc)
+    await log_audit(current_user, "CREATE", "invoices", doc["id"], {"folio": doc["invoice_folio"], "provider_id": doc.get("provider_id")})
+    return normalize_invoice_response(doc)
+
+
+@api_router.get("/invoices")
+async def list_invoices(empresa_id: Optional[str] = None, project_id: Optional[str] = None, provider_id: Optional[str] = None, q: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_MOVEMENTS))):
+    query = {}
+    if empresa_id:
+        enforce_company_access(current_user, empresa_id)
+        query["empresa_id"] = empresa_id
+    if project_id:
+        query["project_id"] = project_id
+    if provider_id:
+        query["provider_id"] = provider_id
+    if q and q.strip():
+        safe_q = re.escape(q.strip())
+        query["$or"] = [
+            {"invoice_folio": {"$regex": safe_q, "$options": "i"}},
+            {"provider_name": {"$regex": safe_q, "$options": "i"}},
+        ]
+    rows = await db.invoices.find(query, {"_id": 0}).to_list(2000)
+    for row in rows:
+        if row.get("currency") != Currency.MXN.value and not row.get("invoice_total_mxn"):
+            er = money_dec(row.get("exchange_rate") or 0)
+            original = money_dec(row.get("invoice_total_original") or 0)
+            row["invoice_total_mxn"] = str((original * er).quantize(TWO_DECIMALS))
+        if not row.get("balance_mxn"):
+            total_mxn = money_dec(row.get("invoice_total_mxn") or 0)
+            paid = money_dec(row.get("paid_mxn") or 0)
+            row["balance_mxn"] = str((total_mxn - paid).quantize(TWO_DECIMALS))
+    return [normalize_invoice_response(row) for row in rows]
+
+
+@api_router.post("/invoices/{invoice_id}/pay")
+async def pay_invoice(invoice_id: str, payload: InvoicePayInput, current_user: dict = Depends(require_permission(Permission.CREATE_MOVEMENT))):
+    invoice = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
+    if not invoice:
+        raise HTTPException(status_code=404, detail={"code": "invoice_not_found", "message": "Factura no encontrada"})
+    enforce_company_access(current_user, invoice.get("empresa_id"))
+    mode = (payload.mode or "").upper().strip()
+    if mode not in {"ANTICIPO", "LIQUIDACION", "PAGO"}:
+        raise HTTPException(status_code=422, detail={"code": "invalid_mode", "message": "mode inválido"})
+    total_original = money_dec(invoice.get("invoice_total_original") or 0)
+    total_mxn = money_dec(invoice.get("invoice_total_mxn") or 0)
+    paid_mxn = money_dec(invoice.get("paid_mxn") or 0)
+    balance_mxn = (total_mxn - paid_mxn).quantize(TWO_DECIMALS)
+    exchange_rate_dec = money_dec(invoice.get("exchange_rate") or 1)
+
+    if mode == "ANTICIPO":
+        if payload.advance_pct is None:
+            raise HTTPException(status_code=422, detail={"code": "advance_pct_required", "message": "advance_pct es obligatorio en ANTICIPO"})
+        pct = parse_amount_like(payload.advance_pct, "advance_pct")
+        if pct <= 0 or pct > 100:
+            raise HTTPException(status_code=422, detail={"code": "invalid_advance_pct", "message": "advance_pct debe ser >0 y <=100"})
+        amount_original = money_dec(payload.amount_original) if payload.amount_original is not None else (total_original * pct / Decimal("100")).quantize(TWO_DECIMALS)
+    elif mode == "LIQUIDACION":
+        amount_original = money_dec(payload.amount_original) if payload.amount_original is not None else (balance_mxn / max(exchange_rate_dec, Decimal("0.01"))).quantize(TWO_DECIMALS)
+    else:
+        amount_original = money_dec(payload.amount_original or 0)
+
+    if amount_original <= 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_amount", "message": "Monto inválido"})
+    amount_mxn = (amount_original * exchange_rate_dec).quantize(TWO_DECIMALS)
+    if amount_mxn > balance_mxn:
+        raise HTTPException(status_code=422, detail={"code": "payment_exceeds_balance", "message": "El pago excede el saldo"})
+
+    movement_doc = {
+        "id": str(uuid.uuid4()),
+        "project_id": invoice.get("project_id"),
+        "partida_codigo": payload.partida_codigo,
+        "provider_id": invoice.get("provider_id"),
+        "date": parse_date_tijuana(payload.date).isoformat(),
+        "currency": invoice.get("currency") or Currency.MXN.value,
+        "amount_original": float(amount_original),
+        "exchange_rate": float(exchange_rate_dec),
+        "amount_mxn": float(amount_mxn),
+        "reference": payload.reference,
+        "description": payload.description or f"Pago {mode} factura {invoice.get('invoice_folio')}",
+        "status": MovementStatus.POSTED.value,
+        "created_by": current_user.get("user_id"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "invoice_id": invoice_id,
+        "payment_mode": mode,
+    }
+    await db.movements.insert_one(movement_doc)
+
+    new_paid = (paid_mxn + amount_mxn).quantize(TWO_DECIMALS)
+    new_balance = (total_mxn - new_paid).quantize(TWO_DECIMALS)
+    status = "PAID" if new_balance <= 0 else ("PARTIAL" if new_paid > 0 else "OPEN")
+    await db.invoices.update_one({"id": invoice_id}, {"$set": {"paid_mxn": str(new_paid), "balance_mxn": str(new_balance), "status": status, "updated_at": datetime.now(timezone.utc).isoformat()}})
+    updated = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
+    await log_audit(current_user, "PAY", "invoices", invoice_id, {"mode": mode, "amount_mxn": str(amount_mxn), "movement_id": movement_doc["id"]})
+    return {"invoice": normalize_invoice_response(updated), "movement": sanitize_mongo_document(movement_doc)}
+
+
+
+@api_router.post("/inventory/import-csv")
+async def import_inventory_csv(file: UploadFile = File(...), dry_run: bool = Query(False), current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    content = (await file.read()).decode("utf-8-sig", errors="ignore")
+    reader = csv.DictReader(io.StringIO(content))
+    created = updated = skipped = 0
+    errors = []
+    samples = []
+    row_num = 1
+    for row in reader:
+        row_num += 1
+        try:
+            code = (row.get("code") or row.get("sku") or "").strip()
+            company_id = (row.get("company_id") or "").strip()
+            project_id = (row.get("project_id") or "").strip()
+            lote = (row.get("lote_edificio") or row.get("lote") or "").strip()
+            manzana = (row.get("manzana_departamento") or row.get("manzana") or "").strip()
+            if not company_id or not project_id or not lote or not manzana:
+                raise ValueError("company_id, project_id, lote_edificio y manzana_departamento son obligatorios")
+            payload = {
+                "company_id": company_id,
+                "project_id": project_id,
+                "m2_superficie": float(row.get("m2_superficie") or 0),
+                "m2_construccion": float(row.get("m2_construccion") or 0),
+                "lote_edificio": lote,
+                "manzana_departamento": manzana,
+                "precio_m2_superficie": float(row.get("precio_m2_superficie") or 0),
+                "precio_m2_construccion": float(row.get("precio_m2_construccion") or 0),
+                "descuento_bonificacion": float(row.get("descuento_bonificacion") or 0),
+                "code": code or None,
+            }
+            samples.append(payload)
+            query = {"code": code} if code else {"company_id": company_id, "project_id": project_id, "lote_edificio": lote, "manzana_departamento": manzana}
+            existing = await db.inventory_items.find_one(query, {"_id": 0})
+            if dry_run:
+                if existing: updated += 1
+                else: created += 1
+                continue
+            if existing:
+                item = InventoryItem(**{k: payload[k] for k in ["company_id","project_id","m2_superficie","m2_construccion","lote_edificio","manzana_departamento","precio_m2_superficie","precio_m2_construccion","descuento_bonificacion"]},
+                    precio_venta=(Decimal(str(payload["m2_superficie"])) * Decimal(str(payload["precio_m2_superficie"]))),
+                    precio_total=(Decimal(str(payload["m2_superficie"])) * Decimal(str(payload["precio_m2_superficie"])) + Decimal(str(payload["m2_construccion"])) * Decimal(str(payload["precio_m2_construccion"])) - Decimal(str(payload["descuento_bonificacion"]))))
+                set_doc = item.model_dump()
+                set_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+                set_doc["created_at"] = existing.get("created_at") or datetime.now(timezone.utc).isoformat()
+                set_doc["precio_venta"] = float(set_doc["precio_venta"])
+                set_doc["precio_total"] = float(set_doc["precio_total"])
+                if code:
+                    set_doc["code"] = code
+                await db.inventory_items.update_one({"id": existing.get("id")}, {"$set": set_doc})
+                updated += 1
+            else:
+                item = InventoryItem(**{k: payload[k] for k in ["company_id","project_id","m2_superficie","m2_construccion","lote_edificio","manzana_departamento","precio_m2_superficie","precio_m2_construccion","descuento_bonificacion"]},
+                    precio_venta=(Decimal(str(payload["m2_superficie"])) * Decimal(str(payload["precio_m2_superficie"]))),
+                    precio_total=(Decimal(str(payload["m2_superficie"])) * Decimal(str(payload["precio_m2_superficie"])) + Decimal(str(payload["m2_construccion"])) * Decimal(str(payload["precio_m2_construccion"])) - Decimal(str(payload["descuento_bonificacion"]))))
+                doc = item.model_dump()
+                doc["created_at"] = doc["created_at"].isoformat(); doc["updated_at"] = doc["updated_at"].isoformat(); doc["precio_venta"] = float(doc["precio_venta"]); doc["precio_total"] = float(doc["precio_total"])
+                if code:
+                    doc["code"] = code
+                await db.inventory_items.insert_one(doc)
+                created += 1
+        except Exception as ex:
+            skipped += 1
+            errors.append({"row_number": row_num, "message": str(ex)})
+    await log_audit(current_user, "IMPORT", "inventory", "batch", {"filename": file.filename, "created": created, "updated": updated, "skipped": skipped, "errors": len(errors), "dry_run": dry_run})
+    return {"created_count": created, "updated_count": updated, "skipped_count": skipped, "errors": errors, "sample_rows": samples[:20] if dry_run else []}
+
+
+@api_router.post("/clients/import-csv")
+async def import_clients_csv(file: UploadFile = File(...), dry_run: bool = Query(False), current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
+    content = (await file.read()).decode("utf-8-sig", errors="ignore")
+    reader = csv.DictReader(io.StringIO(content))
+    created = updated = skipped = 0
+    errors = []
+    samples = []
+    row_num = 1
+    for row in reader:
+        row_num += 1
+        try:
+            company_id = (row.get("company_id") or "").strip()
+            project_id = (row.get("project_id") or "").strip()
+            nombre = (row.get("nombre") or row.get("name") or "").strip()
+            telefono = (row.get("telefono") or row.get("phone") or "").strip() or None
+            domicilio = (row.get("domicilio") or row.get("address") or "").strip() or None
+            code = (row.get("code") or "").strip()
+            if not company_id or not project_id or not nombre:
+                raise ValueError("company_id, project_id y nombre son obligatorios")
+            payload = {"company_id": company_id, "project_id": project_id, "nombre": nombre, "telefono": telefono, "domicilio": domicilio, "code": code or None}
+            samples.append(payload)
+            query = {"code": code} if code else {"company_id": company_id, "project_id": project_id, "nombre": nombre, "telefono": telefono}
+            existing = await db.clients.find_one(query, {"_id": 0})
+            if dry_run:
+                if existing: updated += 1
+                else: created += 1
+                continue
+            if existing:
+                await db.clients.update_one({"id": existing.get("id")}, {"$set": {"nombre": nombre, "telefono": telefono, "domicilio": domicilio, "updated_at": datetime.now(timezone.utc).isoformat(), "code": code or existing.get("code")}})
+                updated += 1
+            else:
+                doc = Client(company_id=company_id, project_id=project_id, nombre=nombre, telefono=telefono, domicilio=domicilio, inventory_item_id=None).model_dump()
+                doc["created_at"] = doc["created_at"].isoformat(); doc["updated_at"] = doc["updated_at"].isoformat(); doc["precio_venta_snapshot"] = 0.0; doc["abonos_total_mxn"] = 0.0; doc["saldo_restante"] = 0.0; doc["code"] = code or None
+                await db.clients.insert_one(doc)
+                created += 1
+        except Exception as ex:
+            skipped += 1
+            errors.append({"row_number": row_num, "message": str(ex)})
+    await log_audit(current_user, "IMPORT", "clients", "batch", {"filename": file.filename, "created": created, "updated": updated, "skipped": skipped, "errors": len(errors), "dry_run": dry_run})
+    return {"created_count": created, "updated_count": updated, "skipped_count": skipped, "errors": errors, "sample_rows": samples[:20] if dry_run else []}
 
 @api_router.get("/inventory")
 async def list_inventory(company_id: Optional[str] = None, project_id: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):

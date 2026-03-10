@@ -9,6 +9,7 @@ import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Badge } from "../components/ui/badge";
 import { Plus, FileDown, Send, XCircle, Pencil, Trash2, Eye, Loader2 } from "lucide-react";
+import ProviderSelect from "../components/ProviderSelect";
 
 const STATUS_LABELS = {
   draft: { label: "Borrador", variant: "secondary" },
@@ -51,6 +52,8 @@ const emptyForm = {
   planned_date: "",
   notes: "",
   payment_terms: "",
+  apply_iva_withholding: false,
+  iva_withholding_rate: "0",
   lines: [emptyLine()],
 };
 
@@ -252,6 +255,8 @@ const PurchaseOrders = () => {
       planned_date: row.planned_date ? String(row.planned_date).slice(0, 10) : "",
       notes: row.notes || "",
       payment_terms: row.payment_terms || "",
+      apply_iva_withholding: Boolean(row.apply_iva_withholding),
+      iva_withholding_rate: String(row.iva_withholding_rate ?? "0"),
       lines: (row.lines || []).map((line, index) => ({
         rowKey: line.id || `tmp-${Date.now()}-${index}`,
         line_no: line.line_no || index + 1,
@@ -466,7 +471,7 @@ const PurchaseOrders = () => {
                 <div><Label>Fecha programada</Label><Input type="date" value={form.planned_date} onChange={(e) => setForm((p) => ({ ...p, planned_date: e.target.value }))} /></div>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                <div><Label>Proveedor (catálogo)</Label><Select value={form.provider_id || "none"} onValueChange={(v) => applyProvider(v === "none" ? "" : v)}><SelectTrigger><SelectValue placeholder="Opcional" /></SelectTrigger><SelectContent><SelectItem value="none">Manual</SelectItem>{providers.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent></Select></div>
+                <div><Label>Proveedor (catálogo)</Label><ProviderSelect apiClient={api} value={form.provider_id} onChange={applyProvider} canCreate={!isDirector} /></div>
                 <div><Label>Nombre proveedor</Label><Input value={form.vendor_name} onChange={(e) => setForm((p) => ({ ...p, vendor_name: e.target.value }))} /></div>
                 <div><Label>RFC</Label><Input value={form.vendor_rfc} onChange={(e) => setForm((p) => ({ ...p, vendor_rfc: e.target.value }))} /></div>
                 <div><Label>Email</Label><Input value={form.vendor_email} onChange={(e) => setForm((p) => ({ ...p, vendor_email: e.target.value }))} /></div>
@@ -476,6 +481,8 @@ const PurchaseOrders = () => {
                 <div><Label>Moneda</Label><Select value={form.currency} onValueChange={(v) => setForm((p) => ({ ...p, currency: v }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="MXN">MXN</SelectItem><SelectItem value="USD">USD</SelectItem></SelectContent></Select></div>
                 <div><Label>Tipo cambio</Label><Input value={form.exchange_rate} onChange={(e) => setForm((p) => ({ ...p, exchange_rate: e.target.value }))} /></div>
                 <div><Label>Condiciones de pago</Label><Input value={form.payment_terms} onChange={(e) => setForm((p) => ({ ...p, payment_terms: e.target.value }))} /></div>
+                <div className="flex items-end gap-2"><input id="apply_iva_withholding" type="checkbox" checked={form.apply_iva_withholding} onChange={(e) => setForm((p) => ({ ...p, apply_iva_withholding: e.target.checked }))} /><Label htmlFor="apply_iva_withholding">Retener IVA</Label></div>
+                <div><Label>% Retención IVA</Label><Input value={form.iva_withholding_rate} onChange={(e) => setForm((p) => ({ ...p, iva_withholding_rate: e.target.value }))} /></div>
               </div>
               <div><Label>Folio de factura proveedor</Label><Input value={form.invoice_folio} onChange={(e) => setForm((p) => ({ ...p, invoice_folio: e.target.value }))} /></div>
               <div><Label>Dirección proveedor</Label><Input value={form.vendor_address} onChange={(e) => setForm((p) => ({ ...p, vendor_address: e.target.value }))} /></div>
@@ -484,10 +491,10 @@ const PurchaseOrders = () => {
               <div className="space-y-2">
                 <div className="flex justify-between items-center"><Label>Líneas</Label><Button type="button" size="sm" variant="outline" onClick={addLine}>Agregar línea</Button></div>
                 <div className="overflow-x-auto border rounded-md">
-                  <table className="w-full text-sm">
+                  <table className="w-full text-sm table-fixed">
                     <thead>
                       <tr className="border-b border-border bg-muted/30">
-                        <th className="p-2">#</th><th>Partida</th><th>Descripción</th><th>Cant.</th><th>Unidad</th><th>P. Unitario</th><th>%Desc.</th><th>IVA</th><th>Ret ISR</th><th>%ISR</th><th>Total línea</th><th></th>
+                        <th className="p-2 w-10">#</th><th className="w-24">Partida</th><th className="w-[28%]">Descripción</th><th className="w-16">Cant.</th><th className="w-16">Unidad</th><th className="w-24">P. Unitario</th><th className="w-16">%Desc.</th><th className="w-16">IVA</th><th className="w-20">Ret ISR</th><th className="w-16">%ISR</th><th className="w-24">Total línea</th><th className="w-10"></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -495,7 +502,7 @@ const PurchaseOrders = () => {
                         const lineCalc = calcLine(line);
                         return (
                           <tr key={line.rowKey} className="border-b border-border/50">
-                            <td className="p-2">{idx + 1}</td>
+                            <td className="p-2 align-top">{idx + 1}</td>
                             <td className="min-w-44">
                               <Select value={line.partida_codigo || undefined} onValueChange={(v) => changeLine(line.rowKey, "partida_codigo", v)}>
                                 <SelectTrigger><SelectValue placeholder="Partida" /></SelectTrigger>
@@ -588,7 +595,7 @@ const PurchaseOrders = () => {
         <CardContent>
           {loading ? <p className="text-muted-foreground">Cargando...</p> : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm table-fixed">
                 <thead>
                   <tr className="border-b border-border text-left">
                     <th className="py-2">Folio</th><th>Fecha</th><th>Empresa</th><th>Proyecto</th><th>Proveedor</th><th>Estatus</th><th>Gate</th><th>Subtotal</th><th>IVA</th><th>ISR</th><th>Total</th><th>Creador</th><th className="text-right">Acciones</th>
@@ -659,7 +666,7 @@ const PurchaseOrders = () => {
                   <thead><tr className="border-b border-border"><th className="p-2 text-left">#</th><th className="text-left">Partida</th><th className="text-left">Descripción</th><th className="text-right">Total línea</th></tr></thead>
                   <tbody>
                     {(selected.lines || []).map((line) => (
-                      <tr key={line.id || `${line.line_no}-${line.partida_codigo}`} className="border-b border-border/50"><td className="p-2">{line.line_no}</td><td>{line.partida_codigo}</td><td>{line.description}</td><td className="text-right pr-2">{Number(line.line_total || 0).toFixed(2)}</td></tr>
+                      <tr key={line.id || `${line.line_no}-${line.partida_codigo}`} className="border-b border-border/50"><td className="p-2 align-top">{line.line_no}</td><td>{line.partida_codigo}</td><td>{line.description}</td><td className="text-right pr-2">{Number(line.line_total || 0).toFixed(2)}</td></tr>
                     ))}
                   </tbody>
                 </table>
