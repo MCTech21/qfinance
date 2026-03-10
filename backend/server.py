@@ -2122,14 +2122,26 @@ def render_purchase_order_pdf(po: dict) -> bytes:
     def text_cmd_right(cmds: List[str], right_x: float, left_x: float, y: float, text: Any, size: float = 8.5, min_size: float = 7.8):
         raw = str(text or "")
         max_w = max(6.0, right_x - left_x)
-        current = size
-        while current >= min_size - 0.001:
-            approx_w = len(raw) * (current * 0.54)
-            if approx_w <= max_w or current <= min_size + 0.001:
+
+        start_tenths = int(round(size * 10))
+        min_tenths = int(round(min_size * 10))
+        candidate_sizes = [t / 10 for t in range(start_tenths, min_tenths - 1, -2)]
+        if min_size not in candidate_sizes:
+            candidate_sizes.append(min_size)
+
+        rendered = False
+        for candidate in candidate_sizes:
+            approx_w = len(raw) * (candidate * 0.54)
+            if approx_w <= max_w:
                 x = max(left_x, right_x - approx_w)
-                cmds += ["BT", f"/F2 {current:.2f} Tf", f"{x:.2f} {y:.2f} Td", f"({_pdf_escape(raw)}) Tj", "ET"]
-                return
-            current -= 0.2
+                cmds += ["BT", f"/F2 {candidate:.2f} Tf", f"{x:.2f} {y:.2f} Td", f"({_pdf_escape(raw)}) Tj", "ET"]
+                rendered = True
+                break
+
+        if not rendered:
+            approx_w = len(raw) * (min_size * 0.54)
+            x = max(left_x, right_x - approx_w)
+            cmds += ["BT", f"/F2 {min_size:.2f} Tf", f"{x:.2f} {y:.2f} Td", f"({_pdf_escape(raw)}) Tj", "ET"]
 
     def measure_cell_height(text: Any, width_chars: int, max_lines: Optional[int] = None, line_step: float = 10.0, min_height: float = 13.0) -> float:
         lines_local = _pdf_wrap(text, width_chars)
