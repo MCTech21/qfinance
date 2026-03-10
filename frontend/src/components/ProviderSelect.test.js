@@ -1,4 +1,6 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+
+jest.useFakeTimers();
 import ProviderSelect from "./ProviderSelect";
 
 test("ProviderSelect supports typeahead and keyboard selection", async () => {
@@ -11,6 +13,8 @@ test("ProviderSelect supports typeahead and keyboard selection", async () => {
   fireEvent.focus(input);
   fireEvent.change(input, { target: { value: "C" } });
 
+  jest.advanceTimersByTime(260);
+  await waitFor(() => expect(get).toHaveBeenCalledWith("/providers", expect.objectContaining({ params: { q: "C", limit: 20 } })));
   await waitFor(() => expect(screen.getByText(/CEMEX/i)).toBeInTheDocument());
   fireEvent.keyDown(input, { key: "ArrowDown" });
   fireEvent.keyDown(input, { key: "Enter" });

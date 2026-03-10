@@ -599,3 +599,56 @@ def test_purchase_order_pdf_contains_total_mxn_for_usd():
     assert pdf_res.status_code == 200
     text = _pdf_text(pdf_res.content)
     assert "TOTAL (MXN):" in text
+
+def test_oc_preview_usd_converts_projected_amount_to_mxn():
+    client, _ = client_for("admin")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "20000.00"}).status_code == 201
+    preview = client.post("/api/budgets/availability/oc-preview", json={
+        "project_id": "pr1",
+        "order_date": "2026-01-10",
+        "currency": "USD",
+        "exchange_rate": "18.90",
+        "lines": [
+            {"partida_codigo": "205", "requested_amount": "551.00"},
+        ],
+    })
+    assert preview.status_code == 200
+    body = preview.json()
+    assert body["summary"]["projected_amount_original"] == "551.00"
+    assert body["summary"]["projected_amount_mxn"] == "10413.90"
+    assert body["lines"][0]["projected_amount_mxn"] == "10413.90"
+
+
+def test_oc_preview_usd_without_exchange_rate_returns_422():
+    client, _ = client_for("admin")
+    preview = client.post("/api/budgets/availability/oc-preview", json={
+        "project_id": "pr1",
+        "order_date": "2026-01-10",
+        "currency": "USD",
+        "exchange_rate": "0",
+        "lines": [{"partida_codigo": "205", "requested_amount": "10.00"}],
+    })
+    assert preview.status_code == 422
+    assert preview.json()["detail"]["code"] == "invalid_exchange_rate"
+
+
+def test_purchase_order_pdf_handles_long_description_and_large_amounts():
+    client, _ = client_for("admin")
+    long_description = "Servicio especializado " + ("de ingeniería financiera y control presupuestal " * 6)
+    payload = po_payload(ext="OC-LARGE", total_line="100000000.00")
+    payload["currency"] = "USD"
+    payload["exchange_rate"] = "18.90"
+    payload["vendor_name"] = "HUMAN SOLUTIONS"
+    payload["lines"][0]["description"] = long_description
+    created = client.post("/api/purchase-orders", json=payload)
+    assert created.status_code == 200
+    po_id = created.json()["purchase_order"]["id"]
+
+    pdf_res = client.get(f"/api/purchase-orders/{po_id}/pdf")
+    assert pdf_res.status_code == 200
+    assert len(pdf_res.content) > 0
+
+    pdf_text = _pdf_text(pdf_res.content)
+    assert "TOTAL (MXN)" in pdf_text
+    assert "Folio: LARGE" in pdf_text
+    assert "HUMAN SOLUTIONS" in pdf_text

@@ -2073,11 +2073,29 @@ def render_purchase_order_pdf(po: dict) -> bytes:
 
     def draw_table_header(cmds: List[str], y: float):
         cmds += ["0.05 0.18 0.56 rg", f"50 {y-16:.2f} 522 16 re f", "1 1 1 rg"]
-        headers = ["#", "Partida", "Descripción", "Cant.", "Unidad", "P.U.", "IVA", "Ret ISR", "Total"]
-        xs = [54, 78, 142, 340, 380, 418, 455, 492, 530]
-        for x, h in zip(xs, headers):
+        headers = [
+            (54, "#"),
+            (76, "Partida"),
+            (124, "Descripción"),
+            (294, "Cant."),
+            (330, "Unidad"),
+            (366, "P.U."),
+            (424, "IVA"),
+            (474, "Ret ISR"),
+            (524, "Total"),
+        ]
+        for x, h in headers:
             text_cmd(cmds, x, y-12, h, 8)
         cmds += ["0 0 0 rg"]
+
+    def text_cmd_right(cmds: List[str], right_x: float, y: float, text: Any, size: int = 8, min_size: int = 7):
+        raw = str(text or "")
+        for s in range(size, min_size - 1, -1):
+            approx_w = len(raw) * (s * 0.52)
+            if approx_w <= 48 or s == min_size:
+                x = right_x - approx_w
+                text_cmd(cmds, x, y, raw, s)
+                return
 
     row_y_start_first = 518
     row_y_start_other = 706
@@ -2098,7 +2116,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
         shaded = False
         while i < len(lines):
             line = lines[i] or {}
-            desc_lines = _pdf_wrap(line.get("description") or "-", 30)
+            desc_lines = _pdf_wrap(line.get("description") or "-", 42)
             row_height = max(13, 10 * len(desc_lines))
             if y_cursor - row_height < 170:
                 break
@@ -2108,15 +2126,15 @@ def render_purchase_order_pdf(po: dict) -> bytes:
 
             base_y = y_cursor - 9
             text_cmd(cmds, 54, base_y, line.get("line_no") or i + 1, 8)
-            text_cmd(cmds, 78, base_y, line.get("code") or "", 8)
+            text_cmd(cmds, 76, base_y, line.get("code") or "", 8)
             for idx_desc, d in enumerate(desc_lines):
-                text_cmd(cmds, 142, base_y - (idx_desc * 10), d, 8)
-            text_cmd(cmds, 350, base_y, line.get("qty") or "0", 8)
-            text_cmd(cmds, 384, base_y, line.get("uom") or "—", 8)
-            text_cmd(cmds, 418, base_y, format_money(line.get("price_unit"), payload.get("currency")), 8)
-            text_cmd(cmds, 455, base_y, format_money(line.get("iva_amount"), payload.get("currency")), 8)
-            text_cmd(cmds, 492, base_y, format_money(line.get("ret_isr"), payload.get("currency")), 8)
-            text_cmd(cmds, 530, base_y, format_money(line.get("amount"), payload.get("currency")), 8)
+                text_cmd(cmds, 124, base_y - (idx_desc * 10), d, 8)
+            text_cmd_right(cmds, 326, base_y, str(line.get("qty") or "0"), 8)
+            text_cmd(cmds, 330, base_y, line.get("uom") or "—", 8)
+            text_cmd_right(cmds, 420, base_y, format_money(line.get("price_unit"), payload.get("currency")), 8)
+            text_cmd_right(cmds, 470, base_y, format_money(line.get("iva_amount"), payload.get("currency")), 8)
+            text_cmd_right(cmds, 520, base_y, format_money(line.get("ret_isr"), payload.get("currency")), 8)
+            text_cmd_right(cmds, 570, base_y, format_money(line.get("amount"), payload.get("currency")), 8)
 
             y_cursor -= row_height
             i += 1
@@ -2545,8 +2563,8 @@ async def get_providers(
             {"code": {"$regex": safe_q, "$options": "i"}},
         ]
     max_limit = 100
-    effective_limit = 50 if not search_text else 20
-    effective_limit = min(max(int(limit or effective_limit), 1), max_limit)
+    default_limit = 20
+    effective_limit = min(max(int(limit or default_limit), 1), max_limit)
     safe_offset = max(int(offset or 0), 0)
     providers = await db.providers.find(query, {"_id": 0}).to_list(1000)
     providers.sort(key=lambda item: normalize_for_sort(item.get("name")))
