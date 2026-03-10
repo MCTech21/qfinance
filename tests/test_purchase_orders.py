@@ -557,3 +557,45 @@ def test_notes_section_includes_bank_as_bullets():
     assert "Banco" in txt
     assert "BBVA" in txt
     assert any(label in txt for label in ("Cuenta", "CLABE", "Beneficiario"))
+
+
+def test_oc_preview_usd_converts_to_mxn():
+    client, _ = client_for("admin")
+    assert client.post("/api/budgets", json={"project_id": "pr1", "partida_codigo": "205", "total_amount": "50000.00"}).status_code == 201
+    preview = client.post("/api/budgets/availability/oc-preview", json={
+        "project_id": "pr1",
+        "order_date": "2026-01-10",
+        "currency": "USD",
+        "exchange_rate": "18.90",
+        "lines": [{"partida_codigo": "205", "requested_amount": "551.00"}],
+    })
+    assert preview.status_code == 200
+    body = preview.json()
+    assert body["summary"]["projected_amount_mxn"] == "10413.90"
+    assert body["summary"]["projected_amount_original"] == "551.00"
+
+
+def test_oc_preview_non_mxn_requires_positive_exchange_rate():
+    client, _ = client_for("admin")
+    preview = client.post("/api/budgets/availability/oc-preview", json={
+        "project_id": "pr1",
+        "order_date": "2026-01-10",
+        "currency": "USD",
+        "exchange_rate": "0",
+        "lines": [{"partida_codigo": "205", "requested_amount": "10.00"}],
+    })
+    assert preview.status_code == 422
+    assert preview.json()["detail"]["code"] == "invalid_exchange_rate"
+
+
+def test_purchase_order_pdf_contains_total_mxn_for_usd():
+    client, _ = client_for("admin")
+    payload = po_payload(ext="OC-9", total_line="551.00")
+    payload["currency"] = "USD"
+    payload["exchange_rate"] = "18.90"
+    created = client.post("/api/purchase-orders", json=payload)
+    po_id = created.json()["purchase_order"]["id"]
+    pdf_res = client.get(f"/api/purchase-orders/{po_id}/pdf")
+    assert pdf_res.status_code == 200
+    text = _pdf_text(pdf_res.content)
+    assert "TOTAL (MXN):" in text

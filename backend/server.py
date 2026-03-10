@@ -379,6 +379,8 @@ class InvoicePayInput(BaseModel):
 class OCBudgetPreviewInput(BaseModel):
     project_id: str
     order_date: str
+    currency: Currency = Currency.MXN
+    exchange_rate: Optional[Decimal] = Decimal("1")
     lines: List[Dict[str, Any]]
 
 
@@ -1138,22 +1140,28 @@ def summarize_oc_lines(lines: List[dict], apply_iva_withholding: bool = False, i
 
 async def evaluate_oc_budget_gate(po: dict) -> Dict[str, Any]:
     order_date = date_parser.parse(po.get("order_date")) if isinstance(po.get("order_date"), str) else po.get("order_date")
+    currency = (po.get("currency") or Currency.MXN.value).upper()
+    exchange_rate = money_dec(po.get("exchange_rate", 1))
+    if currency != Currency.MXN.value and exchange_rate <= 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_exchange_rate", "message": "exchange_rate debe ser mayor a 0 para moneda distinta a MXN"})
     exceeded = []
     lines_meta = []
     for line in po.get("lines", []):
         partida = str(line.get("partida_codigo"))
         if partida in {"400", "401", "402", "403", "404"}:
             continue
-        requested = money_dec(line.get("line_total", 0))
+        requested_original = money_dec(line.get("line_total", 0))
+        requested = requested_original if currency == Currency.MXN.value else (requested_original * exchange_rate).quantize(TWO_DECIMALS)
         if requested <= 0:
             continue
         overbudget = await evaluate_overbudget(po.get("project_id"), partida, order_date, requested)
         if overbudget:
             meta = overbudget.get("metadata", {})
-            meta.update({"partida_codigo": partida, "requested": str(requested)})
+            meta.update({"partida_codigo": partida, "requested": str(requested), "requested_original": str(requested_original)})
             exceeded.append(meta)
-        lines_meta.append({"partida_codigo": partida, "requested": str(requested)})
+        lines_meta.append({"partida_codigo": partida, "requested": str(requested), "requested_original": str(requested_original)})
     return {"ok": len(exceeded) == 0, "exceeded": exceeded, "checked": lines_meta}
+
 
 
 async def ensure_pending_approval(
@@ -1887,6 +1895,8 @@ def build_purchase_order_pdf_payload(po: dict) -> dict:
     subtotal = money_dec(po.get("subtotal_tax_base", 0)).quantize(TWO_DECIMALS)
     tax = money_dec(po.get("tax_total", 0)).quantize(TWO_DECIMALS)
     total = money_dec(po.get("total", 0)).quantize(TWO_DECIMALS)
+    total_mxn = money_dec(po.get("total_mxn", total)).quantize(TWO_DECIMALS)
+    iva_withholding_total = money_dec(po.get("iva_withholding_total", 0)).quantize(TWO_DECIMALS)
     generated_at = datetime.now(TIMEZONE)
     generated_label = generated_at.strftime("%d/%m/%Y, %I:%M %p").lower().replace("am", "a.m.").replace("pm", "p.m.")
 
@@ -1903,6 +1913,8 @@ def build_purchase_order_pdf_payload(po: dict) -> dict:
         "subtotal": str(subtotal),
         "tax": str(tax),
         "total": str(total),
+        "total_mxn": str(total_mxn),
+        "iva_withholding_total": str(iva_withholding_total),
         "bank": po.get("bank_details") or None,
         "notes": po.get("notes") or "S/I",
         "payment_terms": po.get("payment_terms") or "S/I",
@@ -2010,11 +2022,9 @@ def render_purchase_order_pdf(po: dict) -> bytes:
 
         # right column content (wrapped in fixed width)
         y = header_y - 18
-        text_cmd(cmds, col3_x + 8, y, f"N°: {oc_number}", 10)
-        y -= 12
+        text_cmd(cmds, col3_x + 8, y, f"Folio: {folio}", 10)
+        y -= 14
         text_cmd(cmds, col3_x + 8, y, f"Fecha: {order_date}", 9)
-        y -= 11
-        y = draw_wrapped(cmds, col3_x + 8, y, f"Folio: {folio}", 8, 26, 10)
 
         chips = []
         if delivery_status:
@@ -2088,7 +2098,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
         shaded = False
         while i < len(lines):
             line = lines[i] or {}
-            desc_lines = _pdf_wrap(line.get("description") or "-", 34)
+            desc_lines = _pdf_wrap(line.get("description") or "-", 30)
             row_height = max(13, 10 * len(desc_lines))
             if y_cursor - row_height < 170:
                 break
@@ -2117,9 +2127,12 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             totals = [
                 f"Subtotal: {format_money(payload.get('subtotal'), payload.get('currency'))}",
                 f"IVA: {format_money(payload.get('tax'), payload.get('currency'))}",
+                f"Ret IVA ({po.get('iva_withholding_rate') or '0'}%): {format_money(payload.get('iva_withholding_total'), payload.get('currency'))}",
                 f"Ret ISR: {format_money(po.get('withholding_isr_total'), payload.get('currency'))}",
-                f"TOTAL: {format_money(payload.get('total'), payload.get('currency'))}",
+                f"TOTAL ({payload.get('currency')}): {format_money(payload.get('total'), payload.get('currency'))}",
             ]
+            if (payload.get('currency') or 'MXN') != 'MXN':
+                totals.append(f"TOTAL (MXN): {format_money(payload.get('total_mxn'), 'MXN')}")
             ty = box_y + 70
             for t in totals:
                 text_cmd(cmds, 370, ty, t, 10)
@@ -2515,18 +2528,30 @@ async def update_partida(partida_id: str, updates: PartidaBase, current_user: di
 
 # ========================= PROVIDER ROUTES =========================
 @api_router.get("/providers", response_model=List[Provider])
-async def get_providers(include_inactive: bool = False, q: Optional[str] = None, current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS))):
+async def get_providers(
+    include_inactive: bool = False,
+    q: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+    current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS)),
+):
     query = {} if include_inactive else {"is_active": {"$ne": False}}
-    if q and q.strip():
-        safe_q = re.escape(q.strip())
+    search_text = (q or "").strip()
+    if search_text:
+        safe_q = re.escape(search_text)
         query["$or"] = [
             {"name": {"$regex": safe_q, "$options": "i"}},
             {"rfc": {"$regex": safe_q, "$options": "i"}},
             {"code": {"$regex": safe_q, "$options": "i"}},
         ]
+    max_limit = 100
+    effective_limit = 50 if not search_text else 20
+    effective_limit = min(max(int(limit or effective_limit), 1), max_limit)
+    safe_offset = max(int(offset or 0), 0)
     providers = await db.providers.find(query, {"_id": 0}).to_list(1000)
     providers.sort(key=lambda item: normalize_for_sort(item.get("name")))
-    return [Provider(**p) for p in providers]
+    sliced = providers[safe_offset:safe_offset + effective_limit]
+    return [Provider(**p) for p in sliced]
 
 @api_router.post("/providers", response_model=Provider)
 async def create_provider(provider_data: ProviderBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
@@ -3417,6 +3442,9 @@ def normalize_purchase_order_response(doc: dict) -> dict:
     normalized["iva"] = normalized.get("tax_total")
     normalized["iva_retenido"] = normalized.get("iva_withholding_total", "0.00")
     normalized["total_neto"] = normalized.get("total")
+    normalized["total_original"] = normalized.get("total")
+    normalized["projected_amount_original"] = normalized.get("total")
+    normalized["projected_amount_mxn"] = normalized.get("total_mxn", normalized.get("total"))
     return normalized
 
 
@@ -3426,16 +3454,31 @@ async def oc_budget_preview(payload: OCBudgetPreviewInput, current_user: dict = 
     if not project:
         raise HTTPException(status_code=404, detail={"code": "project_not_found", "message": "Proyecto no encontrado"})
     enforce_company_access(current_user, project.get("empresa_id"))
+    exchange_rate_dec = parse_amount_like(payload.exchange_rate if payload.exchange_rate is not None else 1, "exchange_rate")
+    if payload.currency != Currency.MXN and exchange_rate_dec <= 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_exchange_rate", "message": "exchange_rate debe ser mayor a 0 para moneda distinta a MXN"})
     target_date = parse_date_tijuana(payload.order_date)
     items = []
-    grouped_requested: Dict[str, Decimal] = {}
+    grouped_requested_original: Dict[str, Decimal] = {}
+    grouped_requested_mxn: Dict[str, Decimal] = {}
     for line in payload.lines:
         partida = str(line.get("partida_codigo"))
-        requested = parse_amount_like(line.get("requested_amount", "0"), "requested_amount")
-        grouped_requested[partida] = (grouped_requested.get(partida, Decimal("0.00")) + requested).quantize(TWO_DECIMALS)
-    for partida, requested in grouped_requested.items():
+        requested_original = parse_amount_like(line.get("requested_amount", "0"), "requested_amount")
+        requested_mxn = requested_original if payload.currency == Currency.MXN else (requested_original * exchange_rate_dec).quantize(TWO_DECIMALS)
+        grouped_requested_original[partida] = (grouped_requested_original.get(partida, Decimal("0.00")) + requested_original).quantize(TWO_DECIMALS)
+        grouped_requested_mxn[partida] = (grouped_requested_mxn.get(partida, Decimal("0.00")) + requested_mxn).quantize(TWO_DECIMALS)
+
+    for partida, requested in grouped_requested_mxn.items():
+        requested_original = grouped_requested_original.get(partida, Decimal("0.00")).quantize(TWO_DECIMALS)
         if partida in {"400", "401", "402", "403", "404"}:
-            items.append({"partida_codigo": partida, "requested_amount": str(requested), "budget_validation_applies": False})
+            items.append({
+                "partida_codigo": partida,
+                "requested_amount": str(requested),
+                "requested_amount_original": str(requested_original),
+                "projected_amount_mxn": str(requested),
+                "projected_amount_original": str(requested_original),
+                "budget_validation_applies": False,
+            })
             continue
         av = await compute_budget_availability(payload.project_id, partida, target_date)
         remaining_total = money_dec(av.get("remaining_total", 0)) if av.get("remaining_total") is not None else Decimal("0")
@@ -3454,6 +3497,9 @@ async def oc_budget_preview(payload: OCBudgetPreviewInput, current_user: dict = 
         items.append({
             "partida_codigo": partida,
             "requested_amount": str(requested),
+            "requested_amount_original": str(requested_original),
+            "projected_amount_mxn": str(requested),
+            "projected_amount_original": str(requested_original),
             "period": f"{target_date.year:04d}-{target_date.month:02d}",
             "budget_total_defined": bool(av.get("budget_total_amount") is not None),
             "budget_annual_defined": bool(av.get("annual_budget") is not None),
@@ -3475,6 +3521,7 @@ async def oc_budget_preview(payload: OCBudgetPreviewInput, current_user: dict = 
     summary_executed = Decimal("0.00")
     summary_available = Decimal("0.00")
     summary_requested = Decimal("0.00")
+    summary_requested_original = Decimal("0.00")
     summary_projected = Decimal("0.00")
     for item in items:
         if item.get("budget_validation_applies") is False:
@@ -3483,21 +3530,27 @@ async def oc_budget_preview(payload: OCBudgetPreviewInput, current_user: dict = 
         summary_executed += money_dec(item.get("executed_total") or 0)
         summary_available += money_dec(item.get("remaining_total_current") or 0)
         summary_requested += money_dec(item.get("requested_amount") or 0)
+        summary_requested_original += money_dec(item.get("requested_amount_original") or 0)
         summary_projected += money_dec(item.get("projected_remaining_total") or 0)
     summary = {
         "budget_total": str(summary_budget.quantize(TWO_DECIMALS)),
         "executed_current": str(summary_executed.quantize(TWO_DECIMALS)),
         "available_current": str(summary_available.quantize(TWO_DECIMALS)),
         "po_preview_amount": str(summary_requested.quantize(TWO_DECIMALS)),
+        "projected_amount_mxn": str(summary_requested.quantize(TWO_DECIMALS)),
+        "projected_amount_original": str(summary_requested_original.quantize(TWO_DECIMALS)),
         "available_after_preview": str(summary_projected.quantize(TWO_DECIMALS)),
         "presupuesto_total": str(summary_budget.quantize(TWO_DECIMALS)),
         "ejecutado_actual": str(summary_executed.quantize(TWO_DECIMALS)),
         "disponible_actual": str(summary_available.quantize(TWO_DECIMALS)),
         "monto_solicitado": str(summary_requested.quantize(TWO_DECIMALS)),
+        "monto_solicitado_original": str(summary_requested_original.quantize(TWO_DECIMALS)),
         "restante_proyectado": str(summary_projected.quantize(TWO_DECIMALS)),
     }
     return {
         "project_id": payload.project_id,
+        "currency": payload.currency.value,
+        "exchange_rate": str(exchange_rate_dec),
         "by_partida": items,
         "lines": items,
         "summary": summary,
@@ -3516,7 +3569,7 @@ async def create_purchase_order(payload: PurchaseOrderCreate, current_user: dict
     else:
         existing = None
     lines = [calculate_oc_line(line) for line in payload.lines]
-    exchange_rate_dec = parse_amount_like(payload.exchange_rate or 1, "exchange_rate")
+    exchange_rate_dec = parse_amount_like(payload.exchange_rate if payload.exchange_rate is not None else 1, "exchange_rate")
     if payload.currency != Currency.MXN and exchange_rate_dec <= 0:
         raise HTTPException(status_code=422, detail={"code": "invalid_exchange_rate", "message": "exchange_rate debe ser mayor a 0 para moneda distinta a MXN"})
     totals = summarize_oc_lines(
@@ -3587,7 +3640,7 @@ async def update_purchase_order(po_id: str, payload: PurchaseOrderCreate, curren
     if po.get("status") not in {PurchaseOrderStatus.DRAFT.value, PurchaseOrderStatus.REJECTED.value}:
         raise HTTPException(status_code=409, detail={"code": "oc_state_conflict", "message": "Solo se puede editar DRAFT/REJECTED"})
     lines = [calculate_oc_line(line) for line in payload.lines]
-    exchange_rate_dec = parse_amount_like(payload.exchange_rate or 1, "exchange_rate")
+    exchange_rate_dec = parse_amount_like(payload.exchange_rate if payload.exchange_rate is not None else 1, "exchange_rate")
     if payload.currency != Currency.MXN and exchange_rate_dec <= 0:
         raise HTTPException(status_code=422, detail={"code": "invalid_exchange_rate", "message": "exchange_rate debe ser mayor a 0 para moneda distinta a MXN"})
     totals = summarize_oc_lines(
@@ -6650,7 +6703,7 @@ async def create_invoice(payload: InvoiceCreate, current_user: dict = Depends(re
         if not provider:
             raise HTTPException(status_code=422, detail={"code": "provider_not_found", "message": "Proveedor no válido"})
         provider_name = provider.get("name")
-    exchange_rate_dec = parse_amount_like(payload.exchange_rate or 1, "exchange_rate")
+    exchange_rate_dec = parse_amount_like(payload.exchange_rate if payload.exchange_rate is not None else 1, "exchange_rate")
     if payload.currency != Currency.MXN and exchange_rate_dec <= 0:
         raise HTTPException(status_code=422, detail={"code": "invalid_exchange_rate", "message": "exchange_rate debe ser mayor a 0 para moneda distinta a MXN"})
     if payload.currency == Currency.MXN:

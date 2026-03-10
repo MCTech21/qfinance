@@ -95,7 +95,6 @@ const PurchaseOrders = () => {
   const [orders, setOrders] = useState([]);
   const [projects, setProjects] = useState([]);
   const [empresas, setEmpresas] = useState([]);
-  const [providers, setProviders] = useState([]);
   const [partidas, setPartidas] = useState([]);
   const [loading, setLoading] = useState(true);
   const [openForm, setOpenForm] = useState(false);
@@ -122,17 +121,15 @@ const PurchaseOrders = () => {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [ordersRes, projectsRes, empresasRes, providersRes, partidasRes] = await Promise.allSettled([
+      const [ordersRes, projectsRes, empresasRes, partidasRes] = await Promise.allSettled([
         api().get("/purchase-orders"),
         api().get("/projects"),
         api().get("/empresas"),
-        api().get("/providers"),
         api().get("/catalogo-partidas"),
       ]);
       if (ordersRes.status === "fulfilled") setOrders(ordersRes.value.data || []);
       if (projectsRes.status === "fulfilled") setProjects(projectsRes.value.data || []);
       if (empresasRes.status === "fulfilled") setEmpresas(empresasRes.value.data || []);
-      if (providersRes.status === "fulfilled") setProviders(providersRes.value.data || []);
       if (partidasRes.status === "fulfilled") setPartidas(partidasRes.value.data || []);
     } catch {
       toast.error("Error al cargar órdenes de compra");
@@ -173,7 +170,7 @@ const PurchaseOrders = () => {
         requested_amount: String(lineRequestedAmount(line).toFixed(2)),
       }));
     if (!lines.length) return null;
-    return { project_id: form.project_id, order_date: form.order_date, lines };
+    return { project_id: form.project_id, order_date: form.order_date, currency: form.currency, exchange_rate: form.exchange_rate || "1", lines };
   }, [form]);
 
   useEffect(() => {
@@ -274,8 +271,7 @@ const PurchaseOrders = () => {
     setOpenForm(true);
   };
 
-  const applyProvider = (providerId) => {
-    const provider = providers.find((p) => p.id === providerId);
+  const applyProvider = (providerId, provider = null) => {
     setForm((prev) => ({
       ...prev,
       provider_id: providerId,
@@ -546,24 +542,26 @@ const PurchaseOrders = () => {
                         <p>Total presupuesto: <span className="font-mono">{Number(item.budget_total || 0).toFixed(2)}</span></p>
                         <p>Ejecutado: <span className="font-mono">{Number(item.executed_total || 0).toFixed(2)}</span></p>
                         <p>Disponible actual: <span className="font-mono">{Number(item.remaining_total_current || 0).toFixed(2)}</span></p>
-                        <p>Monto proyectado línea(s): <span className="font-mono">{Number(item.requested_amount || 0).toFixed(2)}</span></p>
+                        <p>Monto proyectado línea(s) MXN: <span className="font-mono">{Number(item.projected_amount_mxn || item.requested_amount || 0).toFixed(2)}</span></p>
                         <p>Restante proyectado: <span className="font-mono font-semibold">{Number(item.projected_remaining_total || 0).toFixed(2)}</span></p>
                       </div>
                     ))}
                     <div className="rounded border border-emerald-500/20 bg-emerald-500/10 p-2">
                       <p>Resumen OC - disponible actual: <span className="font-mono">{Number(budgetPreview?.summary?.disponible_actual || 0).toFixed(2)}</span></p>
-                      <p>Resumen OC - monto solicitado: <span className="font-mono">{Number(budgetPreview?.summary?.monto_solicitado || 0).toFixed(2)}</span></p>
+                      <p>Resumen OC - monto solicitado MXN: <span className="font-mono">{Number(budgetPreview?.summary?.projected_amount_mxn || budgetPreview?.summary?.monto_solicitado || 0).toFixed(2)}</span></p>
+                      <p>Resumen OC - monto original: <span className="font-mono">{Number(budgetPreview?.summary?.projected_amount_original || 0).toFixed(2)}</span></p>
                       <p>Resumen OC - restante proyectado: <span className="font-mono font-semibold">{Number(budgetPreview?.summary?.restante_proyectado || 0).toFixed(2)}</span></p>
                     </div>
                   </div>
                 )}
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Subtotal base</p><p className="font-semibold">{formTotals.subtotal.toFixed(2)}</p></div>
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">IVA total</p><p className="font-semibold">{formTotals.tax.toFixed(2)}</p></div>
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Ret ISR</p><p className="font-semibold">{formTotals.withholding.toFixed(2)}</p></div>
-                <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Total OC</p><p className="font-semibold">{formTotals.total.toFixed(2)}</p></div>
+                <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Total OC ({form.currency})</p><p className="font-semibold">{formTotals.total.toFixed(2)}</p></div>
+                {form.currency !== "MXN" && <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Total OC (MXN)</p><p className="font-semibold">{(formTotals.total * normalizeAmount(form.exchange_rate || 0)).toFixed(2)}</p></div>}
               </div>
 
               <DialogFooter>
