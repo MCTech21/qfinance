@@ -543,13 +543,14 @@ const PurchaseOrders = () => {
                         <p>Ejecutado: <span className="font-mono">{Number(item.executed_total || 0).toFixed(2)}</span></p>
                         <p>Disponible actual: <span className="font-mono">{Number(item.remaining_total_current || 0).toFixed(2)}</span></p>
                         <p>Monto proyectado línea(s) MXN: <span className="font-mono">{Number(item.projected_amount_mxn || item.requested_amount || 0).toFixed(2)}</span></p>
+                        <p>Monto proyectado original: <span className="font-mono">{Number(item.projected_amount_original || item.requested_amount_original || 0).toFixed(2)} {budgetPreview?.currency || form.currency}</span></p>
                         <p>Restante proyectado: <span className="font-mono font-semibold">{Number(item.projected_remaining_total || 0).toFixed(2)}</span></p>
                       </div>
                     ))}
                     <div className="rounded border border-emerald-500/20 bg-emerald-500/10 p-2">
                       <p>Resumen OC - disponible actual: <span className="font-mono">{Number(budgetPreview?.summary?.disponible_actual || 0).toFixed(2)}</span></p>
                       <p>Resumen OC - monto solicitado MXN: <span className="font-mono">{Number(budgetPreview?.summary?.projected_amount_mxn || budgetPreview?.summary?.monto_solicitado || 0).toFixed(2)}</span></p>
-                      <p>Resumen OC - monto original: <span className="font-mono">{Number(budgetPreview?.summary?.projected_amount_original || 0).toFixed(2)}</span></p>
+                      <p>Resumen OC - monto original: <span className="font-mono">{Number(budgetPreview?.summary?.projected_amount_original || 0).toFixed(2)} {budgetPreview?.currency || form.currency}</span></p>
                       <p>Resumen OC - restante proyectado: <span className="font-mono font-semibold">{Number(budgetPreview?.summary?.restante_proyectado || 0).toFixed(2)}</span></p>
                     </div>
                   </div>

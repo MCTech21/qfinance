@@ -53,7 +53,8 @@ export default function ProviderSelect({ apiClient, value, onChange, disabled = 
     const t = setTimeout(async () => {
       setLoading(true);
       try {
-        const params = q.trim() ? { q, limit: 20 } : { limit: 50 };
+        const trimmed = q.trim();
+        const params = trimmed.length >= 1 ? { q: trimmed, limit: 20 } : { q: "", limit: 50 };
         const res = await apiClient().get("/providers", { params });
         if (requestId !== requestIdRef.current) return;
         const rows = res.data || [];

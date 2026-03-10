@@ -86,3 +86,20 @@ def test_csv_import_inventory_and_clients_dry_run():
     res2 = client.post("/api/clients/import-csv?dry_run=true", files={"file": ("clients.csv", cli_csv, "text/csv")})
     assert res2.status_code == 200
     assert len(res2.json()["sample_rows"]) == 1
+
+def test_provider_search_contains_filters_expected_matches():
+    client, db = mk_client()
+    db.providers.rows = [
+        {"id": "p1", "code": "HX1", "name": "HUMAN CAPITAL", "rfc": "HUM010101AAA", "is_active": True, "created_at": "2026-01-01T00:00:00+00:00"},
+        {"id": "p2", "code": "CE1", "name": "CEMEX", "rfc": "CEM010101AAA", "is_active": True, "created_at": "2026-01-01T00:00:00+00:00"},
+    ]
+    res_h = client.get("/api/providers", params={"q": "H", "limit": 20})
+    assert res_h.status_code == 200
+    names_h = [r["name"] for r in res_h.json()]
+    assert "HUMAN CAPITAL" in names_h
+    assert "CEMEX" not in names_h
+
+    res_ce = client.get("/api/providers", params={"q": "CE", "limit": 20})
+    assert res_ce.status_code == 200
+    names_ce = [r["name"] for r in res_ce.json()]
+    assert "CEMEX" in names_ce
