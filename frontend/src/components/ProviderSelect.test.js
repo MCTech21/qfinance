@@ -1,14 +1,18 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import ProviderSelect from "./ProviderSelect";
 
-test("ProviderSelect loads and filters providers", async () => {
-  const apiClient = () => ({
-    get: jest.fn().mockResolvedValue({ data: [{ id: "1", name: "Alpha" }, { id: "2", name: "Beta" }] }),
-  });
+test("ProviderSelect supports typeahead and keyboard selection", async () => {
+  const get = jest.fn().mockResolvedValue({ data: [{ id: "1", name: "CEMEX", rfc: "RFC1" }, { id: "2", name: "Beta" }] });
+  const apiClient = () => ({ get });
   const onChange = jest.fn();
   render(<ProviderSelect apiClient={apiClient} value="" onChange={onChange} />);
-  fireEvent.change(screen.getByPlaceholderText(/Buscar proveedor/i), { target: { value: "a" } });
-  await waitFor(() => expect(screen.getByText("Alpha")).toBeInTheDocument());
-  fireEvent.change(screen.getByRole("combobox"), { target: { value: "1" } });
-  expect(onChange).toHaveBeenCalledWith("1");
+
+  const input = screen.getByPlaceholderText(/Buscar proveedor/i);
+  fireEvent.focus(input);
+  fireEvent.change(input, { target: { value: "C" } });
+
+  await waitFor(() => expect(screen.getByText(/CEMEX/i)).toBeInTheDocument());
+  fireEvent.keyDown(input, { key: "ArrowDown" });
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(onChange).toHaveBeenCalledWith("1", expect.objectContaining({ name: "CEMEX" }));
 });
