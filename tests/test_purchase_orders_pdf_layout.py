@@ -96,10 +96,11 @@ def test_purchase_order_pdf_anti_overlap_and_total_mxn():
         matched.sort(key=lambda w: (w[1], w[0]))
         return matched[0]
 
-    pu = find_word("55,551.00")
-    iva = find_word("8,888.16")
-    ret_isr = find_word("5,555.10")
-    total = find_word("58,884.06")
+    pu = find_word("$55,551.00")
+    iva = find_word("$8,888.16")
+    ret_isr = find_word("$5,555.10")
+    total = find_word("$58,884.06")
+    long_value = find_word("$100,000,000.00")
 
     assert pu[2] <= iva[0] - 2
     assert iva[2] <= ret_isr[0] - 2
@@ -112,6 +113,8 @@ def test_purchase_order_pdf_anti_overlap_and_total_mxn():
     assert "Descripción" in text
     assert "TOTAL (MXN)" in text
     assert "TC" in text or "Tipo de cambio" in text
+    assert "$100,000,000.00" in text
+    assert long_value[2] > long_value[0]
 
     total_usd_match = re.search(r"TOTAL \(USD\):\s*US\$([0-9,]+\.\d{2})", text)
     tc_match = re.search(r"TC:\s*([0-9,]+\.\d{2})", text)
