@@ -2083,15 +2083,19 @@ def render_purchase_order_pdf(po: dict) -> bytes:
 
     TABLE_COLS = {
         "num": (50, 72),
-        "partida": (72, 114),
-        "desc": (114, 250),
-        "qty": (250, 292),
-        "uom": (292, 322),
-        "pu": (322, 384),
-        "iva": (384, 442),
-        "ret_isr": (442, 504),
+        "partida": (72, 108),
+        "desc": (108, 236),
+        "qty": (236, 274),
+        "uom": (274, 304),
+        "pu": (304, 378),
+        "iva": (378, 446),
+        "ret_isr": (446, 504),
         "total": (504, 572),
     }
+
+    MONEY_CELL_PAD_LEFT = 5
+    MONEY_CELL_PAD_RIGHT = 4
+    MONEY_ROW_MIN_FONT = 7.6
 
     def format_table_money(amount: Any) -> str:
         if amount is None:
@@ -2172,10 +2176,10 @@ def render_purchase_order_pdf(po: dict) -> bytes:
         text_cmd_right(cmds, TABLE_COLS["qty"][1] - 2, TABLE_COLS["qty"][0] + 2, base_y, str(line.get("qty") or "0"), 8.5)
         for idx_uom, uom in enumerate(uom_lines):
             text_cmd(cmds, TABLE_COLS["uom"][0] + 2, base_y - (idx_uom * 10), uom, 8.5)
-        text_cmd_right(cmds, TABLE_COLS["pu"][1] - 2, TABLE_COLS["pu"][0] + 2, base_y, format_table_money(line.get("price_unit")), 8.5, 8.0)
-        text_cmd_right(cmds, TABLE_COLS["iva"][1] - 2, TABLE_COLS["iva"][0] + 2, base_y, format_table_money(line.get("iva_amount")), 8.5, 8.0)
-        text_cmd_right(cmds, TABLE_COLS["ret_isr"][1] - 2, TABLE_COLS["ret_isr"][0] + 2, base_y, format_table_money(line.get("ret_isr")), 8.5, 8.0)
-        text_cmd_right(cmds, TABLE_COLS["total"][1] - 2, TABLE_COLS["total"][0] + 2, base_y, format_table_money(line.get("amount")), 8.5, 8.0)
+        text_cmd_right(cmds, TABLE_COLS["pu"][1] - MONEY_CELL_PAD_RIGHT, TABLE_COLS["pu"][0] + MONEY_CELL_PAD_LEFT, base_y, format_table_money(line.get("price_unit")), 8.5, MONEY_ROW_MIN_FONT)
+        text_cmd_right(cmds, TABLE_COLS["iva"][1] - MONEY_CELL_PAD_RIGHT, TABLE_COLS["iva"][0] + MONEY_CELL_PAD_LEFT, base_y, format_table_money(line.get("iva_amount")), 8.5, MONEY_ROW_MIN_FONT)
+        text_cmd_right(cmds, TABLE_COLS["ret_isr"][1] - MONEY_CELL_PAD_RIGHT, TABLE_COLS["ret_isr"][0] + MONEY_CELL_PAD_LEFT, base_y, format_table_money(line.get("ret_isr")), 8.5, MONEY_ROW_MIN_FONT)
+        text_cmd_right(cmds, TABLE_COLS["total"][1] - MONEY_CELL_PAD_RIGHT, TABLE_COLS["total"][0] + MONEY_CELL_PAD_LEFT, base_y, format_table_money(line.get("amount")), 8.5, MONEY_ROW_MIN_FONT)
 
     row_y_start_first = 518
     row_y_start_other = 706

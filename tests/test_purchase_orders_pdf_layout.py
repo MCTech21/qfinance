@@ -127,3 +127,57 @@ def test_purchase_order_pdf_anti_overlap_and_total_mxn():
     expected_mxn = (total_usd * tc).quantize(Decimal("0.01"))
 
     assert abs(total_mxn - expected_mxn) <= Decimal("0.01")
+
+
+def test_purchase_order_pdf_money_columns_keep_visual_separation_for_real_case():
+    fitz = pytest.importorskip("fitz")
+
+    client, _ = client_for("admin")
+    payload = po_payload(ext="OC-REAL-MONEY-COLS", total_line="1740000.00")
+    payload["currency"] = "MXN"
+    payload["lines"] = [
+        {
+            "line_no": 1,
+            "partida_codigo": "205",
+            "description": "Validación de separación visual entre columnas monetarias",
+            "qty": "1",
+            "price_unit": "1500000.00",
+            "discount_pct": "0",
+            "iva_rate": "16",
+            "apply_isr_withholding": True,
+            "isr_withholding_rate": "0",
+        },
+    ]
+
+    created = client.post("/api/purchase-orders", json=payload)
+    assert created.status_code == 200
+    po_id = created.json()["purchase_order"]["id"]
+
+    pdf_res = client.get(f"/api/purchase-orders/{po_id}/pdf")
+    assert pdf_res.status_code == 200
+
+    doc = fitz.open(stream=pdf_res.content, filetype="pdf")
+    words = []
+    for page in doc:
+        words.extend(page.get_text("words"))
+
+    def first_word(token: str):
+        matched = [w for w in words if w[4] == token]
+        assert matched, f"No se encontró token {token}"
+        matched.sort(key=lambda w: (w[1], w[0]))
+        return matched[0]
+
+    header_pu = first_word("Unitario")
+    header_iva = first_word("IVA")
+    header_ret = first_word("ISR")
+    value_pu = first_word("$1,500,000.00")
+    value_iva = first_word("$240,000.00")
+    value_ret = first_word("$0.00")
+    value_total = first_word("$1,740,000.00")
+
+    assert header_pu[2] <= header_iva[0] - 2
+    assert header_iva[2] <= header_ret[0] - 2
+
+    assert value_pu[2] <= value_iva[0] - 2
+    assert value_iva[2] <= value_ret[0] - 2
+    assert value_ret[2] <= value_total[0] - 2
