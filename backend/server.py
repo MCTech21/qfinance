@@ -2083,18 +2083,26 @@ def render_purchase_order_pdf(po: dict) -> bytes:
 
     TABLE_COLS = {
         "num": (50, 72),
-        "partida": (72, 122),
-        "desc": (122, 280),
-        "qty": (280, 328),
-        "uom": (328, 366),
-        "pu": (366, 426),
-        "iva": (426, 476),
-        "ret_isr": (476, 524),
-        "total": (524, 572),
+        "partida": (72, 114),
+        "desc": (114, 250),
+        "qty": (250, 292),
+        "uom": (292, 322),
+        "pu": (322, 384),
+        "iva": (384, 442),
+        "ret_isr": (442, 504),
+        "total": (504, 572),
     }
 
+    def format_table_money(amount: Any) -> str:
+        if amount is None:
+            return "$0.00"
+        try:
+            value = money_dec(amount).quantize(TWO_DECIMALS)
+        except Exception:
+            return "$0.00"
+        return f"${value:,.2f}"
+
     def draw_table_header(cmds: List[str], y: float):
-        currency_code = str(payload.get("currency") or "MXN").upper()
         cmds += ["0.05 0.18 0.56 rg", f"50 {y-16:.2f} 522 16 re f", "1 1 1 rg"]
         headers = [
             (TABLE_COLS["num"][0] + 4, "#"),
@@ -2102,33 +2110,37 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             (TABLE_COLS["desc"][0] + 4, "Descripción"),
             (TABLE_COLS["qty"][0] + 4, "Cant."),
             (TABLE_COLS["uom"][0] + 4, "Unidad"),
-            (TABLE_COLS["pu"][0] + 2, f"P.U. ({currency_code})"),
-            (TABLE_COLS["iva"][0] + 2, f"IVA ({currency_code})"),
-            (TABLE_COLS["ret_isr"][0] + 2, f"Ret ISR ({currency_code})"),
-            (TABLE_COLS["total"][0] + 2, f"Total ({currency_code})"),
+            (TABLE_COLS["pu"][0] + 2, "P. Unitario"),
+            (TABLE_COLS["iva"][0] + 2, "IVA"),
+            (TABLE_COLS["ret_isr"][0] + 2, "Ret ISR"),
+            (TABLE_COLS["total"][0] + 2, "Total"),
         ]
         for x, h in headers:
-            text_cmd(cmds, x, y-12, h, 7)
+            text_cmd(cmds, x, y-12, h, 8.5)
         cmds += ["0 0 0 rg"]
 
-    def text_cmd_right(cmds: List[str], right_x: float, left_x: float, y: float, text: Any, size: int = 9, min_size: int = 7):
+    def text_cmd_right(cmds: List[str], right_x: float, left_x: float, y: float, text: Any, size: float = 8.5, min_size: float = 7.8):
         raw = str(text or "")
         max_w = max(6.0, right_x - left_x)
-        for s in range(size, min_size - 1, -1):
-            approx_w = len(raw) * (s * 0.60)
-            if approx_w <= max_w or s == min_size:
+        current = size
+        while current >= min_size - 0.001:
+            approx_w = len(raw) * (current * 0.54)
+            if approx_w <= max_w or current <= min_size + 0.001:
                 x = max(left_x, right_x - approx_w)
-                cmds += ["BT", f"/F2 {s} Tf", f"{x:.2f} {y:.2f} Td", f"({_pdf_escape(raw)}) Tj", "ET"]
+                cmds += ["BT", f"/F2 {current:.2f} Tf", f"{x:.2f} {y:.2f} Td", f"({_pdf_escape(raw)}) Tj", "ET"]
                 return
+            current -= 0.2
 
-    def measure_cell_height(text: Any, width_chars: int, line_step: float = 10.0, min_height: float = 13.0) -> float:
+    def measure_cell_height(text: Any, width_chars: int, max_lines: Optional[int] = None, line_step: float = 10.0, min_height: float = 13.0) -> float:
         lines_local = _pdf_wrap(text, width_chars)
+        if max_lines is not None:
+            lines_local = lines_local[:max_lines]
         return max(min_height, len(lines_local) * line_step)
 
     def compute_row_height(line: dict) -> float:
         return max(
-            measure_cell_height(line.get("description") or "-", 36),
-            measure_cell_height(line.get("uom") or "—", 8),
+            measure_cell_height(line.get("description") or "-", 30, max_lines=2),
+            measure_cell_height(line.get("uom") or "—", 6, max_lines=2),
             13.0,
         )
 
@@ -2139,19 +2151,19 @@ def render_purchase_order_pdf(po: dict) -> bytes:
         if shaded:
             cmds += ["0.98 0.98 0.99 rg", f"50 {y_cursor-row_height+2:.2f} 522 {row_height:.2f} re f", "0 0 0 rg"]
         base_y = y_cursor - 9
-        desc_lines = _pdf_wrap(line.get("description") or "-", 36)
-        uom_lines = _pdf_wrap(line.get("uom") or "—", 8)
-        text_cmd(cmds, TABLE_COLS["num"][0] + 4, base_y, line.get("line_no") or row_index + 1, 8)
-        text_cmd(cmds, TABLE_COLS["partida"][0] + 4, base_y, line.get("code") or "", 8)
+        desc_lines = _pdf_wrap(line.get("description") or "-", 30)[:2]
+        uom_lines = _pdf_wrap(line.get("uom") or "—", 6)[:2]
+        text_cmd(cmds, TABLE_COLS["num"][0] + 4, base_y, line.get("line_no") or row_index + 1, 8.5)
+        text_cmd(cmds, TABLE_COLS["partida"][0] + 2, base_y, line.get("code") or "", 8.5)
         for idx_desc, d in enumerate(desc_lines):
-            text_cmd(cmds, TABLE_COLS["desc"][0] + 4, base_y - (idx_desc * 10), d, 8)
-        text_cmd_right(cmds, TABLE_COLS["qty"][1] - 4, TABLE_COLS["qty"][0] + 4, base_y, str(line.get("qty") or "0"), 8)
+            text_cmd(cmds, TABLE_COLS["desc"][0] + 2, base_y - (idx_desc * 10), d, 8.0)
+        text_cmd_right(cmds, TABLE_COLS["qty"][1] - 2, TABLE_COLS["qty"][0] + 2, base_y, str(line.get("qty") or "0"), 8.5)
         for idx_uom, uom in enumerate(uom_lines):
-            text_cmd(cmds, TABLE_COLS["uom"][0] + 2, base_y - (idx_uom * 10), uom, 8)
-        text_cmd_right(cmds, TABLE_COLS["pu"][1] - 4, TABLE_COLS["pu"][0] + 4, base_y, format_number(line.get("price_unit")), 9)
-        text_cmd_right(cmds, TABLE_COLS["iva"][1] - 4, TABLE_COLS["iva"][0] + 4, base_y, format_number(line.get("iva_amount")), 9)
-        text_cmd_right(cmds, TABLE_COLS["ret_isr"][1] - 4, TABLE_COLS["ret_isr"][0] + 4, base_y, format_number(line.get("ret_isr")), 9)
-        text_cmd_right(cmds, TABLE_COLS["total"][1] - 4, TABLE_COLS["total"][0] + 4, base_y, format_number(line.get("amount")), 9)
+            text_cmd(cmds, TABLE_COLS["uom"][0] + 2, base_y - (idx_uom * 10), uom, 8.5)
+        text_cmd_right(cmds, TABLE_COLS["pu"][1] - 2, TABLE_COLS["pu"][0] + 2, base_y, format_table_money(line.get("price_unit")), 8.5, 8.0)
+        text_cmd_right(cmds, TABLE_COLS["iva"][1] - 2, TABLE_COLS["iva"][0] + 2, base_y, format_table_money(line.get("iva_amount")), 8.5, 8.0)
+        text_cmd_right(cmds, TABLE_COLS["ret_isr"][1] - 2, TABLE_COLS["ret_isr"][0] + 2, base_y, format_table_money(line.get("ret_isr")), 8.5, 8.0)
+        text_cmd_right(cmds, TABLE_COLS["total"][1] - 2, TABLE_COLS["total"][0] + 2, base_y, format_table_money(line.get("amount")), 8.5, 8.0)
 
     row_y_start_first = 518
     row_y_start_other = 706
