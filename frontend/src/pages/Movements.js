@@ -13,6 +13,7 @@ import { buildYearOptions } from "../lib/yearRange";
 import { useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { saveAs } from "file-saver";
+import ProviderSelect from "../components/ProviderSelect";
 
 const Movements = () => {
   const { api, user } = useAuth();
@@ -667,19 +668,7 @@ const Movements = () => {
                 ) : (
                   <div className="space-y-2">
                     <Label>Proveedor</Label>
-                    <Select
-                      value={formData.provider_id}
-                      onValueChange={(v) => setFormData(prev => ({ ...prev, provider_id: v }))}
-                    >
-                      <SelectTrigger data-testid="movement-provider-select">
-                        <SelectValue placeholder="Seleccionar..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {providers.map(p => (
-                          <SelectItem key={p.id} value={p.id}>{p.code} - {p.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <ProviderSelect apiClient={api} value={formData.provider_id} onChange={(v) => setFormData(prev => ({ ...prev, provider_id: v }))} canCreate={user?.role === "admin" || user?.role === "finanzas"} />
                   </div>
                 )}
                 

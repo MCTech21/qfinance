@@ -37,12 +37,21 @@ class FakeCollection:
         self.indexes.pop(name, None)
 
     def _matches(self, row, query):
+        import re
         for k, v in query.items():
+            if k == "$or":
+                if not any(self._matches(row, sub) for sub in v):
+                    return False
+                continue
             if isinstance(v, dict):
                 if "$ne" in v and row.get(k) == v["$ne"]:
                     return False
                 if "$in" in v and row.get(k) not in v["$in"]:
                     return False
+                if "$regex" in v:
+                    flags = re.I if "i" in str(v.get("$options", "")).lower() else 0
+                    if not re.search(v["$regex"], str(row.get(k, "")), flags):
+                        return False
             elif row.get(k) != v:
                 return False
         return True
@@ -143,6 +152,7 @@ class FakeDB:
         self.import_export_logs = FakeCollection([])
         self.empresas = FakeCollection([{"id": "e1", "nombre": "Empresa 1"}])
         self.counters = FakeCollection([])
+        self.invoices = FakeCollection([])
 
     def __getitem__(self, name):
         return getattr(self, name)
