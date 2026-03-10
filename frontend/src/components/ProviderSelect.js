@@ -2,6 +2,38 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Input } from "./ui/input";
 import { Button } from "./ui/button";
 
+const normalizeSearchText = (value) => String(value || "")
+  .normalize("NFD")
+  .replace(/[\u0300-\u036f]/g, "")
+  .toLowerCase()
+  .trim();
+
+const tokenize = (value) => normalizeSearchText(value).split(/\s+/).filter(Boolean);
+
+const rankProviders = (rows, query) => {
+  const q = normalizeSearchText(query);
+  const sorted = [...(rows || [])];
+  if (!q) {
+    return sorted.sort((a, b) => normalizeSearchText(a?.name).localeCompare(normalizeSearchText(b?.name)));
+  }
+  const scoreOf = (provider) => {
+    const name = normalizeSearchText(provider?.name);
+    const code = normalizeSearchText(provider?.code);
+    const rfc = normalizeSearchText(provider?.rfc);
+    const fields = [name, code, rfc].filter(Boolean);
+    if (fields.some((f) => f === q)) return 0;
+    if (fields.some((f) => f.startsWith(q))) return 1;
+    if (fields.some((f) => tokenize(f).some((token) => token.startsWith(q)))) return 2;
+    if (fields.some((f) => f.includes(q))) return 3;
+    return 4;
+  };
+  return sorted.sort((a, b) => {
+    const scoreDiff = scoreOf(a) - scoreOf(b);
+    if (scoreDiff !== 0) return scoreDiff;
+    return normalizeSearchText(a?.name).localeCompare(normalizeSearchText(b?.name));
+  });
+};
+
 const renderHighlight = (text, query) => {
   const value = String(text || "");
   const q = String(query || "").trim();
@@ -57,7 +89,7 @@ export default function ProviderSelect({ apiClient, value, onChange, disabled = 
         const params = trimmed.length >= 1 ? { q: trimmed, limit: 20 } : { q: "", limit: 50 };
         const res = await apiClient().get("/providers", { params });
         if (requestId !== requestIdRef.current) return;
-        const rows = res.data || [];
+        const rows = rankProviders(res.data || [], trimmed);
         setProviders(rows);
         setActiveIndex(rows.length ? 0 : -1);
       } finally {

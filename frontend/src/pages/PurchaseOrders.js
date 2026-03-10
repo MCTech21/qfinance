@@ -67,6 +67,8 @@ const normalizeAmount = (value) => {
 
 const moneyRound = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+const toDisplayAmount = (value) => Number(normalizeAmount(value || 0)).toFixed(2);
+
 const calcLine = (line) => {
   const qty = normalizeAmount(line.qty);
   const price = normalizeAmount(line.price_unit);
@@ -154,6 +156,29 @@ const PurchaseOrders = () => {
       return acc;
     }, { subtotal: 0, tax: 0, withholding: 0, total: 0 });
   }, [form.lines]);
+
+  const exchangeRateValue = useMemo(() => {
+    if (form.currency === "MXN") return 1;
+    const parsed = normalizeAmount(form.exchange_rate || 0);
+    return parsed > 0 ? parsed : 0;
+  }, [form.currency, form.exchange_rate]);
+
+  const totalMxn = useMemo(() => moneyRound(formTotals.total * exchangeRateValue), [formTotals.total, exchangeRateValue]);
+
+  const previewSummary = useMemo(() => {
+    const projectedAmountMxn = normalizeAmount(budgetPreview?.summary?.projected_amount_mxn ?? budgetPreview?.summary?.monto_solicitado ?? totalMxn);
+    const projectedAmountOriginal = normalizeAmount(budgetPreview?.summary?.projected_amount_original ?? budgetPreview?.summary?.monto_solicitado_original ?? formTotals.total);
+    const availableCurrent = normalizeAmount(budgetPreview?.summary?.available_current ?? budgetPreview?.summary?.disponible_actual ?? 0);
+    const projectedRemaining = normalizeAmount(budgetPreview?.summary?.available_after_preview ?? budgetPreview?.summary?.restante_proyectado ?? 0);
+    const canProceed = (budgetPreview?.lines || []).every((item) => item?.can_post_payment !== false);
+    return {
+      projectedAmountMxn,
+      projectedAmountOriginal,
+      availableCurrent,
+      projectedRemaining,
+      canProceed,
+    };
+  }, [budgetPreview, totalMxn, formTotals.total]);
 
 
   const lineRequestedAmount = (line) => {
@@ -487,10 +512,10 @@ const PurchaseOrders = () => {
               <div className="space-y-2">
                 <div className="flex justify-between items-center"><Label>Líneas</Label><Button type="button" size="sm" variant="outline" onClick={addLine}>Agregar línea</Button></div>
                 <div className="overflow-x-auto border rounded-md">
-                  <table className="w-full text-sm table-fixed">
+                  <table className="w-full min-w-[1280px] text-sm table-fixed">
                     <thead>
                       <tr className="border-b border-border bg-muted/30">
-                        <th className="p-2 w-10">#</th><th className="w-24">Partida</th><th className="w-[28%]">Descripción</th><th className="w-16">Cant.</th><th className="w-16">Unidad</th><th className="w-24">P. Unitario</th><th className="w-16">%Desc.</th><th className="w-16">IVA</th><th className="w-20">Ret ISR</th><th className="w-16">%ISR</th><th className="w-24">Total línea</th><th className="w-10"></th>
+                        <th className="p-2 w-10">#</th><th className="w-44">Partida</th><th className="w-[36%] min-w-[320px]">Descripción</th><th className="w-24">Cantidad</th><th className="w-24">Unidad</th><th className="w-32">P. Unitario</th><th className="w-24">%Desc.</th><th className="w-20">IVA</th><th className="w-24">Ret ISR</th><th className="w-24">%ISR</th><th className="w-32">Total línea</th><th className="w-12"></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -508,10 +533,10 @@ const PurchaseOrders = () => {
                               </Select>
                             </td>
                             <td className="min-w-56"><Input value={line.description} onChange={(e) => changeLine(line.rowKey, "description", e.target.value)} /></td>
-                            <td><Input value={line.qty} onChange={(e) => changeLine(line.rowKey, "qty", e.target.value)} /></td>
-                            <td><Input value={line.uom} onChange={(e) => changeLine(line.rowKey, "uom", e.target.value)} /></td>
-                            <td><Input value={line.price_unit} onChange={(e) => changeLine(line.rowKey, "price_unit", e.target.value)} /></td>
-                            <td><Input value={line.discount_pct} onChange={(e) => changeLine(line.rowKey, "discount_pct", e.target.value)} /></td>
+                            <td><Input className="min-w-20" value={line.qty} onChange={(e) => changeLine(line.rowKey, "qty", e.target.value)} /></td>
+                            <td><Input className="min-w-20" value={line.uom} onChange={(e) => changeLine(line.rowKey, "uom", e.target.value)} /></td>
+                            <td><Input className="min-w-24" value={line.price_unit} onChange={(e) => changeLine(line.rowKey, "price_unit", e.target.value)} /></td>
+                            <td><Input className="min-w-20" value={line.discount_pct} onChange={(e) => changeLine(line.rowKey, "discount_pct", e.target.value)} /></td>
                             <td>
                               <Select value={String(line.iva_rate)} onValueChange={(v) => changeLine(line.rowKey, "iva_rate", v)}>
                                 <SelectTrigger><SelectValue /></SelectTrigger>
@@ -519,7 +544,7 @@ const PurchaseOrders = () => {
                               </Select>
                             </td>
                             <td><input type="checkbox" checked={line.apply_isr_withholding} onChange={(e) => changeLine(line.rowKey, "apply_isr_withholding", e.target.checked)} /></td>
-                            <td><Input value={line.isr_withholding_rate} disabled={!line.apply_isr_withholding} onChange={(e) => changeLine(line.rowKey, "isr_withholding_rate", e.target.value)} /></td>
+                            <td><Input className="min-w-20" value={line.isr_withholding_rate} disabled={!line.apply_isr_withholding} onChange={(e) => changeLine(line.rowKey, "isr_withholding_rate", e.target.value)} /></td>
                             <td className="font-medium text-right pr-2">{lineCalc.lineTotal.toFixed(2)}</td>
                             <td><Button type="button" size="icon" variant="ghost" onClick={() => removeLine(line.rowKey)}><Trash2 className="h-4 w-4" /></Button></td>
                           </tr>
@@ -542,16 +567,19 @@ const PurchaseOrders = () => {
                         <p>Total presupuesto: <span className="font-mono">{Number(item.budget_total || 0).toFixed(2)}</span></p>
                         <p>Ejecutado: <span className="font-mono">{Number(item.executed_total || 0).toFixed(2)}</span></p>
                         <p>Disponible actual: <span className="font-mono">{Number(item.remaining_total_current || 0).toFixed(2)}</span></p>
-                        <p>Monto proyectado línea(s) MXN: <span className="font-mono">{Number(item.projected_amount_mxn || item.requested_amount || 0).toFixed(2)}</span></p>
-                        <p>Monto proyectado original: <span className="font-mono">{Number(item.projected_amount_original || item.requested_amount_original || 0).toFixed(2)} {budgetPreview?.currency || form.currency}</span></p>
+                        <p>Monto proyectado línea(s) MXN: <span className="font-mono">{toDisplayAmount(item.projected_amount_mxn ?? item.requested_amount)}</span></p>
+                        <p>Monto original ({budgetPreview?.currency || form.currency}): <span className="font-mono">{toDisplayAmount(item.projected_amount_original ?? item.requested_amount_original)}</span></p>
+                        {(budgetPreview?.currency || form.currency) !== "MXN" && <p>Tipo de cambio aplicado: <span className="font-mono">{toDisplayAmount(budgetPreview?.exchange_rate || exchangeRateValue)}</span></p>}
                         <p>Restante proyectado: <span className="font-mono font-semibold">{Number(item.projected_remaining_total || 0).toFixed(2)}</span></p>
                       </div>
                     ))}
                     <div className="rounded border border-emerald-500/20 bg-emerald-500/10 p-2">
-                      <p>Resumen OC - disponible actual: <span className="font-mono">{Number(budgetPreview?.summary?.disponible_actual || 0).toFixed(2)}</span></p>
-                      <p>Resumen OC - monto solicitado MXN: <span className="font-mono">{Number(budgetPreview?.summary?.projected_amount_mxn || budgetPreview?.summary?.monto_solicitado || 0).toFixed(2)}</span></p>
-                      <p>Resumen OC - monto original: <span className="font-mono">{Number(budgetPreview?.summary?.projected_amount_original || 0).toFixed(2)} {budgetPreview?.currency || form.currency}</span></p>
-                      <p>Resumen OC - restante proyectado: <span className="font-mono font-semibold">{Number(budgetPreview?.summary?.restante_proyectado || 0).toFixed(2)}</span></p>
+                      <p>Resumen OC - disponible actual: <span className="font-mono">{toDisplayAmount(previewSummary.availableCurrent)}</span></p>
+                      <p>Resumen OC - monto solicitado MXN: <span className="font-mono">{toDisplayAmount(previewSummary.projectedAmountMxn)}</span></p>
+                      <p>Resumen OC - monto original ({budgetPreview?.currency || form.currency}): <span className="font-mono">{toDisplayAmount(previewSummary.projectedAmountOriginal)}</span></p>
+                      {(budgetPreview?.currency || form.currency) !== "MXN" && <p>Resumen OC - tipo de cambio: <span className="font-mono">{toDisplayAmount(budgetPreview?.exchange_rate || exchangeRateValue)}</span></p>}
+                      <p>Resumen OC - restante proyectado: <span className="font-mono font-semibold">{toDisplayAmount(previewSummary.projectedRemaining)}</span></p>
+                      <p>Budget gate (preview): <span className={`font-semibold ${previewSummary.canProceed ? "text-emerald-700" : "text-red-600"}`}>{previewSummary.canProceed ? "Dentro de presupuesto" : "Excede presupuesto"}</span></p>
                     </div>
                   </div>
                 )}
@@ -562,7 +590,7 @@ const PurchaseOrders = () => {
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">IVA total</p><p className="font-semibold">{formTotals.tax.toFixed(2)}</p></div>
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Ret ISR</p><p className="font-semibold">{formTotals.withholding.toFixed(2)}</p></div>
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Total OC ({form.currency})</p><p className="font-semibold">{formTotals.total.toFixed(2)}</p></div>
-                {form.currency !== "MXN" && <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Total OC (MXN)</p><p className="font-semibold">{(formTotals.total * normalizeAmount(form.exchange_rate || 0)).toFixed(2)}</p></div>}
+                {form.currency !== "MXN" && <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Total OC (MXN)</p><p className="font-semibold">{totalMxn.toFixed(2)}</p></div>}
               </div>
 
               <DialogFooter>

@@ -2067,8 +2067,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             y -= 15
         y = top_y - 30
         for t in vendor:
-            text_cmd(cmds, right_x+8, y, t, 8)
-            y -= 15
+            y = draw_wrapped(cmds, right_x+8, y, t, 8, 40, line_step=10) - 4
         return top_y - card_h - 10
 
     def draw_table_header(cmds: List[str], y: float):
@@ -2097,6 +2096,38 @@ def render_purchase_order_pdf(po: dict) -> bytes:
                 text_cmd(cmds, x, y, raw, s)
                 return
 
+    def measure_cell_height(text: Any, width_chars: int, line_step: float = 10.0, min_height: float = 13.0) -> float:
+        lines_local = _pdf_wrap(text, width_chars)
+        return max(min_height, len(lines_local) * line_step)
+
+    def compute_row_height(line: dict) -> float:
+        return max(
+            measure_cell_height(line.get("description") or "-", 42),
+            measure_cell_height(line.get("uom") or "—", 8),
+            13.0,
+        )
+
+    def ensure_page_space(y_cursor: float, row_height: float, min_bottom: float = 170.0) -> bool:
+        return (y_cursor - row_height) >= min_bottom
+
+    def draw_row(cmds: List[str], line: dict, row_index: int, y_cursor: float, row_height: float, shaded: bool) -> None:
+        if shaded:
+            cmds += ["0.98 0.98 0.99 rg", f"50 {y_cursor-row_height+2:.2f} 522 {row_height:.2f} re f", "0 0 0 rg"]
+        base_y = y_cursor - 9
+        desc_lines = _pdf_wrap(line.get("description") or "-", 42)
+        uom_lines = _pdf_wrap(line.get("uom") or "—", 8)
+        text_cmd(cmds, 54, base_y, line.get("line_no") or row_index + 1, 8)
+        text_cmd(cmds, 76, base_y, line.get("code") or "", 8)
+        for idx_desc, d in enumerate(desc_lines):
+            text_cmd(cmds, 124, base_y - (idx_desc * 10), d, 8)
+        text_cmd_right(cmds, 326, base_y, str(line.get("qty") or "0"), 8)
+        for idx_uom, uom in enumerate(uom_lines):
+            text_cmd(cmds, 330, base_y - (idx_uom * 10), uom, 8)
+        text_cmd_right(cmds, 420, base_y, format_money(line.get("price_unit"), payload.get("currency")), 8)
+        text_cmd_right(cmds, 470, base_y, format_money(line.get("iva_amount"), payload.get("currency")), 8)
+        text_cmd_right(cmds, 520, base_y, format_money(line.get("ret_isr"), payload.get("currency")), 8)
+        text_cmd_right(cmds, 570, base_y, format_money(line.get("amount"), payload.get("currency")), 8)
+
     row_y_start_first = 518
     row_y_start_other = 706
     page_no = 1
@@ -2116,25 +2147,11 @@ def render_purchase_order_pdf(po: dict) -> bytes:
         shaded = False
         while i < len(lines):
             line = lines[i] or {}
-            desc_lines = _pdf_wrap(line.get("description") or "-", 42)
-            row_height = max(13, 10 * len(desc_lines))
-            if y_cursor - row_height < 170:
+            row_height = compute_row_height(line)
+            if not ensure_page_space(y_cursor, row_height):
                 break
-            if shaded:
-                cmds += ["0.98 0.98 0.99 rg", f"50 {y_cursor-row_height+2:.2f} 522 {row_height:.2f} re f", "0 0 0 rg"]
+            draw_row(cmds, line, i, y_cursor, row_height, shaded)
             shaded = not shaded
-
-            base_y = y_cursor - 9
-            text_cmd(cmds, 54, base_y, line.get("line_no") or i + 1, 8)
-            text_cmd(cmds, 76, base_y, line.get("code") or "", 8)
-            for idx_desc, d in enumerate(desc_lines):
-                text_cmd(cmds, 124, base_y - (idx_desc * 10), d, 8)
-            text_cmd_right(cmds, 326, base_y, str(line.get("qty") or "0"), 8)
-            text_cmd(cmds, 330, base_y, line.get("uom") or "—", 8)
-            text_cmd_right(cmds, 420, base_y, format_money(line.get("price_unit"), payload.get("currency")), 8)
-            text_cmd_right(cmds, 470, base_y, format_money(line.get("iva_amount"), payload.get("currency")), 8)
-            text_cmd_right(cmds, 520, base_y, format_money(line.get("ret_isr"), payload.get("currency")), 8)
-            text_cmd_right(cmds, 570, base_y, format_money(line.get("amount"), payload.get("currency")), 8)
 
             y_cursor -= row_height
             i += 1
