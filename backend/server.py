@@ -1801,6 +1801,16 @@ def format_money(amount: Any, currency: str = "MXN") -> str:
     return f"{symbol}{value:,.2f}"
 
 
+def format_number(amount: Any) -> str:
+    if amount is None:
+        return "—"
+    try:
+        value = money_dec(amount).quantize(TWO_DECIMALS)
+    except Exception:
+        return "—"
+    return f"{value:,.2f}"
+
+
 def oc_pdf_filename(raw_folio: Optional[str]) -> str:
     base = canonicalize_oc_folio(raw_folio)
     if not base or base == "N/A":
@@ -1895,7 +1905,8 @@ def build_purchase_order_pdf_payload(po: dict) -> dict:
     subtotal = money_dec(po.get("subtotal_tax_base", 0)).quantize(TWO_DECIMALS)
     tax = money_dec(po.get("tax_total", 0)).quantize(TWO_DECIMALS)
     total = money_dec(po.get("total", 0)).quantize(TWO_DECIMALS)
-    total_mxn = money_dec(po.get("total_mxn", total)).quantize(TWO_DECIMALS)
+    exchange_rate = money_dec(po.get("exchange_rate", 1)).quantize(TWO_DECIMALS)
+    total_mxn = (total * exchange_rate).quantize(TWO_DECIMALS)
     iva_withholding_total = money_dec(po.get("iva_withholding_total", 0)).quantize(TWO_DECIMALS)
     generated_at = datetime.now(TIMEZONE)
     generated_label = generated_at.strftime("%d/%m/%Y, %I:%M %p").lower().replace("am", "a.m.").replace("pm", "p.m.")
@@ -1908,7 +1919,7 @@ def build_purchase_order_pdf_payload(po: dict) -> dict:
         "vendor": vendor,
         "project": po.get("project_name") or po.get("proyecto_nombre") or po.get("project_id") or "S/I",
         "currency": po.get("currency") or "MXN",
-        "exchange_rate": po.get("exchange_rate") or "1",
+        "exchange_rate": str(exchange_rate),
         "lines": lines_payload,
         "subtotal": str(subtotal),
         "tax": str(tax),
@@ -2070,30 +2081,44 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             y = draw_wrapped(cmds, right_x+8, y, t, 8, 40, line_step=10) - 4
         return top_y - card_h - 10
 
+    TABLE_COLS = {
+        "num": (50, 72),
+        "partida": (72, 122),
+        "desc": (122, 280),
+        "qty": (280, 328),
+        "uom": (328, 366),
+        "pu": (366, 426),
+        "iva": (426, 476),
+        "ret_isr": (476, 524),
+        "total": (524, 572),
+    }
+
     def draw_table_header(cmds: List[str], y: float):
+        currency_code = str(payload.get("currency") or "MXN").upper()
         cmds += ["0.05 0.18 0.56 rg", f"50 {y-16:.2f} 522 16 re f", "1 1 1 rg"]
         headers = [
-            (54, "#"),
-            (76, "Partida"),
-            (124, "Descripción"),
-            (294, "Cant."),
-            (330, "Unidad"),
-            (366, "P.U."),
-            (424, "IVA"),
-            (474, "Ret ISR"),
-            (524, "Total"),
+            (TABLE_COLS["num"][0] + 4, "#"),
+            (TABLE_COLS["partida"][0] + 4, "Partida"),
+            (TABLE_COLS["desc"][0] + 4, "Descripción"),
+            (TABLE_COLS["qty"][0] + 4, "Cant."),
+            (TABLE_COLS["uom"][0] + 4, "Unidad"),
+            (TABLE_COLS["pu"][0] + 2, f"P.U. ({currency_code})"),
+            (TABLE_COLS["iva"][0] + 2, f"IVA ({currency_code})"),
+            (TABLE_COLS["ret_isr"][0] + 2, f"Ret ISR ({currency_code})"),
+            (TABLE_COLS["total"][0] + 2, f"Total ({currency_code})"),
         ]
         for x, h in headers:
-            text_cmd(cmds, x, y-12, h, 8)
+            text_cmd(cmds, x, y-12, h, 7)
         cmds += ["0 0 0 rg"]
 
-    def text_cmd_right(cmds: List[str], right_x: float, y: float, text: Any, size: int = 8, min_size: int = 7):
+    def text_cmd_right(cmds: List[str], right_x: float, left_x: float, y: float, text: Any, size: int = 9, min_size: int = 7):
         raw = str(text or "")
+        max_w = max(6.0, right_x - left_x)
         for s in range(size, min_size - 1, -1):
-            approx_w = len(raw) * (s * 0.52)
-            if approx_w <= 48 or s == min_size:
-                x = right_x - approx_w
-                text_cmd(cmds, x, y, raw, s)
+            approx_w = len(raw) * (s * 0.60)
+            if approx_w <= max_w or s == min_size:
+                x = max(left_x, right_x - approx_w)
+                cmds += ["BT", f"/F2 {s} Tf", f"{x:.2f} {y:.2f} Td", f"({_pdf_escape(raw)}) Tj", "ET"]
                 return
 
     def measure_cell_height(text: Any, width_chars: int, line_step: float = 10.0, min_height: float = 13.0) -> float:
@@ -2102,7 +2127,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
 
     def compute_row_height(line: dict) -> float:
         return max(
-            measure_cell_height(line.get("description") or "-", 42),
+            measure_cell_height(line.get("description") or "-", 36),
             measure_cell_height(line.get("uom") or "—", 8),
             13.0,
         )
@@ -2114,19 +2139,19 @@ def render_purchase_order_pdf(po: dict) -> bytes:
         if shaded:
             cmds += ["0.98 0.98 0.99 rg", f"50 {y_cursor-row_height+2:.2f} 522 {row_height:.2f} re f", "0 0 0 rg"]
         base_y = y_cursor - 9
-        desc_lines = _pdf_wrap(line.get("description") or "-", 42)
+        desc_lines = _pdf_wrap(line.get("description") or "-", 36)
         uom_lines = _pdf_wrap(line.get("uom") or "—", 8)
-        text_cmd(cmds, 54, base_y, line.get("line_no") or row_index + 1, 8)
-        text_cmd(cmds, 76, base_y, line.get("code") or "", 8)
+        text_cmd(cmds, TABLE_COLS["num"][0] + 4, base_y, line.get("line_no") or row_index + 1, 8)
+        text_cmd(cmds, TABLE_COLS["partida"][0] + 4, base_y, line.get("code") or "", 8)
         for idx_desc, d in enumerate(desc_lines):
-            text_cmd(cmds, 124, base_y - (idx_desc * 10), d, 8)
-        text_cmd_right(cmds, 326, base_y, str(line.get("qty") or "0"), 8)
+            text_cmd(cmds, TABLE_COLS["desc"][0] + 4, base_y - (idx_desc * 10), d, 8)
+        text_cmd_right(cmds, TABLE_COLS["qty"][1] - 4, TABLE_COLS["qty"][0] + 4, base_y, str(line.get("qty") or "0"), 8)
         for idx_uom, uom in enumerate(uom_lines):
-            text_cmd(cmds, 330, base_y - (idx_uom * 10), uom, 8)
-        text_cmd_right(cmds, 420, base_y, format_money(line.get("price_unit"), payload.get("currency")), 8)
-        text_cmd_right(cmds, 470, base_y, format_money(line.get("iva_amount"), payload.get("currency")), 8)
-        text_cmd_right(cmds, 520, base_y, format_money(line.get("ret_isr"), payload.get("currency")), 8)
-        text_cmd_right(cmds, 570, base_y, format_money(line.get("amount"), payload.get("currency")), 8)
+            text_cmd(cmds, TABLE_COLS["uom"][0] + 2, base_y - (idx_uom * 10), uom, 8)
+        text_cmd_right(cmds, TABLE_COLS["pu"][1] - 4, TABLE_COLS["pu"][0] + 4, base_y, format_number(line.get("price_unit")), 9)
+        text_cmd_right(cmds, TABLE_COLS["iva"][1] - 4, TABLE_COLS["iva"][0] + 4, base_y, format_number(line.get("iva_amount")), 9)
+        text_cmd_right(cmds, TABLE_COLS["ret_isr"][1] - 4, TABLE_COLS["ret_isr"][0] + 4, base_y, format_number(line.get("ret_isr")), 9)
+        text_cmd_right(cmds, TABLE_COLS["total"][1] - 4, TABLE_COLS["total"][0] + 4, base_y, format_number(line.get("amount")), 9)
 
     row_y_start_first = 518
     row_y_start_other = 706
@@ -2157,20 +2182,21 @@ def render_purchase_order_pdf(po: dict) -> bytes:
             i += 1
 
         if i >= len(lines):
-            box_y = max(140, y_cursor - 110)
-            cmds += ["0.95 0.95 0.97 rg", f"360 {box_y:.2f} 212 90 re f", "0 0 0 rg"]
+            box_y = max(120, y_cursor - 150)
+            cmds += ["0.95 0.95 0.97 rg", f"340 {box_y:.2f} 232 130 re f", "0 0 0 rg"]
+            currency_code = str(payload.get('currency') or 'MXN').upper()
             totals = [
-                f"Subtotal: {format_money(payload.get('subtotal'), payload.get('currency'))}",
-                f"IVA: {format_money(payload.get('tax'), payload.get('currency'))}",
-                f"Ret IVA ({po.get('iva_withholding_rate') or '0'}%): {format_money(payload.get('iva_withholding_total'), payload.get('currency'))}",
-                f"Ret ISR: {format_money(po.get('withholding_isr_total'), payload.get('currency'))}",
-                f"TOTAL ({payload.get('currency')}): {format_money(payload.get('total'), payload.get('currency'))}",
+                f"Subtotal ({currency_code}): {format_money(payload.get('subtotal'), currency_code)}",
+                f"IVA ({currency_code}): {format_money(payload.get('tax'), currency_code)}",
+                f"Ret IVA ({po.get('iva_withholding_rate') or '0'}%): {format_money(payload.get('iva_withholding_total'), currency_code)}",
+                f"Ret ISR ({currency_code}): {format_money(po.get('withholding_isr_total'), currency_code)}",
+                f"TOTAL ({currency_code}): {format_money(payload.get('total'), currency_code)}",
+                f"TC: {format_number(payload.get('exchange_rate'))}",
+                f"TOTAL (MXN): {format_money(payload.get('total_mxn'), 'MXN')}",
             ]
-            if (payload.get('currency') or 'MXN') != 'MXN':
-                totals.append(f"TOTAL (MXN): {format_money(payload.get('total_mxn'), 'MXN')}")
-            ty = box_y + 70
+            ty = box_y + 112
             for t in totals:
-                text_cmd(cmds, 370, ty, t, 10)
+                text_cmd(cmds, 350, ty, t, 10)
                 ty -= 16
 
             notes_title_y = box_y + 26
@@ -2210,7 +2236,8 @@ def render_purchase_order_pdf(po: dict) -> bytes:
     page_obj_start = 4
     content_obj_start = page_obj_start + page_count
     font_obj_num = content_obj_start + page_count
-    next_obj_num = font_obj_num + 1
+    mono_font_obj_num = font_obj_num + 1
+    next_obj_num = mono_font_obj_num + 1
 
     logo_obj_num: Optional[int] = None
     logo_object: Optional[bytes] = None
@@ -2233,7 +2260,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
         content_obj_num = content_obj_start + idx
         xobj_part = f" /XObject << /Im1 {logo_obj_num} 0 R >>" if logo_obj_num else ""
         objects.append(
-            f"{page_obj_num} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {font_obj_num} 0 R >>{xobj_part} >> /Contents {content_obj_num} 0 R >> endobj\n".encode("latin-1")
+            f"{page_obj_num} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {font_obj_num} 0 R /F2 {mono_font_obj_num} 0 R >>{xobj_part} >> /Contents {content_obj_num} 0 R >> endobj\n".encode("latin-1")
         )
 
     for idx, stream in enumerate(page_streams):
@@ -2243,6 +2270,7 @@ def render_purchase_order_pdf(po: dict) -> bytes:
         )
 
     objects.append(f"{font_obj_num} 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n".encode("latin-1"))
+    objects.append(f"{mono_font_obj_num} 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Courier >> endobj\n".encode("latin-1"))
     if logo_object:
         objects.append(logo_object)
     objects.insert(2, f"3 0 obj << /Title (Orden de Compra {folio}) /Creator (QFinance / quantumgrupo.mx) /Producer (QFinance / quantumgrupo.mx) >> endobj\n".encode("latin-1", errors="replace"))
