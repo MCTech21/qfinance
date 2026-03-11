@@ -6158,9 +6158,14 @@ async def get_export_data(
     Logs export action to audit.
     """
     now = to_tijuana(datetime.now(timezone.utc))
+    company_selector = _normalize_dashboard_selector(empresa_id)
+    project_selector = _normalize_dashboard_selector(project_id)
     year = year or now.year
     validate_year_in_range(year)
     month = month or now.month
+
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=422, detail={"code": "month_out_of_range", "message": "month debe estar entre 1 y 12"})
     
     # Get empresas for filter names
     empresas = await db.empresas.find({}, {"_id": 0}).to_list(1000)
@@ -6168,26 +6173,32 @@ async def get_export_data(
     
     # Get projects filtered by empresa
     project_query = {}
-    if empresa_id:
-        project_query["empresa_id"] = empresa_id
+    if company_selector != "all":
+        project_query["empresa_id"] = company_selector
     all_projects = await db.projects.find(project_query, {"_id": 0}).to_list(1000)
     project_ids = [p['id'] for p in all_projects]
     project_map = {p['id']: p for p in all_projects}
+
+    if project_selector != "all":
+        project_ids = [pid for pid in project_ids if pid == project_selector]
+        if not project_ids:
+            raise HTTPException(status_code=403, detail={"code": "forbidden_project", "message": "Proyecto fuera de alcance"})
+        project_map = {k: v for k, v in project_map.items() if k in project_ids}
     
     # Get budgets
     budget_query = {"year": year, "month": month}
-    if project_id:
-        budget_query["project_id"] = project_id
-    elif empresa_id:
+    if project_selector != "all":
+        budget_query["project_id"] = project_selector
+    elif company_selector != "all":
         budget_query["project_id"] = {"$in": project_ids}
     
     budgets = await db.budgets.find(budget_query, {"_id": 0}).to_list(1000)
     
     # Get movements
     movement_query = {"status": MovementStatus.POSTED.value}
-    if project_id:
-        movement_query["project_id"] = project_id
-    elif empresa_id:
+    if project_selector != "all":
+        movement_query["project_id"] = project_selector
+    elif company_selector != "all":
         movement_query["project_id"] = {"$in": project_ids}
     
     all_movements = await db.movements.find(movement_active_query(extra=movement_query), {"_id": 0}).to_list(5000)
@@ -6268,8 +6279,8 @@ async def get_export_data(
     
     # Build filter description
     filter_desc = {
-        "empresa": empresa_map.get(empresa_id, {}).get('nombre', 'Todas') if empresa_id else "Todas",
-        "proyecto": project_map.get(project_id, {}).get('name', 'Todos') if project_id else "Todos",
+        "empresa": empresa_map.get(company_selector, {}).get('nombre', 'Todas') if company_selector != "all" else "Todas",
+        "proyecto": project_map.get(project_selector, {}).get('name', 'Todos') if project_selector != "all" else "Todos",
         "año": year,
         "mes": month
     }

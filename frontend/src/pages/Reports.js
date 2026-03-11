@@ -20,7 +20,6 @@ import {
 
 const Reports = () => {
   const { api } = useAuth();
-  const [dashboardData, setDashboardData] = useState(null);
   const [partidaDetail, setPartidaDetail] = useState(null);
   const [empresas, setEmpresas] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -39,7 +38,7 @@ const Reports = () => {
   const [filters, setFilters] = useState({
     empresa_id: "all",
     project_id: "all",
-    year: 2025,
+    year: new Date().getFullYear(),
     month: 1
   });
 
@@ -55,19 +54,10 @@ const Reports = () => {
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [dashboardRes, empresasRes, projectsRes] = await Promise.all([
-        api().get("/reports/dashboard", {
-          params: {
-            empresa_id: filters.empresa_id !== "all" ? filters.empresa_id : undefined,
-            project_id: filters.project_id !== "all" ? filters.project_id : undefined,
-            year: filters.year,
-            month: filters.month
-          }
-        }),
+      const [empresasRes, projectsRes] = await Promise.all([
         api().get("/empresas"),
         api().get("/projects")
       ]);
-      setDashboardData(dashboardRes.data);
       setEmpresas(empresasRes.data);
       setProjects(projectsRes.data);
     } catch (error) {
@@ -75,7 +65,7 @@ const Reports = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [api, filters]);
+  }, [api]);
 
   useEffect(() => {
     fetchData();
@@ -94,8 +84,8 @@ const Reports = () => {
     try {
       const response = await api().get(`/reports/partida-detail/${partidaCodigo}`, {
         params: {
-          empresa_id: filters.empresa_id !== "all" ? filters.empresa_id : undefined,
-          project_id: filters.project_id !== "all" ? filters.project_id : undefined,
+          empresa_id: filters.empresa_id,
+          project_id: filters.project_id,
           year: filters.year,
           month: filters.month
         }
@@ -124,15 +114,14 @@ const Reports = () => {
   };
 
   const exportToExcel = async () => {
-    if (!dashboardData) return;
     setIsExporting(true);
     
     try {
       // Fetch export data from backend (logs audit)
       const response = await api().get("/reports/export-data", {
         params: {
-          empresa_id: filters.empresa_id !== "all" ? filters.empresa_id : undefined,
-          project_id: filters.project_id !== "all" ? filters.project_id : undefined,
+          empresa_id: filters.empresa_id,
+          project_id: filters.project_id,
           year: filters.year,
           month: filters.month
         }
@@ -163,14 +152,14 @@ const Reports = () => {
       
       // HOJA 2: DETALLE POR PARTIDA
       const detalleHeader = ["Código", "Partida", "Grupo", "Presupuesto", "Ejecutado", "Variación", "% Avance", "Semáforo"];
-      const detalleRows = data.detalle_partidas.map(p => [
+      const detalleRows = (data.detalle_partidas || []).map(p => [
         p.codigo,
         p.nombre,
         p.grupo,
         p.presupuesto,
         p.ejecutado,
         p.variacion,
-        `${p.porcentaje.toFixed(1)}%`,
+        `${Number(p.porcentaje || 0).toFixed(1)}%`,
         p.semaforo
       ]);
       
@@ -320,7 +309,7 @@ const Reports = () => {
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <h1 className="font-heading text-3xl font-bold tracking-tight">Reportes</h1>
-          <p className="text-muted-foreground">Análisis, importación y exportación de datos financieros</p>
+          <p className="text-muted-foreground">Centro de descarga e importación de datos financieros</p>
         </div>
         
         <div className="flex gap-2">
@@ -474,7 +463,7 @@ const Reports = () => {
           </Dialog>
           
           {/* Export Excel Button */}
-          <Button onClick={exportToExcel} disabled={!dashboardData || isExporting} data-testid="export-excel-btn">
+          <Button onClick={exportToExcel} disabled={isExporting} data-testid="export-excel-btn">
             {isExporting ? (
               <Loader2 className="h-4 w-4 mr-2 animate-spin" />
             ) : (
@@ -552,99 +541,19 @@ const Reports = () => {
         </CardContent>
       </Card>
 
-      {/* Summary */}
       {isLoading ? (
         <div className="flex justify-center py-8">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
-      ) : dashboardData && (
-        <>
-          {/* KPIs Summary */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="metric-card">
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Presupuesto</span>
-              <p className="text-2xl font-bold font-mono mt-2">{formatCurrency(dashboardData.totals.budget)}</p>
-            </div>
-            <div className="metric-card">
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Ejecutado</span>
-              <p className="text-2xl font-bold font-mono mt-2">{formatCurrency(dashboardData.totals.real)}</p>
-            </div>
-            <div className="metric-card">
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Variación</span>
-              <p className={`text-2xl font-bold font-mono mt-2 ${dashboardData.totals.variation >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                {formatCurrency(dashboardData.totals.variation)}
-              </p>
-            </div>
-            <div className="metric-card">
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Estado</span>
-              <div className="mt-2">
-                <TrafficLight 
-                  status={dashboardData.totals.traffic_light} 
-                  percentage={dashboardData.totals.percentage}
-                  size="lg"
-                />
-              </div>
-            </div>
-          </div>
+      ) : (
+        <Card>
+          <CardContent className="pt-6 text-muted-foreground">
+            Exporta reportes por empresa/proyecto/mes y consulta detalle por código de partida cuando lo necesites.
+          </CardContent>
+        </Card>
+      )}
 
-          {/* Partidas Table */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="font-heading text-lg">Detalle por Partida</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="overflow-x-auto">
-                <table className="data-table" data-testid="partidas-report-table">
-                  <thead>
-                    <tr>
-                      <th>Código</th>
-                      <th>Partida</th>
-                      <th>Grupo</th>
-                      <th className="text-right">Presupuesto</th>
-                      <th className="text-right">Ejecutado</th>
-                      <th className="text-right">Variación</th>
-                      <th className="text-right">% Avance</th>
-                      <th>Estado</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dashboardData.by_partida.map(partida => (
-                      <tr 
-                        key={partida.partida_codigo}
-                        className={selectedPartida === partida.partida_codigo ? "bg-primary/5" : ""}
-                      >
-                        <td className="font-mono text-sm">{partida.partida_codigo}</td>
-                        <td>{partida.partida_nombre}</td>
-                        <td className="text-xs text-muted-foreground uppercase">{partida.partida_grupo}</td>
-                        <td className="mono-number">{formatCurrency(partida.budget)}</td>
-                        <td className="mono-number">{formatCurrency(partida.real)}</td>
-                        <td className={`mono-number ${partida.variation >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                          {formatCurrency(partida.variation)}
-                        </td>
-                        <td className="mono-number">{partida.percentage.toFixed(1)}%</td>
-                        <td>
-                          <TrafficLight status={partida.traffic_light} showLabel={false} size="sm" />
-                        </td>
-                        <td>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => fetchPartidaDetail(partida.partida_codigo)}
-                            data-testid={`view-detail-${partida.partida_codigo}`}
-                          >
-                            Ver detalle
-                          </Button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Partida Detail */}
+      {/* Partida Detail */}
           {partidaDetail && (
             <Card>
               <CardHeader className="flex flex-row items-center justify-between">
@@ -722,8 +631,6 @@ const Reports = () => {
               </CardContent>
             </Card>
           )}
-        </>
-      )}
     </div>
   );
 };
