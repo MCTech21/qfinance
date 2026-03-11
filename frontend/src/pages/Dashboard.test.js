@@ -17,6 +17,7 @@ jest.mock("sonner", () => ({ toast: { error: jest.fn() } }));
 const baseDashboardPayload = {
   filtros: { period_label: "2026-01", empresa_nombre: "Empresa", project_nombre: "Proyecto" },
   totals: { ingreso_proyectado_405: 1000, presupuesto_total: 500, ejecutado_total: 200, por_ejercer_total: 300, traffic_light: "green", ejecucion_vs_ingreso_pct: 20 },
+  meta: { income_source: "inventory_total", income_source_label: "Inventario total", income_source_available_flags: { inventory_total: true } },
   shared_kpis: { ingreso_proyectado_405: 1000, presupuesto_total: 500, real_ejecutado: 200, por_ejercer: 300, ejecucion_vs_ingreso_pct: 20 },
   pnl: {
     rows: [
@@ -115,17 +116,25 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => expect(screen.getByTestId("kpi-grid")).toBeInTheDocument());
-    expect(mockGet).toHaveBeenCalledWith("/reports/dashboard", {
-      params: expect.objectContaining({
-        empresa_id: "all",
-        project_id: "all",
-        period: "all",
-      }),
-    });
-
     const dashboardCall = mockGet.mock.calls.find((call) => call[0] === "/reports/dashboard");
+    expect(dashboardCall[1].params).toEqual(expect.objectContaining({
+      empresa_id: "all",
+      project_id: "all",
+      period: "all",
+    }));
     expect(dashboardCall[1].params.month).toBeUndefined();
     expect(dashboardCall[1].params.quarter).toBeUndefined();
+  });
+
+  test("nunca envía month y quarter simultáneamente", async () => {
+    render(<Dashboard />);
+
+    await waitFor(() => expect(screen.getByTestId("kpi-grid")).toBeInTheDocument());
+    const dashboardCalls = mockGet.mock.calls.filter((call) => call[0] === "/reports/dashboard");
+    dashboardCalls.forEach((call) => {
+      const params = call[1].params || {};
+      expect(!(params.month !== undefined && params.quarter !== undefined)).toBe(true);
+    });
   });
 
   test("muestra S/I cuando no hay ingreso proyectado 405", async () => {
@@ -136,6 +145,7 @@ describe("Dashboard", () => {
             ...baseDashboardPayload,
             totals: { ...baseDashboardPayload.totals, ingreso_proyectado_405: 0, ejecucion_vs_ingreso_pct: null },
             shared_kpis: { ...baseDashboardPayload.shared_kpis, ingreso_proyectado_405: 0, ejecucion_vs_ingreso_pct: null },
+            meta: { income_source: "none", income_source_label: "Sin fuente", income_source_available_flags: {} },
           },
         });
       }

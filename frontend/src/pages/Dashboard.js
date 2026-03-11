@@ -1,5 +1,5 @@
 import { buildYearOptions } from "../lib/yearRange";
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useAuth } from "../context/AuthContext";
 import { toast } from "sonner";
 import KPICard from "../components/KPICard";
@@ -27,6 +27,8 @@ const Dashboard = () => {
 
   const yearOptions = buildYearOptions();
   const isAdmin = user?.role === "admin";
+  const abortRef = useRef(null);
+  const requestKeyRef = useRef(null);
 
   const months = [
     { value: 1, label: "Enero" }, { value: 2, label: "Febrero" }, { value: 3, label: "Marzo" },
@@ -35,51 +37,17 @@ const Dashboard = () => {
     { value: 10, label: "Octubre" }, { value: 11, label: "Noviembre" }, { value: 12, label: "Diciembre" },
   ];
 
-  const isProjectSelectionValid = useMemo(() => {
-    if (selectedProject === "all") return true;
-    return filteredProjects.some((p) => p.id === selectedProject);
-  }, [filteredProjects, selectedProject]);
-
   const requestParams = useMemo(() => {
     const params = {
-      empresa_id: selectedEmpresa,
-      project_id: selectedProject,
-      period: selectedPeriod,
+      empresa_id: selectedEmpresa || "all",
+      project_id: selectedProject || "all",
+      period: selectedPeriod || "all",
       year: selectedYear,
     };
-    if (selectedPeriod === "month") params.month = selectedMonth;
-    if (selectedPeriod === "quarter") params.quarter = selectedQuarter;
+    if (params.period === "month") params.month = selectedMonth;
+    if (params.period === "quarter") params.quarter = selectedQuarter;
     return params;
   }, [selectedEmpresa, selectedProject, selectedPeriod, selectedYear, selectedMonth, selectedQuarter]);
-
-  const fetchDashboard = useCallback(async () => {
-    if (!isProjectSelectionValid) return;
-    setIsLoading(true);
-    setIsError(false);
-    try {
-      const reportsRes = await api().get("/reports/dashboard", { params: requestParams });
-      setDashboardData(reportsRes.data);
-    } catch (error) {
-      setIsError(true);
-      toast.error(error?.response?.data?.detail?.message || "Error al cargar dashboard");
-    } finally {
-      setIsLoading(false);
-    }
-  }, [api, isProjectSelectionValid, requestParams]);
-
-  const fetchScopeOptions = useCallback(async () => {
-    try {
-      const [empresasRes, projectsRes] = await Promise.all([api().get("/empresas"), api().get("/projects")]);
-      const permitted = isAdmin ? (empresasRes.data || []) : (empresasRes.data || []).filter((e) => (allowedCompanies || []).some((ac) => ac.id === e.id));
-      setEmpresas(permitted);
-      setProjects(projectsRes.data || []);
-    } catch (error) {
-      toast.error(error?.response?.data?.detail?.message || "Error al cargar catálogo de filtros");
-    }
-  }, [api, allowedCompanies, isAdmin]);
-
-  useEffect(() => { fetchScopeOptions(); }, [fetchScopeOptions]);
-  useEffect(() => { fetchDashboard(); }, [fetchDashboard]);
 
   useEffect(() => {
     const scopedProjects = selectedEmpresa === "all" ? projects : projects.filter((p) => p.empresa_id === selectedEmpresa);
@@ -90,6 +58,59 @@ const Dashboard = () => {
       setSelectedProject("all");
     }
   }, [selectedEmpresa, projects, allowedCompanies, isAdmin, selectedProject]);
+
+  useEffect(() => {
+    const fetchScopeOptions = async () => {
+      try {
+        const [empresasRes, projectsRes] = await Promise.all([api().get("/empresas"), api().get("/projects")]);
+        const permitted = isAdmin ? (empresasRes.data || []) : (empresasRes.data || []).filter((e) => (allowedCompanies || []).some((ac) => ac.id === e.id));
+        setEmpresas(permitted);
+        setProjects(projectsRes.data || []);
+      } catch (error) {
+        toast.error(error?.response?.data?.detail?.message || "Error al cargar catálogo de filtros");
+      }
+    };
+
+    fetchScopeOptions();
+  }, [api, allowedCompanies, isAdmin]);
+
+  useEffect(() => {
+    const key = JSON.stringify(requestParams);
+    if (requestKeyRef.current === key) return;
+    requestKeyRef.current = key;
+
+    if (abortRef.current) {
+      abortRef.current.abort();
+    }
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    const fetchDashboard = async () => {
+      setIsLoading(true);
+      setIsError(false);
+      try {
+        const reportsRes = await api().get("/reports/dashboard", { params: requestParams, signal: controller.signal });
+        if (!controller.signal.aborted) {
+          setDashboardData(reportsRes.data);
+        }
+      } catch (error) {
+        if (error?.name === "CanceledError" || error?.code === "ERR_CANCELED" || controller.signal.aborted) {
+          return;
+        }
+        setIsError(true);
+        toast.error(error?.response?.data?.detail?.message || "Error al cargar dashboard");
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    fetchDashboard();
+
+    return () => controller.abort();
+  }, [api, requestParams]);
 
   const formatCurrency = (num) => new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(num || 0);
   const formatPct = (num) => (num === null || num === undefined ? "S/I" : `${Number(num).toFixed(2)}%`);
@@ -103,7 +124,8 @@ const Dashboard = () => {
   const projectionKpis = projection?.kpis || {};
   const projectionAssumptions = projection?.assumptions || [];
   const ingreso405 = shared.ingreso_proyectado_405 ?? dashboardData?.totals?.ingreso_proyectado_405 ?? 0;
-  const hasProjectedIncome = Number(ingreso405) > 0;
+  const hasProjectedIncomeSource = (dashboardData?.meta?.income_source || "none") !== "none";
+  const hasProjectedIncome = hasProjectedIncomeSource && Number(ingreso405) >= 0;
 
   if (isLoading) return <div className="space-y-6 animate-pulse"><div className="h-8 w-48 bg-muted rounded" /></div>;
 
@@ -116,15 +138,15 @@ const Dashboard = () => {
         </div>
 
         <div className="flex flex-wrap gap-3">
-          <Select value={selectedEmpresa} onValueChange={(value) => { setSelectedEmpresa(value); setSelectedProject("all"); }}>
+          <Select value={selectedEmpresa} onValueChange={(value) => { setSelectedEmpresa(value || "all"); setSelectedProject("all"); }}>
             <SelectTrigger className="w-[200px]"><SelectValue placeholder="Empresa" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Todas las empresas</SelectItem>
               {empresas.map((e) => <SelectItem key={e.id} value={e.id}>{e.nombre}</SelectItem>)}
             </SelectContent>
           </Select>
-          <Select value={selectedProject} onValueChange={setSelectedProject}><SelectTrigger className="w-[180px]"><SelectValue placeholder="Proyecto" /></SelectTrigger><SelectContent><SelectItem value="all">Todos los proyectos</SelectItem>{filteredProjects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent></Select>
-          <Select value={selectedPeriod} onValueChange={setSelectedPeriod}><SelectTrigger className="w-[150px]"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">TODO</SelectItem><SelectItem value="month">Mensual</SelectItem><SelectItem value="quarter">Trimestral</SelectItem><SelectItem value="year">Anual</SelectItem></SelectContent></Select>
+          <Select value={selectedProject} onValueChange={(value) => setSelectedProject(value || "all")}><SelectTrigger className="w-[180px]"><SelectValue placeholder="Proyecto" /></SelectTrigger><SelectContent><SelectItem value="all">Todos los proyectos</SelectItem>{filteredProjects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent></Select>
+          <Select value={selectedPeriod} onValueChange={(value) => setSelectedPeriod(value || "all")}><SelectTrigger className="w-[150px]"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">TODO</SelectItem><SelectItem value="month">Mensual</SelectItem><SelectItem value="quarter">Trimestral</SelectItem><SelectItem value="year">Anual</SelectItem></SelectContent></Select>
           {selectedPeriod === "month" && <Select value={String(selectedMonth)} onValueChange={(v) => setSelectedMonth(Number(v))}><SelectTrigger className="w-[140px]"><SelectValue /></SelectTrigger><SelectContent>{months.map((m) => <SelectItem key={m.value} value={String(m.value)}>{m.label}</SelectItem>)}</SelectContent></Select>}
           {selectedPeriod === "quarter" && <Select value={String(selectedQuarter)} onValueChange={(v) => setSelectedQuarter(Number(v))}><SelectTrigger className="w-[120px]"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="1">Q1</SelectItem><SelectItem value="2">Q2</SelectItem><SelectItem value="3">Q3</SelectItem><SelectItem value="4">Q4</SelectItem></SelectContent></Select>}
           <Select value={String(selectedYear)} onValueChange={(v) => setSelectedYear(Number(v))}><SelectTrigger className="w-[100px]"><SelectValue /></SelectTrigger><SelectContent>{yearOptions.map((y) => <SelectItem key={y} value={String(y)}>{y}</SelectItem>)}</SelectContent></Select>
@@ -132,11 +154,11 @@ const Dashboard = () => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4" data-testid="kpi-grid">
-        <KPICard title="Ingreso proyectado por inventario (405)" value={hasProjectedIncome ? ingreso405 : "S/I"} icon={Landmark} subtitle={hasProjectedIncome ? "Inventario" : "Sin ingresos proyectados capturados"} />
+        <KPICard title="Ingreso proyectado (base dashboard)" value={hasProjectedIncome ? ingreso405 : "S/I"} icon={Landmark} subtitle={hasProjectedIncome ? (dashboardData?.meta?.income_source_label || "Fuente disponible") : "Sin ingresos proyectados capturados"} />
         <KPICard title="Presupuesto total" value={shared.presupuesto_total || dashboardData?.totals?.presupuesto_total || 0} icon={Wallet} subtitle="Budgets" />
         <KPICard title="Real ejecutado" value={shared.real_ejecutado || dashboardData?.totals?.ejecutado_total || 0} icon={TrendingUp} variant="inverse" />
         <KPICard title="Por ejercer" value={shared.por_ejercer || dashboardData?.totals?.por_ejercer_total || 0} icon={(shared.por_ejercer || dashboardData?.totals?.por_ejercer_total || 0) >= 0 ? CheckCircle : AlertTriangle} />
-        <Card><CardContent className="pt-6"><TrafficLight status={dashboardData?.totals?.traffic_light} percentage={shared.ejecucion_vs_ingreso_pct || dashboardData?.totals?.ejecucion_vs_ingreso_pct || 0} size="lg" /></CardContent></Card>
+        <Card><CardContent className="pt-6"><TrafficLight status={dashboardData?.totals?.traffic_light} percentage={shared.ejecucion_vs_ingreso_pct ?? dashboardData?.totals?.ejecucion_vs_ingreso_pct} size="lg" /></CardContent></Card>
       </div>
 
       {isError ? <Card><CardContent className="pt-6 text-muted-foreground" data-testid="error-state">No se pudo cargar el dashboard.</CardContent></Card> : null}
