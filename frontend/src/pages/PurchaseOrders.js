@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Badge } from "../components/ui/badge";
 import { Plus, FileDown, Send, XCircle, Pencil, Trash2, Eye, Loader2 } from "lucide-react";
 import ProviderSelect from "../components/ProviderSelect";
+import { calcIvaWithholdingAmount, calcLine, moneyRound, normalizeAmount } from "./purchaseOrderTaxes";
 
 const STATUS_LABELS = {
   draft: { label: "Borrador", variant: "secondary" },
@@ -57,32 +58,7 @@ const emptyForm = {
   lines: [emptyLine()],
 };
 
-const normalizeAmount = (value) => {
-  if (value === null || value === undefined) return 0;
-  const raw = String(value).replaceAll(",", "").trim();
-  if (!raw) return 0;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : 0;
-};
-
-const moneyRound = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
-
 const toDisplayAmount = (value) => Number(normalizeAmount(value || 0)).toFixed(2);
-
-const calcLine = (line) => {
-  const qty = normalizeAmount(line.qty);
-  const price = normalizeAmount(line.price_unit);
-  const discountPct = normalizeAmount(line.discount_pct);
-  const iva = normalizeAmount(line.iva_rate);
-  const isrRate = line.apply_isr_withholding ? normalizeAmount(line.isr_withholding_rate) : 0;
-  const subtotalBeforeDiscount = moneyRound(qty * price);
-  const discountAmount = moneyRound(subtotalBeforeDiscount * (discountPct / 100));
-  const taxableBase = moneyRound(subtotalBeforeDiscount - discountAmount);
-  const ivaAmount = moneyRound(taxableBase * (iva / 100));
-  const isrAmount = moneyRound(taxableBase * (isrRate / 100));
-  const lineTotal = moneyRound(taxableBase + ivaAmount - isrAmount);
-  return { subtotalBeforeDiscount, discountAmount, taxableBase, ivaAmount, isrAmount, lineTotal };
-};
 
 const getApiMessage = (error, fallback = "Ocurrió un error") => {
   const detail = error?.response?.data?.detail;
@@ -147,15 +123,17 @@ const PurchaseOrders = () => {
   const egresoPartidas = useMemo(() => partidas.filter((p) => !String(p.codigo || "").startsWith("4")), [partidas]);
 
   const formTotals = useMemo(() => {
-    return form.lines.reduce((acc, line) => {
+    const baseTotals = form.lines.reduce((acc, line) => {
       const c = calcLine(line);
       acc.subtotal += c.taxableBase;
       acc.tax += c.ivaAmount;
       acc.withholding += c.isrAmount;
-      acc.total += c.lineTotal;
       return acc;
-    }, { subtotal: 0, tax: 0, withholding: 0, total: 0 });
-  }, [form.lines]);
+    }, { subtotal: 0, tax: 0, withholding: 0 });
+    const ivaWithholding = calcIvaWithholdingAmount(baseTotals.tax, form.apply_iva_withholding, form.iva_withholding_rate);
+    const total = moneyRound(baseTotals.subtotal + baseTotals.tax - baseTotals.withholding - ivaWithholding);
+    return { ...baseTotals, ivaWithholding, total };
+  }, [form.lines, form.apply_iva_withholding, form.iva_withholding_rate]);
 
   const exchangeRateValue = useMemo(() => {
     if (form.currency === "MXN") return 1;
@@ -340,6 +318,8 @@ const PurchaseOrders = () => {
     vendor_address: form.vendor_address || null,
     currency: form.currency,
     exchange_rate: form.exchange_rate || "1",
+    apply_iva_withholding: Boolean(form.apply_iva_withholding),
+    iva_withholding_rate: form.apply_iva_withholding ? (form.iva_withholding_rate || "0") : "0",
     order_date: form.order_date,
     planned_date: form.planned_date || null,
     notes: form.notes || null,
@@ -362,6 +342,7 @@ const PurchaseOrders = () => {
     if (!form.project_id) return "Proyecto es obligatorio";
     if (!form.vendor_name.trim()) return "Proveedor es obligatorio";
     if (!form.lines.length) return "Debe capturar al menos una línea";
+    if (form.apply_iva_withholding && normalizeAmount(form.iva_withholding_rate) <= 0) return "% Retención IVA debe ser mayor a 0";
     for (const line of form.lines) {
       if (!line.partida_codigo) return "Partida es obligatoria";
       if (String(line.partida_codigo).startsWith("4")) return "Partidas de ingreso (4xx) no permitidas en OC";
@@ -588,6 +569,7 @@ const PurchaseOrders = () => {
               <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Subtotal base</p><p className="font-semibold">{formTotals.subtotal.toFixed(2)}</p></div>
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">IVA total</p><p className="font-semibold">{formTotals.tax.toFixed(2)}</p></div>
+                <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Ret IVA</p><p className="font-semibold">{formTotals.ivaWithholding.toFixed(2)}</p></div>
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Ret ISR</p><p className="font-semibold">{formTotals.withholding.toFixed(2)}</p></div>
                 <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Total OC ({form.currency})</p><p className="font-semibold">{formTotals.total.toFixed(2)}</p></div>
                 {form.currency !== "MXN" && <div className="rounded-md border p-2"><p className="text-xs text-muted-foreground">Total OC (MXN)</p><p className="font-semibold">{totalMxn.toFixed(2)}</p></div>}

@@ -652,3 +652,55 @@ def test_purchase_order_pdf_handles_long_description_and_large_amounts():
     assert "TOTAL (MXN)" in pdf_text
     assert "Folio: LARGE" in pdf_text
     assert "HUMAN SOLUTIONS" in pdf_text
+
+
+def test_purchase_order_iva_withholding_disabled_keeps_zero_and_total_unchanged():
+    client, db = client_for("finanzas")
+    payload = po_payload(ext="OC-IVA-0", total_line="100.00")
+    payload["apply_iva_withholding"] = False
+    payload["iva_withholding_rate"] = "10"
+
+    res = client.post("/api/purchase-orders", json=payload)
+    assert res.status_code == 200
+    po = res.json()["purchase_order"]
+
+    assert po["iva_withholding_total"] == "0.00"
+    assert po["total"] == "116.00"
+    saved = next((row for row in db.purchase_orders.rows if row.get("id") == po["id"]), None)
+    assert saved is not None
+    assert saved.get("iva_withholding_total") == "0.00"
+
+
+def test_purchase_order_iva_withholding_enabled_affects_totals_persistence_response_and_pdf():
+    client, db = client_for("finanzas")
+    payload = po_payload(ext="OC-IVA-1", total_line="100.00")
+    payload["apply_iva_withholding"] = True
+    payload["iva_withholding_rate"] = "10"
+    payload["lines"][0]["apply_isr_withholding"] = True
+    payload["lines"][0]["isr_withholding_rate"] = "10"
+
+    created = client.post("/api/purchase-orders", json=payload)
+    assert created.status_code == 200
+    po = created.json()["purchase_order"]
+
+    assert po["apply_iva_withholding"] is True
+    assert po["iva_withholding_rate"] == "10.00"
+    assert po["iva_withholding_total"] == "1.60"
+    assert po["withholding_isr_total"] == "10.00"
+    assert po["total"] == "104.40"
+
+    saved = next((row for row in db.purchase_orders.rows if row.get("id") == po["id"]), None)
+    assert saved is not None
+    assert saved.get("apply_iva_withholding") is True
+    assert saved.get("iva_withholding_total") == "1.60"
+    assert saved.get("total") == "104.40"
+
+    detail = client.get(f"/api/purchase-orders/{po['id']}")
+    assert detail.status_code == 200
+    detail_po = detail.json()
+    assert detail_po["iva_withholding_total"] == "1.60"
+    assert detail_po["withholding_isr_total"] == "10.00"
+
+    pdf_res = client.get(f"/api/purchase-orders/{po['id']}/pdf")
+    assert pdf_res.status_code == 200
+    assert "Ret IVA (10.00%)" in _pdf_text(pdf_res.content)
