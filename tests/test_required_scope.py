@@ -678,6 +678,55 @@ def test_reports_dashboard_budget_control_rows_and_summary_and_zero_budget_cases
     assert payload["meta"]["budget_control_committed_policy"]
 
 
+def test_reports_dashboard_budget_control_uses_posted_real_and_pending_commitments_with_period_scope():
+    c, db = make_client(role="admin")
+    db.catalogo_partidas.rows.extend([
+        {"codigo": "101", "nombre": "TERRENO", "grupo": "COSTOS DIRECTOS", "is_active": True},
+        {"codigo": "103", "nombre": "URBANIZACION", "grupo": "COSTOS DIRECTOS", "is_active": True},
+    ])
+    db.budgets.rows.append({"id": "b103", "project_id": "p1", "partida_codigo": "103", "year": 2026, "month": 1, "amount_mxn": 1000})
+    db.movements.rows.extend([
+        {"id": "m-expense", "project_id": "p1", "partida_codigo": "103", "status": "posted", "is_deleted": False, "date": "2026-01-15T00:00:00+00:00", "amount_mxn": -400},
+    ])
+    db.purchase_orders.rows.extend([
+        {
+            "id": "po-pending-in-period",
+            "project_id": "p1",
+            "status": "pending_approval",
+            "order_date": "2026-01-20T00:00:00+00:00",
+            "currency": "MXN",
+            "total": "100.00",
+            "approved_amount_total": "40.00",
+            "pending_amount": "60.00",
+            "lines": [{"partida_codigo": "103", "line_total": "100.00"}],
+        },
+        {
+            "id": "po-approved-out-of-period",
+            "project_id": "p1",
+            "status": "approved_for_payment",
+            "order_date": "2026-02-15T00:00:00+00:00",
+            "currency": "MXN",
+            "total": "300.00",
+            "pending_amount": "300.00",
+            "lines": [{"partida_codigo": "103", "line_total": "300.00"}],
+        },
+    ])
+
+    r = c.get('/api/reports/dashboard', params={"empresa_id": "c1", "project_id": "p1", "period": "month", "year": 2026, "month": 1})
+    assert r.status_code == 200
+    payload = r.json()
+
+    row103 = next(x for x in payload["budget_control"]["rows"] if x["code"] == "103")
+    assert row103["real"] == 400.0
+    assert row103["committed"] == 60.0
+    assert row103["available"] == 540.0
+    assert row103["advance_pct"] == 40.0
+
+    summary = payload["budget_control"]["summary"]
+    assert summary["committed_total"] == 60.0
+    assert payload["meta"]["budget_control_committed_policy"]
+
+
 def test_reports_dashboard_defaults_to_all_period_and_accepts_todo_alias_for_selectors():
     c, _ = make_client(role="admin")
 
