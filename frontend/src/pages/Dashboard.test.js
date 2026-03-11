@@ -127,4 +127,27 @@ describe("Dashboard", () => {
     expect(dashboardCall[1].params.month).toBeUndefined();
     expect(dashboardCall[1].params.quarter).toBeUndefined();
   });
+
+  test("muestra S/I cuando no hay ingreso proyectado 405", async () => {
+    mockGet.mockImplementation((url) => {
+      if (url === "/reports/dashboard") {
+        return Promise.resolve({
+          data: {
+            ...baseDashboardPayload,
+            totals: { ...baseDashboardPayload.totals, ingreso_proyectado_405: 0, ejecucion_vs_ingreso_pct: null },
+            shared_kpis: { ...baseDashboardPayload.shared_kpis, ingreso_proyectado_405: 0, ejecucion_vs_ingreso_pct: null },
+          },
+        });
+      }
+      if (url === "/empresas") return Promise.resolve({ data: [{ id: "c1", nombre: "Empresa" }] });
+      if (url === "/projects") return Promise.resolve({ data: [{ id: "p1", empresa_id: "c1", name: "Proyecto" }] });
+      return Promise.resolve({ data: {} });
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => expect(screen.getByTestId("kpi-grid")).toBeInTheDocument());
+    expect(screen.getByText("S/I")).toBeInTheDocument();
+    expect(screen.getByText(/Sin ingresos proyectados capturados/i)).toBeInTheDocument();
+  });
 });

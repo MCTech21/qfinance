@@ -1,5 +1,5 @@
 import { buildYearOptions } from "../lib/yearRange";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useAuth } from "../context/AuthContext";
 import { toast } from "sonner";
 import KPICard from "../components/KPICard";
@@ -35,14 +35,29 @@ const Dashboard = () => {
     { value: 10, label: "Octubre" }, { value: 11, label: "Noviembre" }, { value: 12, label: "Diciembre" },
   ];
 
+  const isProjectSelectionValid = useMemo(() => {
+    if (selectedProject === "all") return true;
+    return filteredProjects.some((p) => p.id === selectedProject);
+  }, [filteredProjects, selectedProject]);
+
+  const requestParams = useMemo(() => {
+    const params = {
+      empresa_id: selectedEmpresa,
+      project_id: selectedProject,
+      period: selectedPeriod,
+      year: selectedYear,
+    };
+    if (selectedPeriod === "month") params.month = selectedMonth;
+    if (selectedPeriod === "quarter") params.quarter = selectedQuarter;
+    return params;
+  }, [selectedEmpresa, selectedProject, selectedPeriod, selectedYear, selectedMonth, selectedQuarter]);
+
   const fetchDashboard = useCallback(async () => {
+    if (!isProjectSelectionValid) return;
     setIsLoading(true);
     setIsError(false);
     try {
-      const params = { empresa_id: selectedEmpresa, project_id: selectedProject, period: selectedPeriod, year: selectedYear };
-      if (selectedPeriod === "month") params.month = selectedMonth;
-      if (selectedPeriod === "quarter") params.quarter = selectedQuarter;
-      const reportsRes = await api().get("/reports/dashboard", { params });
+      const reportsRes = await api().get("/reports/dashboard", { params: requestParams });
       setDashboardData(reportsRes.data);
     } catch (error) {
       setIsError(true);
@@ -50,7 +65,7 @@ const Dashboard = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [api, selectedEmpresa, selectedProject, selectedYear, selectedMonth, selectedQuarter, selectedPeriod]);
+  }, [api, isProjectSelectionValid, requestParams]);
 
   const fetchScopeOptions = useCallback(async () => {
     try {
@@ -77,7 +92,7 @@ const Dashboard = () => {
   }, [selectedEmpresa, projects, allowedCompanies, isAdmin, selectedProject]);
 
   const formatCurrency = (num) => new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(num || 0);
-  const formatPct = (num) => (num === null || num === undefined ? "N/A" : `${Number(num).toFixed(2)}%`);
+  const formatPct = (num) => (num === null || num === undefined ? "S/I" : `${Number(num).toFixed(2)}%`);
 
   const shared = dashboardData?.shared_kpis || {};
   const pnlRows = dashboardData?.pnl?.rows || dashboardData?.rows || [];
@@ -87,6 +102,8 @@ const Dashboard = () => {
   const projectionRows = projection?.rows || [];
   const projectionKpis = projection?.kpis || {};
   const projectionAssumptions = projection?.assumptions || [];
+  const ingreso405 = shared.ingreso_proyectado_405 ?? dashboardData?.totals?.ingreso_proyectado_405 ?? 0;
+  const hasProjectedIncome = Number(ingreso405) > 0;
 
   if (isLoading) return <div className="space-y-6 animate-pulse"><div className="h-8 w-48 bg-muted rounded" /></div>;
 
@@ -99,7 +116,7 @@ const Dashboard = () => {
         </div>
 
         <div className="flex flex-wrap gap-3">
-          <Select value={selectedEmpresa} onValueChange={setSelectedEmpresa}>
+          <Select value={selectedEmpresa} onValueChange={(value) => { setSelectedEmpresa(value); setSelectedProject("all"); }}>
             <SelectTrigger className="w-[200px]"><SelectValue placeholder="Empresa" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Todas las empresas</SelectItem>
@@ -107,7 +124,7 @@ const Dashboard = () => {
             </SelectContent>
           </Select>
           <Select value={selectedProject} onValueChange={setSelectedProject}><SelectTrigger className="w-[180px]"><SelectValue placeholder="Proyecto" /></SelectTrigger><SelectContent><SelectItem value="all">Todos los proyectos</SelectItem>{filteredProjects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent></Select>
-          <Select value={selectedPeriod} onValueChange={setSelectedPeriod}><SelectTrigger className="w-[150px]"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="month">Mensual</SelectItem><SelectItem value="quarter">Trimestral</SelectItem><SelectItem value="year">Anual</SelectItem></SelectContent></Select>
+          <Select value={selectedPeriod} onValueChange={setSelectedPeriod}><SelectTrigger className="w-[150px]"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">TODO</SelectItem><SelectItem value="month">Mensual</SelectItem><SelectItem value="quarter">Trimestral</SelectItem><SelectItem value="year">Anual</SelectItem></SelectContent></Select>
           {selectedPeriod === "month" && <Select value={String(selectedMonth)} onValueChange={(v) => setSelectedMonth(Number(v))}><SelectTrigger className="w-[140px]"><SelectValue /></SelectTrigger><SelectContent>{months.map((m) => <SelectItem key={m.value} value={String(m.value)}>{m.label}</SelectItem>)}</SelectContent></Select>}
           {selectedPeriod === "quarter" && <Select value={String(selectedQuarter)} onValueChange={(v) => setSelectedQuarter(Number(v))}><SelectTrigger className="w-[120px]"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="1">Q1</SelectItem><SelectItem value="2">Q2</SelectItem><SelectItem value="3">Q3</SelectItem><SelectItem value="4">Q4</SelectItem></SelectContent></Select>}
           <Select value={String(selectedYear)} onValueChange={(v) => setSelectedYear(Number(v))}><SelectTrigger className="w-[100px]"><SelectValue /></SelectTrigger><SelectContent>{yearOptions.map((y) => <SelectItem key={y} value={String(y)}>{y}</SelectItem>)}</SelectContent></Select>
@@ -115,7 +132,7 @@ const Dashboard = () => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4" data-testid="kpi-grid">
-        <KPICard title="Ingreso proyectado por inventario (405)" value={shared.ingreso_proyectado_405 || dashboardData?.totals?.ingreso_proyectado_405 || 0} icon={Landmark} subtitle="Inventario" />
+        <KPICard title="Ingreso proyectado por inventario (405)" value={hasProjectedIncome ? ingreso405 : "S/I"} icon={Landmark} subtitle={hasProjectedIncome ? "Inventario" : "Sin ingresos proyectados capturados"} />
         <KPICard title="Presupuesto total" value={shared.presupuesto_total || dashboardData?.totals?.presupuesto_total || 0} icon={Wallet} subtitle="Budgets" />
         <KPICard title="Real ejecutado" value={shared.real_ejecutado || dashboardData?.totals?.ejecutado_total || 0} icon={TrendingUp} variant="inverse" />
         <KPICard title="Por ejercer" value={shared.por_ejercer || dashboardData?.totals?.por_ejercer_total || 0} icon={(shared.por_ejercer || dashboardData?.totals?.por_ejercer_total || 0) >= 0 ? CheckCircle : AlertTriangle} />

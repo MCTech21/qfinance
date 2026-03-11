@@ -749,3 +749,22 @@ def test_reports_dashboard_invalid_period_combinations_return_422_not_500():
 
     r_all_with_month = c.get('/api/reports/dashboard', params={"period": "all", "year": 2026, "month": 1})
     assert r_all_with_month.status_code == 422
+
+
+def test_reports_dashboard_project_out_of_scope_returns_403_not_500():
+    c, _ = make_client(role="gerencia", empresa_id="c1")
+    r = c.get('/api/reports/dashboard', params={"empresa_id": "c1", "project_id": "p2", "period": "all", "year": 2026})
+    assert r.status_code == 403
+
+
+def test_reports_export_data_accepts_all_aliases_and_validates_month():
+    c, _ = make_client(role="admin")
+
+    ok = c.get('/api/reports/export-data', params={"empresa_id": "TODAS", "project_id": "TODO", "year": 2026, "month": 1})
+    assert ok.status_code == 200
+    payload = ok.json()
+    assert payload["filtros"]["empresa"] == "Todas"
+    assert payload["filtros"]["proyecto"] == "Todos"
+
+    bad_month = c.get('/api/reports/export-data', params={"empresa_id": "all", "project_id": "all", "year": 2026, "month": 13})
+    assert bad_month.status_code == 422
