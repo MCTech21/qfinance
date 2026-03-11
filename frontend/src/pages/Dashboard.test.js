@@ -30,6 +30,32 @@ const baseDashboardPayload = {
       { code: "101", name: "TERRENO", group: "COSTOS DIRECTOS", budget: 100, real: 50, committed: 40, available: 10, advance_pct: 50, traffic_light: "green" },
     ],
   },
+  financial_projection: {
+    kpis: {
+      projected_income_remaining: 800,
+      pending_expense_remaining: 240,
+      projected_net_flow: 220,
+      projected_final_balance: 120,
+      max_funding_need: 90,
+      critical_cash_period: "2026-03",
+    },
+    assumptions: ["Escenario base del sistema."],
+    rows: [
+      {
+        period_label: "2026-01",
+        opening_balance: 0,
+        realized_income: 100,
+        projected_income: 200,
+        realized_expense: 50,
+        committed_expense: 20,
+        pending_budget_expense: 10,
+        net_flow: 220,
+        closing_balance: 220,
+        funding_required: 0,
+        traffic_light: "green",
+      },
+    ],
+  },
 };
 
 describe("Dashboard", () => {
@@ -57,7 +83,7 @@ describe("Dashboard", () => {
     expect(screen.getByTestId("kpi-grid")).toBeInTheDocument();
   });
 
-  test("renderiza placeholder de Proyección Financiera", async () => {
+  test("renderiza Proyección Financiera con KPIs y tabla", async () => {
     mockGet
       .mockResolvedValueOnce({ data: baseDashboardPayload })
       .mockResolvedValueOnce({ data: [{ id: "c1", nombre: "Empresa" }] })
@@ -67,12 +93,14 @@ describe("Dashboard", () => {
 
     await waitFor(() => expect(screen.getByRole("tab", { name: "Proyección Financiera" })).toBeInTheDocument());
     await userEvent.click(screen.getByRole("tab", { name: "Proyección Financiera" }));
-    expect(screen.getByTestId("projection-placeholder")).toBeInTheDocument();
+    expect(screen.getByTestId("projection-table")).toBeInTheDocument();
+    expect(screen.getByTestId("projection-assumptions")).toBeInTheDocument();
+    expect(screen.getByTestId("critical-period")).toHaveTextContent("2026-03");
   });
 
   test("muestra empty state en P&L y control", async () => {
     mockGet
-      .mockResolvedValueOnce({ data: { filtros: { period_label: "2026" }, totals: {}, shared_kpis: {}, pnl: { rows: [] }, budget_control: { rows: [], summary: {} } } })
+      .mockResolvedValueOnce({ data: { filtros: { period_label: "2026" }, totals: {}, shared_kpis: {}, pnl: { rows: [] }, budget_control: { rows: [], summary: {} }, financial_projection: { rows: [], kpis: {}, assumptions: [] } } })
       .mockResolvedValueOnce({ data: [] })
       .mockResolvedValueOnce({ data: [] });
 
@@ -81,5 +109,7 @@ describe("Dashboard", () => {
     await waitFor(() => expect(screen.getByTestId("empty-state")).toBeInTheDocument());
     await userEvent.click(screen.getByRole("tab", { name: "Control Presupuestal" }));
     expect(screen.getByTestId("budget-control-empty")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Proyección Financiera" }));
+    expect(screen.getByTestId("projection-empty")).toBeInTheDocument();
   });
 });
