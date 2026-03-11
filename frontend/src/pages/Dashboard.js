@@ -6,7 +6,8 @@ import KPICard from "../components/KPICard";
 import TrafficLight from "../components/TrafficLight";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { Wallet, TrendingUp, AlertTriangle, CheckCircle, Building, Landmark } from "lucide-react";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
+import { Wallet, TrendingUp, AlertTriangle, CheckCircle, Building, Landmark, ShieldAlert, CircleAlert, BriefcaseBusiness } from "lucide-react";
 
 const Dashboard = () => {
   const { api, allowedCompanies, user } = useAuth();
@@ -20,6 +21,7 @@ const Dashboard = () => {
   const [selectedMonth, setSelectedMonth] = useState(1);
   const [selectedQuarter, setSelectedQuarter] = useState(1);
   const [selectedPeriod, setSelectedPeriod] = useState("month");
+  const [activeTab, setActiveTab] = useState("pnl");
   const [isLoading, setIsLoading] = useState(true);
   const [isError, setIsError] = useState(false);
 
@@ -68,14 +70,19 @@ const Dashboard = () => {
   const formatCurrency = (num) => new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(num || 0);
   const formatPct = (num) => (num === null || num === undefined ? "N/A" : `${Number(num).toFixed(2)}%`);
 
+  const shared = dashboardData?.shared_kpis || {};
+  const pnlRows = dashboardData?.pnl?.rows || dashboardData?.rows || [];
+  const budgetRows = dashboardData?.budget_control?.rows || [];
+  const budgetSummary = dashboardData?.budget_control?.summary || {};
+
   if (isLoading) return <div className="space-y-6 animate-pulse"><div className="h-8 w-48 bg-muted rounded" /></div>;
 
   return (
     <div className="space-y-6" data-testid="dashboard-page">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
-          <h1 className="font-heading text-3xl font-bold tracking-tight">Dashboard Gerencial P&amp;L</h1>
-          <p className="text-muted-foreground">{dashboardData?.filtros?.period_label || "Resumen financiero"}</p>
+          <h1 className="font-heading text-3xl font-bold tracking-tight">Dashboard</h1>
+          <p className="text-muted-foreground" data-testid="dashboard-subtitle">{dashboardData?.filtros?.period_label || "Resumen financiero"} · {dashboardData?.filtros?.empresa_nombre || "Todas"} · {dashboardData?.filtros?.project_nombre || "Todos"}</p>
         </div>
 
         <div className="flex flex-wrap gap-3">
@@ -95,31 +102,96 @@ const Dashboard = () => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4" data-testid="kpi-grid">
-        <KPICard title="Ingreso proyectado 405" value={dashboardData?.totals?.ingreso_proyectado_405 || 0} icon={Landmark} subtitle="Inventario" />
-        <KPICard title="Presupuesto total" value={dashboardData?.totals?.presupuesto_total || 0} icon={Wallet} subtitle="Budgets" />
-        <KPICard title="Real ejecutado" value={dashboardData?.totals?.ejecutado_total || 0} icon={TrendingUp} variant="inverse" />
-        <KPICard title="Por ejercer" value={dashboardData?.totals?.por_ejercer_total || 0} icon={(dashboardData?.totals?.por_ejercer_total || 0) >= 0 ? CheckCircle : AlertTriangle} />
-        <Card><CardContent className="pt-6"><TrafficLight status={dashboardData?.totals?.traffic_light} percentage={dashboardData?.totals?.ejecucion_vs_ingreso_pct || 0} size="lg" /></CardContent></Card>
+        <KPICard title="Ingreso proyectado por inventario (405)" value={shared.ingreso_proyectado_405 || dashboardData?.totals?.ingreso_proyectado_405 || 0} icon={Landmark} subtitle="Inventario" />
+        <KPICard title="Presupuesto total" value={shared.presupuesto_total || dashboardData?.totals?.presupuesto_total || 0} icon={Wallet} subtitle="Budgets" />
+        <KPICard title="Real ejecutado" value={shared.real_ejecutado || dashboardData?.totals?.ejecutado_total || 0} icon={TrendingUp} variant="inverse" />
+        <KPICard title="Por ejercer" value={shared.por_ejercer || dashboardData?.totals?.por_ejercer_total || 0} icon={(shared.por_ejercer || dashboardData?.totals?.por_ejercer_total || 0) >= 0 ? CheckCircle : AlertTriangle} />
+        <Card><CardContent className="pt-6"><TrafficLight status={dashboardData?.totals?.traffic_light} percentage={shared.ejecucion_vs_ingreso_pct || dashboardData?.totals?.ejecucion_vs_ingreso_pct || 0} size="lg" /></CardContent></Card>
       </div>
 
-      {isError ? <Card><CardContent className="pt-6 text-muted-foreground">No se pudo cargar el dashboard.</CardContent></Card> : null}
+      {isError ? <Card><CardContent className="pt-6 text-muted-foreground" data-testid="error-state">No se pudo cargar el dashboard.</CardContent></Card> : null}
 
-      <Card><CardHeader><CardTitle className="font-heading text-lg flex items-center gap-2"><Building className="h-5 w-5" />Estado de resultados (P&amp;L)</CardTitle></CardHeader><CardContent>
-        {!(dashboardData?.rows || []).length ? <p className="text-muted-foreground" data-testid="empty-state">Sin datos para los filtros seleccionados.</p> : (
-          <div className="overflow-x-auto"><table className="data-table" data-testid="pl-table"><thead><tr><th>Concepto</th><th className="text-right">% s/ ingreso</th><th className="text-right">Presupuesto</th><th className="text-right">Real</th><th className="text-right">Por ejercer</th><th>Semáforo</th></tr></thead><tbody>
-            {(dashboardData?.rows || []).map((row, idx) => (
-              <tr key={`${row.code}-${idx}`} className={row.row_type === "subtotal" ? "font-semibold bg-muted/20" : ""}>
-                <td>{row.code} {row.name}</td>
-                <td className="mono-number text-right">{formatPct(row.income_pct)}</td>
-                <td className="mono-number text-right">{formatCurrency(row.budget)}</td>
-                <td className="mono-number text-right">{formatCurrency(row.real)}</td>
-                <td className="mono-number text-right">{formatCurrency(row.remaining)}</td>
-                <td><TrafficLight status={row.traffic_light} showLabel={false} size="sm" /></td>
-              </tr>
-            ))}
-          </tbody></table></div>
-        )}
-      </CardContent></Card>
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <TabsList>
+          <TabsTrigger value="pnl">P&amp;L</TabsTrigger>
+          <TabsTrigger value="control">Control Presupuestal</TabsTrigger>
+          <TabsTrigger value="projection">Proyección Financiera</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="pnl">
+          <Card>
+            <CardHeader><CardTitle className="font-heading text-lg flex items-center gap-2"><Building className="h-5 w-5" />Estado de resultados (P&amp;L)</CardTitle></CardHeader>
+            <CardContent>
+              {!pnlRows.length ? <p className="text-muted-foreground" data-testid="empty-state">Sin datos para los filtros seleccionados.</p> : (
+                <div className="overflow-x-auto"><table className="data-table" data-testid="pl-table"><thead><tr><th>Concepto</th><th className="text-right">% s/ ingreso</th><th className="text-right">Presupuesto</th><th className="text-right">Real</th><th className="text-right">Por ejercer</th><th>Semáforo</th></tr></thead><tbody>
+                  {pnlRows.map((row, idx) => (
+                    <tr key={`${row.code}-${idx}`} className={row.row_type === "subtotal" ? "font-semibold bg-muted/20" : ""}>
+                      <td>{row.code} {row.name}</td>
+                      <td className="mono-number text-right">{formatPct(row.income_pct)}</td>
+                      <td className="mono-number text-right">{formatCurrency(row.budget)}</td>
+                      <td className="mono-number text-right">{formatCurrency(row.real)}</td>
+                      <td className="mono-number text-right">{formatCurrency(row.remaining)}</td>
+                      <td><TrafficLight status={row.traffic_light} showLabel={false} size="sm" /></td>
+                    </tr>
+                  ))}
+                </tbody></table></div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="control">
+          <div className="space-y-4" data-testid="budget-control-view">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+              <KPICard title="Partidas en rojo" value={budgetSummary.red_count || 0} icon={ShieldAlert} />
+              <KPICard title="Partidas en amarillo" value={budgetSummary.yellow_count || 0} icon={CircleAlert} />
+              <KPICard title="Partidas con sobreejercicio" value={budgetSummary.overrun_count || 0} icon={AlertTriangle} />
+              <KPICard title="Comprometido total" value={budgetSummary.committed_total || 0} icon={BriefcaseBusiness} />
+              <KPICard title="Disponible total operativo" value={budgetSummary.available_total || 0} icon={Wallet} />
+            </div>
+
+            <Card>
+              <CardHeader><CardTitle className="font-heading text-lg">Control Presupuestal por partida</CardTitle></CardHeader>
+              <CardContent>
+                {!budgetRows.length ? <p className="text-muted-foreground" data-testid="budget-control-empty">Sin partidas presupuestales para los filtros seleccionados.</p> : (
+                  <div className="overflow-x-auto">
+                    <table className="data-table" data-testid="budget-control-table">
+                      <thead>
+                        <tr>
+                          <th>Código</th><th>Partida</th><th>Grupo</th>
+                          <th className="text-right">Presupuesto</th><th className="text-right">Real</th><th className="text-right">Comprometido</th><th className="text-right">Disponible</th><th className="text-right">% Avance</th><th>Semáforo</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {budgetRows.map((row) => (
+                          <tr key={row.code}>
+                            <td>{row.code}</td>
+                            <td>{row.name}</td>
+                            <td>{row.group}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.budget)}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.real)}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.committed)}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.available)}</td>
+                            <td className="mono-number text-right">{formatPct(row.advance_pct)}</td>
+                            <td><TrafficLight status={row.traffic_light === "neutral" ? "yellow" : row.traffic_light} showLabel={false} size="sm" /></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="projection">
+          <Card data-testid="projection-placeholder">
+            <CardHeader><CardTitle>Proyección Financiera</CardTitle></CardHeader>
+            <CardContent className="text-muted-foreground">Próximamente · Vista en construcción.</CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 };

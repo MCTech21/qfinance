@@ -5050,12 +5050,31 @@ PL_DIRECT_COST_CODES = ["101", "102", "103", "104", "105", "106", "107", "108", 
 PL_SELLING_ADMIN_CODES = ["201", "202", "203", "204", "205", "206", "207"]
 PL_FINANCIAL_CODES = ["301", "302"]
 PL_INCOME_CODE = "405"
+BUDGET_CONTROL_CODES = PL_DIRECT_COST_CODES + PL_SELLING_ADMIN_CODES + PL_FINANCIAL_CODES
 
 
 def _dashboard_safe_pct(numerator: Decimal, denominator: Decimal) -> Optional[Decimal]:
     if denominator <= 0:
         return None
     return ((numerator / denominator) * Decimal("100")).quantize(TWO_DECIMALS)
+
+
+def _budget_control_signal(budget: Decimal, real: Decimal, committed: Decimal) -> dict:
+    budget_q = money_dec(budget)
+    real_q = money_dec(real)
+    committed_q = money_dec(committed)
+    advance_pct = ((real_q / budget_q) * Decimal("100")).quantize(TWO_DECIMALS) if budget_q > 0 else None
+    if budget_q == 0 and real_q == 0 and committed_q == 0:
+        return {"traffic_light": "neutral", "advance_pct": None}
+    if budget_q == 0 and (real_q > 0 or committed_q > 0):
+        return {"traffic_light": "red", "advance_pct": None}
+    if advance_pct is None:
+        return {"traffic_light": "neutral", "advance_pct": None}
+    if advance_pct <= Decimal("90"):
+        return {"traffic_light": "green", "advance_pct": advance_pct}
+    if advance_pct <= Decimal("100"):
+        return {"traffic_light": "yellow", "advance_pct": advance_pct}
+    return {"traffic_light": "red", "advance_pct": advance_pct}
 
 
 def _expense_traffic_light(budget: Decimal, real: Decimal) -> str:
@@ -5273,14 +5292,45 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
                 "status_label": "SIN PRESUPUESTO (sin gasto)",
                 "variation_color": "neutral",
             },
+            "shared_kpis": {
+                "ingreso_proyectado_405": 0.0,
+                "presupuesto_total": 0.0,
+                "real_ejecutado": 0.0,
+                "por_ejercer": 0.0,
+                "ejecucion_vs_ingreso_pct": None,
+            },
             "by_partida": [],
             "rows": [],
             "subtotals": {},
+            "pnl": {
+                "rows": [],
+                "subtotals": {},
+            },
+            "budget_control": {
+                "summary": {
+                    "red_count": 0,
+                    "yellow_count": 0,
+                    "overrun_count": 0,
+                    "committed_total": 0.0,
+                    "available_total": 0.0,
+                },
+                "rows": [],
+                "totals": {
+                    "budget": 0.0,
+                    "real": 0.0,
+                    "committed": 0.0,
+                    "available": 0.0,
+                },
+            },
             "pending": {"count": 0, "total_mxn": 0.0},
             "pending_authorizations": await db.authorizations.count_documents({"status": "pending"}),
             "movements_count": 0,
             "include_pending": include_pending,
-            "meta": {"pending_budget_policy": "excluded_from_official_budget"},
+            "meta": {
+                "pending_budget_policy": "excluded_from_official_budget",
+                "budget_control_committed_policy": "purchase_orders.approved_for_payment pending_amount distributed by line ratio; excludes posted movements already in real",
+                "budget_control_available_policy": "budget - real - committed",
+            },
         }
 
     company_ids = sorted({str(p.get("empresa_id")) for p in projects if p.get("empresa_id")})
@@ -5418,6 +5468,81 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     }
 
     pending_total = sum((_to_period_decimal(m.get("amount_mxn", 0)) for m in pending_in_period), Decimal("0.00"))
+
+    budget_control_codes = set(BUDGET_CONTROL_CODES)
+    committed_by_partida: Dict[str, Decimal] = {code: Decimal("0.00") for code in BUDGET_CONTROL_CODES}
+    po_query = {
+        "project_id": {"$in": project_ids},
+        "status": PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value,
+    }
+    purchase_orders = await db.purchase_orders.find(po_query, {"_id": 0}).to_list(10000)
+    for po in purchase_orders:
+        po_total = money_dec(po.get("total_mxn") or po.get("total") or 0)
+        approved_amount_total = money_dec(po.get("approved_amount_total") or 0)
+        pending_amount = money_dec(po.get("pending_amount") or (po_total - approved_amount_total))
+        if pending_amount <= 0:
+            continue
+        lines = po.get("lines") or []
+        line_total_sum = Decimal("0.00")
+        line_amounts = []
+        for line in lines:
+            partida = str(line.get("partida_codigo") or "")
+            line_total = money_dec(line.get("line_total") or 0)
+            line_amount_mxn = line_total if po.get("currency") == Currency.MXN.value else (line_total * money_dec(po.get("exchange_rate") or 1)).quantize(TWO_DECIMALS)
+            line_amounts.append((partida, line_amount_mxn))
+            line_total_sum += line_amount_mxn
+        if line_total_sum <= 0:
+            continue
+        ratio = (pending_amount / line_total_sum)
+        for partida, line_amount in line_amounts:
+            if partida not in budget_control_codes:
+                continue
+            committed_by_partida[partida] = (committed_by_partida.get(partida, Decimal("0.00")) + (line_amount * ratio)).quantize(TWO_DECIMALS)
+
+    budget_control_rows = []
+    bc_totals = {
+        "budget": Decimal("0.00"),
+        "real": Decimal("0.00"),
+        "committed": Decimal("0.00"),
+        "available": Decimal("0.00"),
+    }
+    red_count = 0
+    yellow_count = 0
+    overrun_count = 0
+    for code in BUDGET_CONTROL_CODES:
+        values = by_partida.get(code, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
+        budget = money_dec(values.get("presupuesto") or 0)
+        real = money_dec(values.get("ejecutado") or 0)
+        committed = money_dec(committed_by_partida.get(code) or 0)
+        available = (budget - real - committed).quantize(TWO_DECIMALS)
+        signal = _budget_control_signal(budget, real, committed)
+        traffic_light = signal["traffic_light"]
+        advance_pct = signal["advance_pct"]
+        if traffic_light == "red":
+            red_count += 1
+        elif traffic_light == "yellow":
+            yellow_count += 1
+        if budget > 0 and real > budget:
+            overrun_count += 1
+        if budget == 0 and (real > 0 or committed > 0):
+            overrun_count += 1
+        part = partida_map.get(code, {})
+        budget_control_rows.append({
+            "code": code,
+            "name": part.get("nombre", code),
+            "group": _derive_partida_group(code, partida_map),
+            "budget": _dashboard_decimal_to_float(budget),
+            "real": _dashboard_decimal_to_float(real),
+            "committed": _dashboard_decimal_to_float(committed),
+            "available": _dashboard_decimal_to_float(available),
+            "advance_pct": _dashboard_decimal_to_float(advance_pct) if advance_pct is not None else None,
+            "traffic_light": traffic_light,
+        })
+        bc_totals["budget"] += budget
+        bc_totals["real"] += real
+        bc_totals["committed"] += committed
+        bc_totals["available"] += available
+
     company_name = "Todas" if company_selector == "all" else empresa_map.get(company_selector, company_selector)
     if project_selector == "all":
         project_name = "Todos"
@@ -5466,6 +5591,13 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "variation": _dashboard_decimal_to_float(total_signal["variacion"]),
             "percentage": _dashboard_decimal_to_float(total_signal["porcentaje"]) if total_signal["porcentaje"] is not None else None,
         },
+        "shared_kpis": {
+            "ingreso_proyectado_405": _dashboard_decimal_to_float(ingreso_405),
+            "presupuesto_total": _dashboard_decimal_to_float(total_budget),
+            "real_ejecutado": _dashboard_decimal_to_float(total_exec),
+            "por_ejercer": _dashboard_decimal_to_float(por_ejercer_total),
+            "ejecucion_vs_ingreso_pct": _dashboard_decimal_to_float(ejecucion_vs_ingreso_pct) if ejecucion_vs_ingreso_pct is not None else None,
+        },
         "pending": {
             "count": len(pending_in_period),
             "total_mxn": _dashboard_decimal_to_float(pending_total.quantize(TWO_DECIMALS)),
@@ -5473,6 +5605,26 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
         "by_partida": sorted(detail, key=lambda x: x.get("porcentaje", 0), reverse=True),
         "rows": pl_rows,
         "subtotals": subtotals,
+        "pnl": {
+            "rows": pl_rows,
+            "subtotals": subtotals,
+        },
+        "budget_control": {
+            "summary": {
+                "red_count": red_count,
+                "yellow_count": yellow_count,
+                "overrun_count": overrun_count,
+                "committed_total": _dashboard_decimal_to_float(bc_totals["committed"]),
+                "available_total": _dashboard_decimal_to_float(bc_totals["available"]),
+            },
+            "rows": budget_control_rows,
+            "totals": {
+                "budget": _dashboard_decimal_to_float(bc_totals["budget"]),
+                "real": _dashboard_decimal_to_float(bc_totals["real"]),
+                "committed": _dashboard_decimal_to_float(bc_totals["committed"]),
+                "available": _dashboard_decimal_to_float(bc_totals["available"]),
+            },
+        },
         "by_project": [],
         "corrida": corrida,
         "pending_authorizations": await db.authorizations.count_documents({"status": "pending"}),
@@ -5484,6 +5636,8 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "pending_budget_policy": "excluded_from_official_budget",
             "income_source": "inventory_items.precio_total",
             "income_partida_code": PL_INCOME_CODE,
+            "budget_control_committed_policy": "purchase_orders.approved_for_payment pending_amount distributed by line ratio; excludes posted movements already in real",
+            "budget_control_available_policy": "budget - real - committed",
         }
     }
 @api_router.get("/reports/corrida")
