@@ -1,10 +1,11 @@
 import os
 from decimal import Decimal
+from datetime import datetime, date, timezone
 
 os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
 os.environ.setdefault("DB_NAME", "qfinance_test")
 
-from server import _build_financial_projection  # noqa: E402
+from server import _build_financial_projection, normalize_utc_datetime  # noqa: E402
 
 
 def test_build_financial_projection_generates_rows_and_funding():
@@ -52,3 +53,16 @@ def test_build_financial_projection_uses_base_scenario_without_dates():
     assert len(projection["rows"]) == 3
     assert any("uniformemente" in assumption.lower() for assumption in projection["assumptions"])
     assert projection["rows"][0]["committed_expense"] == 200.0
+
+
+def test_normalize_utc_datetime_supports_naive_aware_and_date():
+    naive = normalize_utc_datetime(datetime(2026, 1, 1, 8, 0, 0))
+    aware = normalize_utc_datetime(datetime(2026, 1, 1, 8, 0, 0, tzinfo=timezone.utc))
+    only_date = normalize_utc_datetime(date(2026, 1, 1))
+
+    assert naive.tzinfo is not None
+    assert aware.tzinfo is not None
+    assert only_date.tzinfo is not None
+    assert naive.utcoffset().total_seconds() == 0
+    assert aware.utcoffset().total_seconds() == 0
+    assert only_date.hour == 0

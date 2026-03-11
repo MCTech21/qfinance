@@ -858,6 +858,25 @@ def to_tijuana(dt: datetime) -> datetime:
         dt = pytz.UTC.localize(dt)
     return dt.astimezone(TIMEZONE)
 
+
+def normalize_utc_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, date):
+        dt = datetime.combine(value, datetime.min.time())
+    elif isinstance(value, str) and value.strip():
+        try:
+            dt = date_parser.parse(value)
+        except (ValueError, TypeError):
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 def get_year_range() -> tuple[int, int]:
     current_year = to_tijuana(datetime.now(timezone.utc)).year
     from_year = min(2025, current_year)
@@ -5031,16 +5050,7 @@ def _fmt_period_label(period: str, year: int, month: Optional[int], quarter: Opt
 
 
 def _parse_any_date(value: Any) -> Optional[datetime]:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, date):
-        return datetime.combine(value, datetime.min.time(), tzinfo=timezone.utc)
-    if isinstance(value, str) and value.strip():
-        try:
-            return date_parser.parse(value)
-        except (ValueError, TypeError):
-            return None
-    return None
+    return normalize_utc_datetime(value)
 
 
 def _projection_bucket_key(dt: datetime, period: str) -> str:
@@ -5133,8 +5143,8 @@ def _build_financial_projection(
         }
 
     ranges = [_projection_bucket_range(k, period) for k in bucket_keys]
-    horizon_start = ranges[0][0]
-    horizon_end = ranges[-1][1]
+    horizon_start = normalize_utc_datetime(ranges[0][0])
+    horizon_end = normalize_utc_datetime(ranges[-1][1])
 
     realized_income_by_bucket = {k: Decimal("0.00") for k in bucket_keys}
     realized_expense_by_bucket = {k: Decimal("0.00") for k in bucket_keys}
@@ -5146,7 +5156,7 @@ def _build_financial_projection(
         if not mv_date:
             continue
         movements_with_dates += 1
-        mv_date = to_tijuana(mv_date)
+        mv_date = normalize_utc_datetime(mv_date)
         amt = _to_period_decimal(abs(float(mv.get("amount_mxn", 0))))
         partida = str(mv.get("partida_codigo") or mv.get("partida_id") or "")
         if mv_date < horizon_start:
@@ -5176,7 +5186,7 @@ def _build_financial_projection(
         po_date = _parse_any_date(po.get("planned_date") or po.get("due_date") or po.get("order_date"))
         if po_date is not None:
             po_with_date += 1
-        po_dt = to_tijuana(po_date) if po_date is not None else horizon_start
+        po_dt = normalize_utc_datetime(po_date) if po_date is not None else horizon_start
         if po_dt < horizon_start:
             po_dt = horizon_start
         if po_dt >= horizon_end:
@@ -5197,7 +5207,7 @@ def _build_financial_projection(
     for plan in budget_plan_rows:
         monthly_map = plan.get("monthly_breakdown") or {}
         for k, v in monthly_map.items():
-            dt = _parse_any_date(f"{k}-01")
+            dt = normalize_utc_datetime(f"{k}-01")
             if not dt:
                 continue
             if dt < horizon_start or dt >= horizon_end:
@@ -5227,10 +5237,9 @@ def _build_financial_projection(
     projected_by_bucket = {k: Decimal("0.00") for k in bucket_keys}
     inventory_dated = 0
     for item in inventory_items:
-        dt = _parse_any_date(item.get("estimated_sale_date") or item.get("sale_date") or item.get("created_at"))
+        dt = normalize_utc_datetime(item.get("estimated_sale_date") or item.get("sale_date") or item.get("created_at"))
         if not dt:
             continue
-        dt = to_tijuana(dt)
         if dt < horizon_start or dt >= horizon_end:
             continue
         inventory_dated += 1

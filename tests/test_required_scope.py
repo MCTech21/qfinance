@@ -499,6 +499,53 @@ def test_reports_dashboard_periods_and_rbac_and_serialization():
     assert r_all.json()["totals"]["presupuesto_total"] == 600.0
 
 
+
+
+def test_reports_dashboard_projection_handles_mixed_naive_and_aware_dates():
+    from datetime import datetime, timezone
+
+    c, db = make_client(role="admin")
+    db.projects.rows = [p for p in db.projects.rows if p.get("id") == "p1"]
+    db.budget_plans.rows.append({
+        "id": "bp_mix",
+        "project_id": "p1",
+        "partida_codigo": "205",
+        "total_amount": 1000,
+        "monthly_breakdown": {"2026-01": 400, "2026-02": 600},
+        "approval_status": "approved",
+    })
+    db.movements.rows.extend([
+        {"id": "mix1", "project_id": "p1", "partida_codigo": "402", "status": "posted", "is_deleted": False, "date": datetime(2025, 12, 31, 23, 0, 0), "amount_mxn": 100},
+        {"id": "mix2", "project_id": "p1", "partida_codigo": "205", "status": "posted", "is_deleted": False, "date": datetime(2026, 1, 15, 0, 0, 0, tzinfo=timezone.utc), "amount_mxn": -50},
+    ])
+    db.purchase_orders.rows.append({
+        "id": "po_mix",
+        "project_id": "p1",
+        "status": "approved_for_payment",
+        "pending_amount": 120,
+        "planned_date": datetime(2026, 2, 20, 0, 0, 0),
+        "lines": [{"partida_codigo": "205", "line_total": 120}],
+    })
+    db.inventory_items.rows.append({
+        "id": "inv_mix",
+        "company_id": "c1",
+        "project_id": "p1",
+        "precio_total": 500,
+        "created_at": datetime(2026, 1, 5, 0, 0, 0),
+    })
+
+    r_month = c.get('/api/reports/dashboard', params={"empresa_id": "c1", "project_id": "p1", "period": "month", "year": 2026, "month": 1})
+    assert r_month.status_code == 200
+    month_payload = r_month.json()
+    assert "financial_projection" in month_payload
+    assert month_payload["financial_projection"]["rows"]
+
+    r_quarter = c.get('/api/reports/dashboard', params={"empresa_id": "c1", "project_id": "p1", "period": "quarter", "year": 2026, "quarter": 1})
+    assert r_quarter.status_code == 200
+
+    r_year = c.get('/api/reports/dashboard', params={"empresa_id": "c1", "project_id": "p1", "period": "year", "year": 2026})
+    assert r_year.status_code == 200
+
 def test_reports_dashboard_validations_422():
     c, _ = make_client()
     assert c.get('/api/reports/dashboard', params={"period": "month", "year": 2026, "month": 0}).status_code == 422
