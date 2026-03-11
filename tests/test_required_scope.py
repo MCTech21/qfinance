@@ -504,3 +504,57 @@ def test_reports_dashboard_validations_422():
     assert c.get('/api/reports/dashboard', params={"period": "month", "year": 2026, "month": 13}).status_code == 422
     assert c.get('/api/reports/dashboard', params={"period": "quarter", "year": 2026, "quarter": 0}).status_code == 422
     assert c.get('/api/reports/dashboard', params={"period": "quarter", "year": 2026, "quarter": 5}).status_code == 422
+
+
+def test_reports_dashboard_pl_uses_inventory_405_and_subtotals():
+    c, db = make_client(role="admin")
+    db.catalogo_partidas.rows.extend([
+        {"codigo": "101", "nombre": "TERRENO", "grupo": "COSTOS DIRECTOS", "is_active": True},
+        {"codigo": "201", "nombre": "GASTOS DE PUBLICIDAD Y PROMOCION", "grupo": "GASTOS VTA/ADM", "is_active": True},
+        {"codigo": "301", "nombre": "COMISIONES BANCARIAS", "grupo": "GASTOS FINANCIEROS", "is_active": True},
+    ])
+    db.budgets.rows.extend([
+        {"id": "b101", "project_id": "p1", "partida_codigo": "101", "year": 2026, "month": 1, "amount_mxn": 1000},
+        {"id": "b201", "project_id": "p1", "partida_codigo": "201", "year": 2026, "month": 1, "amount_mxn": 200},
+        {"id": "b301", "project_id": "p1", "partida_codigo": "301", "year": 2026, "month": 1, "amount_mxn": 100},
+    ])
+    db.movements.rows.extend([
+        {"id": "m101", "project_id": "p1", "partida_codigo": "101", "status": "posted", "is_deleted": False, "date": "2026-01-10T00:00:00+00:00", "amount_mxn": -800},
+        {"id": "m201", "project_id": "p1", "partida_codigo": "201", "status": "posted", "is_deleted": False, "date": "2026-01-11T00:00:00+00:00", "amount_mxn": -100},
+        {"id": "m301", "project_id": "p1", "partida_codigo": "301", "status": "posted", "is_deleted": False, "date": "2026-01-12T00:00:00+00:00", "amount_mxn": -50},
+    ])
+    db.inventory_items.rows.extend([
+        {"id": "inv2", "company_id": "c1", "project_id": "p1", "precio_total": 1500},
+    ])
+
+    r = c.get('/api/reports/dashboard', params={"empresa_id": "c1", "project_id": "p1", "period": "month", "year": 2026, "month": 1})
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["totals"]["ingreso_proyectado_405"] == 101500.0
+    assert payload["totals"]["ejecucion_vs_ingreso_pct"] is not None
+
+    rows = payload["rows"]
+    row101 = next(x for x in rows if x["code"] == "101")
+    assert row101["budget"] == 1000.0
+    assert row101["real"] == 800.0
+    assert row101["remaining"] == 200.0
+    assert row101["traffic_light"] == "green"
+
+    gross = next(x for x in rows if x["name"] == "UTILIDAD BRUTA")
+    assert gross["real"] == 100700.0
+    pbt = next(x for x in rows if x["name"] == "UTILIDAD ANTES DE IMPUESTOS")
+    assert pbt["real"] == 100550.0
+
+
+def test_reports_dashboard_pl_zero_income_pct_and_zero_budget_traffic_light():
+    c, db = make_client(role="admin")
+    db.projects.rows.append({"id": "p3", "empresa_id": "c1", "name": "P3", "code": "P3"})
+    db.catalogo_partidas.rows.append({"codigo": "101", "nombre": "TERRENO", "grupo": "COSTOS DIRECTOS", "is_active": True})
+    db.movements.rows.append({"id": "m101", "project_id": "p3", "partida_codigo": "101", "status": "posted", "is_deleted": False, "date": "2026-01-10T00:00:00+00:00", "amount_mxn": -10})
+
+    r = c.get('/api/reports/dashboard', params={"empresa_id": "c1", "project_id": "p3", "period": "month", "year": 2026, "month": 1})
+    assert r.status_code == 200
+    rows = r.json()["rows"]
+    row101 = next(x for x in rows if x["code"] == "101")
+    assert row101["income_pct"] is None
+    assert row101["traffic_light"] == "red"

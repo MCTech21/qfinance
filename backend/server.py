@@ -5046,6 +5046,122 @@ def _derive_partida_group(code: str, partida_catalog: dict) -> str:
     return "OTROS"
 
 
+PL_DIRECT_COST_CODES = ["101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111"]
+PL_SELLING_ADMIN_CODES = ["201", "202", "203", "204", "205", "206", "207"]
+PL_FINANCIAL_CODES = ["301", "302"]
+PL_INCOME_CODE = "405"
+
+
+def _dashboard_safe_pct(numerator: Decimal, denominator: Decimal) -> Optional[Decimal]:
+    if denominator <= 0:
+        return None
+    return ((numerator / denominator) * Decimal("100")).quantize(TWO_DECIMALS)
+
+
+def _expense_traffic_light(budget: Decimal, real: Decimal) -> str:
+    if budget <= 0 and real <= 0:
+        return "neutral"
+    if budget <= 0 and real > 0:
+        return "red"
+    ratio = (real / budget) * Decimal("100")
+    if ratio <= Decimal("90"):
+        return "green"
+    if ratio <= Decimal("100"):
+        return "yellow"
+    return "red"
+
+
+def _utility_traffic_light(budget: Decimal, real: Decimal) -> str:
+    if budget == 0:
+        return "neutral" if real == 0 else ("green" if real > 0 else "red")
+    if real >= budget:
+        return "green"
+    if real >= (budget * Decimal("0.9")):
+        return "yellow"
+    return "red"
+
+
+def _build_pl_rows(by_partida: Dict[str, Dict[str, Decimal]], partida_map: Dict[str, dict], ingreso_405: Decimal) -> List[dict]:
+    rows: List[dict] = []
+
+    def _build_partida_row(code: str) -> dict:
+        source = by_partida.get(code, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
+        budget = source["presupuesto"].quantize(TWO_DECIMALS)
+        real = source["ejecutado"].quantize(TWO_DECIMALS)
+        remaining = (budget - real).quantize(TWO_DECIMALS)
+        part = partida_map.get(code, {})
+        pct = _dashboard_safe_pct(real, ingreso_405)
+        return {
+            "code": code,
+            "name": part.get("nombre", code),
+            "budget": _dashboard_decimal_to_float(budget),
+            "real": _dashboard_decimal_to_float(real),
+            "remaining": _dashboard_decimal_to_float(remaining),
+            "income_pct": _dashboard_decimal_to_float(pct) if pct is not None else None,
+            "traffic_light": _expense_traffic_light(budget, real),
+            "row_type": "partida",
+        }
+
+    for code in PL_DIRECT_COST_CODES:
+        rows.append(_build_partida_row(code))
+
+    direct_budget = sum((by_partida.get(c, {}).get("presupuesto", Decimal("0.00")) for c in PL_DIRECT_COST_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
+    direct_real = sum((by_partida.get(c, {}).get("ejecutado", Decimal("0.00")) for c in PL_DIRECT_COST_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
+    gross_budget = (ingreso_405 - direct_budget).quantize(TWO_DECIMALS)
+    gross_real = (ingreso_405 - direct_real).quantize(TWO_DECIMALS)
+    gross_remaining = (gross_budget - gross_real).quantize(TWO_DECIMALS)
+    gross_pct = _dashboard_safe_pct(gross_real, ingreso_405)
+    rows.append({
+        "code": "SUBTOTAL_GROSS",
+        "name": "UTILIDAD BRUTA",
+        "budget": _dashboard_decimal_to_float(gross_budget),
+        "real": _dashboard_decimal_to_float(gross_real),
+        "remaining": _dashboard_decimal_to_float(gross_remaining),
+        "income_pct": _dashboard_decimal_to_float(gross_pct) if gross_pct is not None else None,
+        "traffic_light": _utility_traffic_light(gross_budget, gross_real),
+        "row_type": "subtotal",
+    })
+
+    for code in PL_SELLING_ADMIN_CODES:
+        rows.append(_build_partida_row(code))
+    sell_admin_budget = sum((by_partida.get(c, {}).get("presupuesto", Decimal("0.00")) for c in PL_SELLING_ADMIN_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
+    sell_admin_real = sum((by_partida.get(c, {}).get("ejecutado", Decimal("0.00")) for c in PL_SELLING_ADMIN_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
+    op_budget = (gross_budget - sell_admin_budget).quantize(TWO_DECIMALS)
+    op_real = (gross_real - sell_admin_real).quantize(TWO_DECIMALS)
+    op_remaining = (op_budget - op_real).quantize(TWO_DECIMALS)
+    op_pct = _dashboard_safe_pct(op_real, ingreso_405)
+    rows.append({
+        "code": "SUBTOTAL_OPERATING",
+        "name": "UTILIDAD OPERATIVA",
+        "budget": _dashboard_decimal_to_float(op_budget),
+        "real": _dashboard_decimal_to_float(op_real),
+        "remaining": _dashboard_decimal_to_float(op_remaining),
+        "income_pct": _dashboard_decimal_to_float(op_pct) if op_pct is not None else None,
+        "traffic_light": _utility_traffic_light(op_budget, op_real),
+        "row_type": "subtotal",
+    })
+
+    for code in PL_FINANCIAL_CODES:
+        rows.append(_build_partida_row(code))
+    financial_budget = sum((by_partida.get(c, {}).get("presupuesto", Decimal("0.00")) for c in PL_FINANCIAL_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
+    financial_real = sum((by_partida.get(c, {}).get("ejecutado", Decimal("0.00")) for c in PL_FINANCIAL_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
+    pbt_budget = (op_budget - financial_budget).quantize(TWO_DECIMALS)
+    pbt_real = (op_real - financial_real).quantize(TWO_DECIMALS)
+    pbt_remaining = (pbt_budget - pbt_real).quantize(TWO_DECIMALS)
+    pbt_pct = _dashboard_safe_pct(pbt_real, ingreso_405)
+    rows.append({
+        "code": "SUBTOTAL_PRE_TAX",
+        "name": "UTILIDAD ANTES DE IMPUESTOS",
+        "budget": _dashboard_decimal_to_float(pbt_budget),
+        "real": _dashboard_decimal_to_float(pbt_real),
+        "remaining": _dashboard_decimal_to_float(pbt_remaining),
+        "income_pct": _dashboard_decimal_to_float(pbt_pct) if pbt_pct is not None else None,
+        "traffic_light": _utility_traffic_light(pbt_budget, pbt_real),
+        "row_type": "subtotal",
+    })
+    return rows
+
+
 def _build_corrida_rows(by_partida: List[dict], total_income: Decimal) -> dict:
     rows = []
     grouped: Dict[str, Dict[str, Decimal]] = {}
@@ -5149,12 +5265,17 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
                 "ejecutado_total": 0.0,
                 "variacion_total": 0.0,
                 "porcentaje_avance": 0.0,
+                "ingreso_proyectado_405": 0.0,
+                "por_ejercer_total": 0.0,
+                "ejecucion_vs_ingreso_pct": None,
                 "porcentaje_label": "0.00",
                 "traffic_light": get_traffic_light(0, float(y), float(r)),
                 "status_label": "SIN PRESUPUESTO (sin gasto)",
                 "variation_color": "neutral",
             },
             "by_partida": [],
+            "rows": [],
+            "subtotals": {},
             "pending": {"count": 0, "total_mxn": 0.0},
             "pending_authorizations": await db.authorizations.count_documents({"status": "pending"}),
             "movements_count": 0,
@@ -5285,6 +5406,17 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
 
     total_signal = build_budget_signal(total_budget, total_exec, yellow, red)
 
+    inventory_items = await db.inventory_items.find({"project_id": {"$in": project_ids}}, {"_id": 0}).to_list(10000)
+    ingreso_405 = Decimal("0.00")
+    for item in inventory_items:
+        ingreso_405 += _to_period_decimal(item.get("precio_total", 0))
+    ingreso_405 = ingreso_405.quantize(TWO_DECIMALS)
+
+    by_partida[PL_INCOME_CODE] = {
+        "presupuesto": ingreso_405,
+        "ejecutado": ingreso_405,
+    }
+
     pending_total = sum((_to_period_decimal(m.get("amount_mxn", 0)) for m in pending_in_period), Decimal("0.00"))
     company_name = "Todas" if company_selector == "all" else empresa_map.get(company_selector, company_selector)
     if project_selector == "all":
@@ -5292,8 +5424,13 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     else:
         project_name = (project_map.get(project_selector) or {}).get("name", project_selector)
 
-    income_total = sum((money_dec(r.get("ejecutado", 0)) for r in detail if str(r.get("partida_codigo", "")).startswith("4")), Decimal("0.00"))
+    income_total = ingreso_405
     corrida = _build_corrida_rows(detail, income_total)
+    pl_rows = _build_pl_rows(by_partida, partida_map, ingreso_405)
+    subtotals = {row.get("name"): row for row in pl_rows if row.get("row_type") == "subtotal"}
+
+    por_ejercer_total = (total_budget - total_exec).quantize(TWO_DECIMALS)
+    ejecucion_vs_ingreso_pct = _dashboard_safe_pct(total_exec, ingreso_405)
 
     return {
         "filtros": {
@@ -5316,6 +5453,9 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "ejecutado_total": _dashboard_decimal_to_float(total_exec),
             "variacion_total": _dashboard_decimal_to_float(total_signal["variacion"]),
             "porcentaje_avance": _dashboard_decimal_to_float(total_signal["porcentaje"]) if total_signal["porcentaje"] is not None else None,
+            "ingreso_proyectado_405": _dashboard_decimal_to_float(ingreso_405),
+            "por_ejercer_total": _dashboard_decimal_to_float(por_ejercer_total),
+            "ejecucion_vs_ingreso_pct": _dashboard_decimal_to_float(ejecucion_vs_ingreso_pct) if ejecucion_vs_ingreso_pct is not None else None,
             "porcentaje_label": total_signal["porcentaje_label"],
             "traffic_light": total_signal["traffic_light"],
             "status_label": total_signal["status_label"],
@@ -5331,6 +5471,8 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "total_mxn": _dashboard_decimal_to_float(pending_total.quantize(TWO_DECIMALS)),
         },
         "by_partida": sorted(detail, key=lambda x: x.get("porcentaje", 0), reverse=True),
+        "rows": pl_rows,
+        "subtotals": subtotals,
         "by_project": [],
         "corrida": corrida,
         "pending_authorizations": await db.authorizations.count_documents({"status": "pending"}),
@@ -5340,6 +5482,8 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "threshold_yellow": _dashboard_decimal_to_float(yellow),
             "threshold_red": _dashboard_decimal_to_float(red),
             "pending_budget_policy": "excluded_from_official_budget",
+            "income_source": "inventory_items.precio_total",
+            "income_partida_code": PL_INCOME_CODE,
         }
     }
 @api_router.get("/reports/corrida")
