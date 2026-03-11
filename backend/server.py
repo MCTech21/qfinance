@@ -5059,6 +5059,124 @@ def _normalize_dashboard_selector(value: Optional[str]) -> str:
     return normalized
 
 
+def _normalize_dashboard_period_filters(period: Optional[str], month: Optional[int], quarter: Optional[int]) -> Tuple[str, Optional[int], Optional[int]]:
+    normalized_period = str(period or "all").strip().lower()
+    if normalized_period in {"todo", "todos", "todas"}:
+        normalized_period = "all"
+    if normalized_period not in {"all", "month", "quarter", "year"}:
+        raise HTTPException(status_code=422, detail={"code": "invalid_period", "message": "period debe ser all|month|quarter|year"})
+
+    if month is not None and (month < 1 or month > 12):
+        raise HTTPException(status_code=422, detail={"code": "month_out_of_range", "message": "month debe estar entre 1 y 12"})
+    if quarter is not None and (quarter < 1 or quarter > 4):
+        raise HTTPException(status_code=422, detail={"code": "quarter_out_of_range", "message": "quarter debe estar entre 1 y 4"})
+
+    if normalized_period == "month":
+        if month is None:
+            raise HTTPException(status_code=422, detail={"code": "month_required", "message": "month es requerido cuando period=month"})
+        if quarter is not None:
+            raise HTTPException(status_code=422, detail={"code": "quarter_not_allowed", "message": "quarter no aplica cuando period=month"})
+    elif normalized_period == "quarter":
+        if quarter is None:
+            raise HTTPException(status_code=422, detail={"code": "quarter_required", "message": "quarter es requerido cuando period=quarter"})
+        if month is not None:
+            raise HTTPException(status_code=422, detail={"code": "month_not_allowed", "message": "month no aplica cuando period=quarter"})
+    elif month is not None or quarter is not None:
+        raise HTTPException(status_code=422, detail={"code": "incompatible_period_filters", "message": "month/quarter no aplican cuando period=all|year"})
+
+    return normalized_period, month, quarter
+
+
+def _parse_dashboard_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    try:
+        dt = date_parser.parse(value) if isinstance(value, str) else value
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return normalize_utc_datetime(dt)
+
+
+def _first_positive_project_total(project_doc: dict) -> Optional[Decimal]:
+    candidate_fields = [
+        "monto_total_proyecto",
+        "project_total",
+        "total_proyecto",
+        "total_project",
+        "valor_total_proyecto",
+    ]
+    for field in candidate_fields:
+        value = project_doc.get(field)
+        if value in (None, ""):
+            continue
+        try:
+            parsed = decimal_from_value(value, field).quantize(TWO_DECIMALS)
+        except HTTPException:
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
+def _resolve_dashboard_income_base(project_docs: List[dict], inventory_items: List[dict]) -> dict:
+    project_total = Decimal("0.00")
+    for project_doc in project_docs:
+        current = _first_positive_project_total(project_doc)
+        if current:
+            project_total += current
+
+    inventory_total = Decimal("0.00")
+    for item in inventory_items:
+        inventory_total += _to_period_decimal(item.get("precio_total", 0))
+    inventory_total = inventory_total.quantize(TWO_DECIMALS)
+
+    manual_405 = Decimal("0.00")
+    for project_doc in project_docs:
+        manual_raw = project_doc.get("manual_405")
+        if manual_raw in (None, ""):
+            manual_raw = project_doc.get("ingreso_405_manual")
+        if manual_raw in (None, ""):
+            continue
+        try:
+            manual_405 += decimal_from_value(manual_raw, "manual_405").quantize(TWO_DECIMALS)
+        except HTTPException:
+            continue
+
+    has_project_total = project_total > 0
+    has_inventory = inventory_total > 0
+    has_manual_405 = manual_405 > 0
+    coexistence = has_inventory and has_manual_405 and not has_project_total
+
+    if has_project_total:
+        selected = project_total
+        source = "project_total"
+        label = "Monto total del proyecto"
+    elif has_manual_405:
+        selected = manual_405
+        source = "manual_405"
+        label = "405 capturada"
+    elif has_inventory:
+        selected = inventory_total
+        source = "inventory_total"
+        label = "Inventario total"
+    else:
+        selected = None
+        source = "none"
+        label = "Sin fuente"
+
+    return {
+        "value": selected,
+        "income_source": source,
+        "income_source_label": label,
+        "income_source_available_flags": {
+            "project_total": has_project_total,
+            "inventory_total": has_inventory,
+            "manual_405": has_manual_405,
+            "manual_405_inventory_coexistence": coexistence,
+        },
+    }
+
+
 def _parse_any_date(value: Any) -> Optional[datetime]:
     return normalize_utc_datetime(value)
 
@@ -5540,30 +5658,10 @@ def _build_corrida_rows(by_partida: List[dict], total_income: Decimal) -> dict:
 
 async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str], project_id: Optional[str], period: str, year: Optional[int], month: Optional[int], quarter: Optional[int], include_pending: bool = False):
     now = to_tijuana(datetime.now(timezone.utc))
-    normalized_period = (period or "all").strip().lower()
-    if normalized_period not in {"all", "month", "quarter", "year"}:
-        raise HTTPException(status_code=422, detail={"code": "invalid_period", "message": "period debe ser all|month|quarter|year"})
+    normalized_period, month, quarter = _normalize_dashboard_period_filters(period, month, quarter)
 
     selected_year = year or now.year
     validate_year_in_range(selected_year)
-    if month is not None and (month < 1 or month > 12):
-        raise HTTPException(status_code=422, detail={"code": "month_out_of_range", "message": "month debe estar entre 1 y 12"})
-    if quarter is not None and (quarter < 1 or quarter > 4):
-        raise HTTPException(status_code=422, detail={"code": "quarter_out_of_range", "message": "quarter debe estar entre 1 y 4"})
-
-    if normalized_period == "month":
-        if month is None:
-            raise HTTPException(status_code=422, detail={"code": "month_required", "message": "month es requerido cuando period=month"})
-        if quarter is not None:
-            raise HTTPException(status_code=422, detail={"code": "quarter_not_allowed", "message": "quarter no aplica cuando period=month"})
-    elif normalized_period == "quarter":
-        if quarter is None:
-            raise HTTPException(status_code=422, detail={"code": "quarter_required", "message": "quarter es requerido cuando period=quarter"})
-        if month is not None:
-            raise HTTPException(status_code=422, detail={"code": "month_not_allowed", "message": "month no aplica cuando period=quarter"})
-    elif normalized_period in {"all", "year"}:
-        if month is not None or quarter is not None:
-            raise HTTPException(status_code=422, detail={"code": "incompatible_period_filters", "message": "month/quarter no aplican cuando period=all|year"})
 
     company_selector = _normalize_dashboard_selector(empresa_id)
     project_selector = _normalize_dashboard_selector(project_id)
@@ -5669,6 +5767,14 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "include_pending": include_pending,
             "meta": {
                 "pending_budget_policy": "excluded_from_official_budget",
+                "income_source": "none",
+                "income_source_label": "Sin fuente",
+                "income_source_available_flags": {
+                    "project_total": False,
+                    "inventory_total": False,
+                    "manual_405": False,
+                    "manual_405_inventory_coexistence": False,
+                },
                 "budget_control_committed_policy": "purchase_orders pending_approval|approved_for_payment pending_amount (or total-approved) distributed by line ratio and filtered by dashboard period; excludes posted movements already in real",
                 "budget_control_available_policy": "budget - real - committed",
             },
@@ -5751,7 +5857,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
 
     movements_in_period = []
     for mv in movement_rows:
-        mv_date = date_parser.parse(mv.get("date")) if isinstance(mv.get("date"), str) else mv.get("date")
+        mv_date = _parse_dashboard_datetime(mv.get("date"))
         if not mv_date:
             continue
         if _match_dashboard_period(to_tijuana(mv_date), normalized_period, selected_year, month, quarter):
@@ -5762,7 +5868,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
 
     pending_in_period = []
     for mv in pending_rows:
-        mv_date = date_parser.parse(mv.get("date")) if isinstance(mv.get("date"), str) else mv.get("date")
+        mv_date = _parse_dashboard_datetime(mv.get("date"))
         if mv_date and _match_dashboard_period(to_tijuana(mv_date), normalized_period, selected_year, month, quarter):
             pending_in_period.append(mv)
 
@@ -5798,15 +5904,15 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     total_signal = build_budget_signal(total_budget, total_exec, yellow, red)
 
     inventory_items = await db.inventory_items.find({"project_id": {"$in": project_ids}}, {"_id": 0}).to_list(10000)
-    ingreso_405 = Decimal("0.00")
-    for item in inventory_items:
-        ingreso_405 += _to_period_decimal(item.get("precio_total", 0))
-    ingreso_405 = ingreso_405.quantize(TWO_DECIMALS)
+    income_resolution = _resolve_dashboard_income_base(projects, inventory_items)
+    ingreso_base_value = income_resolution.get("value")
+    ingreso_405 = (ingreso_base_value or Decimal("0.00")).quantize(TWO_DECIMALS)
 
-    by_partida[PL_INCOME_CODE] = {
-        "presupuesto": ingreso_405,
-        "ejecutado": ingreso_405,
-    }
+    if ingreso_base_value is not None:
+        by_partida[PL_INCOME_CODE] = {
+            "presupuesto": ingreso_405,
+            "ejecutado": ingreso_405,
+        }
 
     pending_total = sum((_to_period_decimal(m.get("amount_mxn", 0)) for m in pending_in_period), Decimal("0.00"))
 
@@ -6003,7 +6109,9 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "threshold_yellow": _dashboard_decimal_to_float(yellow),
             "threshold_red": _dashboard_decimal_to_float(red),
             "pending_budget_policy": "excluded_from_official_budget",
-            "income_source": "inventory_items.precio_total",
+            "income_source": income_resolution.get("income_source"),
+            "income_source_label": income_resolution.get("income_source_label"),
+            "income_source_available_flags": income_resolution.get("income_source_available_flags", {}),
             "income_partida_code": PL_INCOME_CODE,
             "budget_control_committed_policy": "purchase_orders pending_approval|approved_for_payment pending_amount (or total-approved) distributed by line ratio and filtered by dashboard period; excludes posted movements already in real",
             "budget_control_available_policy": "budget - real - committed",
