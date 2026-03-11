@@ -52,6 +52,7 @@ class FakeDB:
         self.authorizations = FakeCollection([])
         self.budget_requests = FakeCollection([])
         self.budget_plans = FakeCollection([])
+        self.purchase_orders = FakeCollection([])
         self.inventory_items = FakeCollection([{"id": "inv1", "company_id": "c1", "project_id": "p1", "lote_edificio": "L1", "manzana_departamento": "M3", "precio_total": 100000.0}])
         self.clients = FakeCollection([{"id": "cl1", "company_id": "c1", "project_id": "p1", "nombre": "JUAN", "inventory_item_id": "inv1", "saldo_restante": 100000.0}])
         self.import_export_logs = FakeCollection([])
@@ -558,3 +559,73 @@ def test_reports_dashboard_pl_zero_income_pct_and_zero_budget_traffic_light():
     row101 = next(x for x in rows if x["code"] == "101")
     assert row101["income_pct"] is None
     assert row101["traffic_light"] == "red"
+
+
+def test_reports_dashboard_budget_control_rows_and_summary_and_zero_budget_cases():
+    c, db = make_client(role="admin")
+    db.catalogo_partidas.rows.extend([
+        {"codigo": "101", "nombre": "TERRENO", "grupo": "COSTOS DIRECTOS", "is_active": True},
+        {"codigo": "201", "nombre": "GASTOS DE PUBLICIDAD Y PROMOCION", "grupo": "GASTOS VTA/ADM", "is_active": True},
+        {"codigo": "301", "nombre": "COMISIONES BANCARIAS", "grupo": "GASTOS FINANCIEROS", "is_active": True},
+    ])
+    db.budgets.rows.extend([
+        {"id": "b101", "project_id": "p1", "partida_codigo": "101", "year": 2026, "month": 1, "amount_mxn": 1000},
+        {"id": "b201", "project_id": "p1", "partida_codigo": "201", "year": 2026, "month": 1, "amount_mxn": 100},
+    ])
+    db.movements.rows.extend([
+        {"id": "m101", "project_id": "p1", "partida_codigo": "101", "status": "posted", "is_deleted": False, "date": "2026-01-10T00:00:00+00:00", "amount_mxn": -950},
+        {"id": "m201", "project_id": "p1", "partida_codigo": "201", "status": "posted", "is_deleted": False, "date": "2026-01-11T00:00:00+00:00", "amount_mxn": -110},
+    ])
+    db.purchase_orders.rows.append({
+        "id": "po1",
+        "project_id": "p1",
+        "status": "approved_for_payment",
+        "currency": "MXN",
+        "total": "150.00",
+        "total_mxn": "150.00",
+        "approved_amount_total": "50.00",
+        "pending_amount": "100.00",
+        "lines": [
+            {"partida_codigo": "101", "line_total": "90.00"},
+            {"partida_codigo": "301", "line_total": "60.00"},
+        ],
+    })
+
+    r = c.get('/api/reports/dashboard', params={"empresa_id": "c1", "project_id": "p1", "period": "month", "year": 2026, "month": 1})
+    assert r.status_code == 200
+    payload = r.json()
+
+    assert payload["shared_kpis"]["presupuesto_total"] == payload["totals"]["presupuesto_total"]
+    assert "rows" in payload["pnl"]
+
+    bc_rows = payload["budget_control"]["rows"]
+    row101 = next(x for x in bc_rows if x["code"] == "101")
+    assert row101["budget"] == 1000.0
+    assert row101["real"] == 950.0
+    assert row101["committed"] == 60.0
+    assert row101["available"] == -10.0
+    assert row101["advance_pct"] == 95.0
+    assert row101["traffic_light"] == "yellow"
+
+    row201 = next(x for x in bc_rows if x["code"] == "201")
+    assert row201["budget"] == 100.0
+    assert row201["real"] == 110.0
+    assert row201["committed"] == 0.0
+    assert row201["available"] == -10.0
+    assert row201["advance_pct"] == 110.0
+    assert row201["traffic_light"] == "red"
+
+    row301 = next(x for x in bc_rows if x["code"] == "301")
+    assert row301["budget"] == 0.0
+    assert row301["real"] == 0.0
+    assert row301["committed"] == 40.0
+    assert row301["available"] == -40.0
+    assert row301["advance_pct"] is None
+    assert row301["traffic_light"] == "red"
+
+    summary = payload["budget_control"]["summary"]
+    assert summary["yellow_count"] == 1
+    assert summary["red_count"] == 2
+    assert summary["overrun_count"] == 2
+    assert summary["committed_total"] == 100.0
+    assert payload["meta"]["budget_control_committed_policy"]

@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import Dashboard from "./Dashboard";
 
 const mockGet = jest.fn();
@@ -13,40 +14,72 @@ jest.mock("../context/AuthContext", () => ({
 
 jest.mock("sonner", () => ({ toast: { error: jest.fn() } }));
 
+const baseDashboardPayload = {
+  filtros: { period_label: "2026-01", empresa_nombre: "Empresa", project_nombre: "Proyecto" },
+  totals: { ingreso_proyectado_405: 1000, presupuesto_total: 500, ejecutado_total: 200, por_ejercer_total: 300, traffic_light: "green", ejecucion_vs_ingreso_pct: 20 },
+  shared_kpis: { ingreso_proyectado_405: 1000, presupuesto_total: 500, real_ejecutado: 200, por_ejercer: 300, ejecucion_vs_ingreso_pct: 20 },
+  pnl: {
+    rows: [
+      { code: "101", name: "TERRENO", budget: 100, real: 50, remaining: 50, income_pct: 5, traffic_light: "green", row_type: "partida" },
+      { code: "SUBTOTAL_GROSS", name: "UTILIDAD BRUTA", budget: 900, real: 950, remaining: -50, income_pct: 95, traffic_light: "green", row_type: "subtotal" },
+    ],
+  },
+  budget_control: {
+    summary: { red_count: 1, yellow_count: 1, overrun_count: 1, committed_total: 60, available_total: 40 },
+    rows: [
+      { code: "101", name: "TERRENO", group: "COSTOS DIRECTOS", budget: 100, real: 50, committed: 40, available: 10, advance_pct: 50, traffic_light: "green" },
+    ],
+  },
+};
+
 describe("Dashboard", () => {
   beforeEach(() => {
     mockGet.mockReset();
   });
 
-  test("renderiza KPIs y tabla P&L con subtotales", async () => {
+  test("renderiza tabs, globales y navega entre P&L y Control Presupuestal", async () => {
     mockGet
-      .mockResolvedValueOnce({ data: {
-        filtros: { period_label: "2026-01" },
-        totals: { ingreso_proyectado_405: 1000, presupuesto_total: 500, ejecutado_total: 200, por_ejercer_total: 300, traffic_light: "green", ejecucion_vs_ingreso_pct: 20 },
-        rows: [
-          { code: "101", name: "TERRENO", budget: 100, real: 50, remaining: 50, income_pct: 5, traffic_light: "green", row_type: "partida" },
-          { code: "SUBTOTAL_GROSS", name: "UTILIDAD BRUTA", budget: 900, real: 950, remaining: -50, income_pct: 95, traffic_light: "green", row_type: "subtotal" },
-        ],
-      }})
+      .mockResolvedValueOnce({ data: baseDashboardPayload })
       .mockResolvedValueOnce({ data: [{ id: "c1", nombre: "Empresa" }] })
       .mockResolvedValueOnce({ data: [{ id: "p1", empresa_id: "c1", name: "Proyecto" }] });
 
     render(<Dashboard />);
 
     await waitFor(() => expect(screen.getByTestId("kpi-grid")).toBeInTheDocument());
-    expect(screen.getByText(/Ingreso proyectado 405/i)).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "P&L" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Control Presupuestal" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Proyección Financiera" })).toBeInTheDocument();
     expect(screen.getByTestId("pl-table")).toBeInTheDocument();
-    expect(screen.getByText(/UTILIDAD BRUTA/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Control Presupuestal" }));
+    expect(screen.getByTestId("budget-control-table")).toBeInTheDocument();
+    expect(screen.getByText(/Comprometido total/i)).toBeInTheDocument();
+    expect(screen.getByTestId("kpi-grid")).toBeInTheDocument();
   });
 
-  test("muestra empty state", async () => {
+  test("renderiza placeholder de Proyección Financiera", async () => {
     mockGet
-      .mockResolvedValueOnce({ data: { filtros: { period_label: "2026" }, totals: {}, rows: [] } })
+      .mockResolvedValueOnce({ data: baseDashboardPayload })
+      .mockResolvedValueOnce({ data: [{ id: "c1", nombre: "Empresa" }] })
+      .mockResolvedValueOnce({ data: [{ id: "p1", empresa_id: "c1", name: "Proyecto" }] });
+
+    render(<Dashboard />);
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Proyección Financiera" })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("tab", { name: "Proyección Financiera" }));
+    expect(screen.getByTestId("projection-placeholder")).toBeInTheDocument();
+  });
+
+  test("muestra empty state en P&L y control", async () => {
+    mockGet
+      .mockResolvedValueOnce({ data: { filtros: { period_label: "2026" }, totals: {}, shared_kpis: {}, pnl: { rows: [] }, budget_control: { rows: [], summary: {} } } })
       .mockResolvedValueOnce({ data: [] })
       .mockResolvedValueOnce({ data: [] });
 
     render(<Dashboard />);
 
     await waitFor(() => expect(screen.getByTestId("empty-state")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("tab", { name: "Control Presupuestal" }));
+    expect(screen.getByTestId("budget-control-empty")).toBeInTheDocument();
   });
 });
