@@ -676,3 +676,27 @@ def test_reports_dashboard_budget_control_rows_and_summary_and_zero_budget_cases
     assert summary["overrun_count"] == 2
     assert summary["committed_total"] == 100.0
     assert payload["meta"]["budget_control_committed_policy"]
+
+
+def test_reports_dashboard_defaults_to_all_period_and_accepts_todo_alias_for_selectors():
+    c, _ = make_client(role="admin")
+
+    r = c.get('/api/reports/dashboard', params={"empresa_id": "TODO", "project_id": "todo", "year": 2026})
+    assert r.status_code == 200
+    filtros = r.json()["filtros"]
+    assert filtros["period"] == "all"
+    assert filtros["empresa_id"] == "all"
+    assert filtros["project_id"] == "all"
+
+
+def test_reports_dashboard_invalid_period_combinations_return_422_not_500():
+    c, _ = make_client(role="admin")
+
+    r_month_missing = c.get('/api/reports/dashboard', params={"period": "month", "year": 2026})
+    assert r_month_missing.status_code == 422
+
+    r_quarter_with_month = c.get('/api/reports/dashboard', params={"period": "quarter", "year": 2026, "quarter": 1, "month": 1})
+    assert r_quarter_with_month.status_code == 422
+
+    r_all_with_month = c.get('/api/reports/dashboard', params={"period": "all", "year": 2026, "month": 1})
+    assert r_all_with_month.status_code == 422

@@ -5049,6 +5049,16 @@ def _fmt_period_label(period: str, year: int, month: Optional[int], quarter: Opt
     return f"{year:04d}-{(month or 1):02d}"
 
 
+def _normalize_dashboard_selector(value: Optional[str]) -> str:
+    normalized = str(value or "all").strip()
+    if not normalized:
+        return "all"
+    lowered = normalized.lower()
+    if lowered in {"all", "todo", "todos", "todas", "null", "none"}:
+        return "all"
+    return normalized
+
+
 def _parse_any_date(value: Any) -> Optional[datetime]:
     return normalize_utc_datetime(value)
 
@@ -5530,7 +5540,7 @@ def _build_corrida_rows(by_partida: List[dict], total_income: Decimal) -> dict:
 
 async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str], project_id: Optional[str], period: str, year: Optional[int], month: Optional[int], quarter: Optional[int], include_pending: bool = False):
     now = to_tijuana(datetime.now(timezone.utc))
-    normalized_period = (period or "month").strip().lower()
+    normalized_period = (period or "all").strip().lower()
     if normalized_period not in {"all", "month", "quarter", "year"}:
         raise HTTPException(status_code=422, detail={"code": "invalid_period", "message": "period debe ser all|month|quarter|year"})
 
@@ -5541,8 +5551,22 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     if quarter is not None and (quarter < 1 or quarter > 4):
         raise HTTPException(status_code=422, detail={"code": "quarter_out_of_range", "message": "quarter debe estar entre 1 y 4"})
 
-    company_selector = (empresa_id or "all").strip() or "all"
-    project_selector = (project_id or "all").strip() or "all"
+    if normalized_period == "month":
+        if month is None:
+            raise HTTPException(status_code=422, detail={"code": "month_required", "message": "month es requerido cuando period=month"})
+        if quarter is not None:
+            raise HTTPException(status_code=422, detail={"code": "quarter_not_allowed", "message": "quarter no aplica cuando period=month"})
+    elif normalized_period == "quarter":
+        if quarter is None:
+            raise HTTPException(status_code=422, detail={"code": "quarter_required", "message": "quarter es requerido cuando period=quarter"})
+        if month is not None:
+            raise HTTPException(status_code=422, detail={"code": "month_not_allowed", "message": "month no aplica cuando period=quarter"})
+    elif normalized_period in {"all", "year"}:
+        if month is not None or quarter is not None:
+            raise HTTPException(status_code=422, detail={"code": "incompatible_period_filters", "message": "month/quarter no aplican cuando period=all|year"})
+
+    company_selector = _normalize_dashboard_selector(empresa_id)
+    project_selector = _normalize_dashboard_selector(project_id)
     if company_selector != "all":
         enforce_company_access(current_user, company_selector)
 
@@ -5974,7 +5998,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
 async def get_corrida(
     empresa_id: Optional[str] = None,
     project_id: Optional[str] = None,
-    period: str = "month",
+    period: str = "all",
     year: Optional[int] = None,
     month: Optional[int] = None,
     quarter: Optional[int] = None,
@@ -6007,7 +6031,7 @@ async def get_corrida(
 async def get_dashboard(
     empresa_id: Optional[str] = None,
     project_id: Optional[str] = None,
-    period: str = "month",
+    period: str = "all",
     year: Optional[int] = None,
     month: Optional[int] = None,
     quarter: Optional[int] = None,

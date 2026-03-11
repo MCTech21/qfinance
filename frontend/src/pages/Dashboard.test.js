@@ -61,14 +61,15 @@ const baseDashboardPayload = {
 describe("Dashboard", () => {
   beforeEach(() => {
     mockGet.mockReset();
+    mockGet.mockImplementation((url) => {
+      if (url === "/reports/dashboard") return Promise.resolve({ data: baseDashboardPayload });
+      if (url === "/empresas") return Promise.resolve({ data: [{ id: "c1", nombre: "Empresa" }] });
+      if (url === "/projects") return Promise.resolve({ data: [{ id: "p1", empresa_id: "c1", name: "Proyecto" }] });
+      return Promise.resolve({ data: {} });
+    });
   });
 
   test("renderiza tabs, globales y navega entre P&L y Control Presupuestal", async () => {
-    mockGet
-      .mockResolvedValueOnce({ data: baseDashboardPayload })
-      .mockResolvedValueOnce({ data: [{ id: "c1", nombre: "Empresa" }] })
-      .mockResolvedValueOnce({ data: [{ id: "p1", empresa_id: "c1", name: "Proyecto" }] });
-
     render(<Dashboard />);
 
     await waitFor(() => expect(screen.getByTestId("kpi-grid")).toBeInTheDocument());
@@ -84,11 +85,6 @@ describe("Dashboard", () => {
   });
 
   test("renderiza Proyección Financiera con KPIs y tabla", async () => {
-    mockGet
-      .mockResolvedValueOnce({ data: baseDashboardPayload })
-      .mockResolvedValueOnce({ data: [{ id: "c1", nombre: "Empresa" }] })
-      .mockResolvedValueOnce({ data: [{ id: "p1", empresa_id: "c1", name: "Proyecto" }] });
-
     render(<Dashboard />);
 
     await waitFor(() => expect(screen.getByRole("tab", { name: "Proyección Financiera" })).toBeInTheDocument());
@@ -99,10 +95,12 @@ describe("Dashboard", () => {
   });
 
   test("muestra empty state en P&L y control", async () => {
-    mockGet
-      .mockResolvedValueOnce({ data: { filtros: { period_label: "2026" }, totals: {}, shared_kpis: {}, pnl: { rows: [] }, budget_control: { rows: [], summary: {} }, financial_projection: { rows: [], kpis: {}, assumptions: [] } } })
-      .mockResolvedValueOnce({ data: [] })
-      .mockResolvedValueOnce({ data: [] });
+    mockGet.mockImplementation((url) => {
+      if (url === "/reports/dashboard") return Promise.resolve({ data: { filtros: { period_label: "2026" }, totals: {}, shared_kpis: {}, pnl: { rows: [] }, budget_control: { rows: [], summary: {} }, financial_projection: { rows: [], kpis: {}, assumptions: [] } } });
+      if (url === "/empresas") return Promise.resolve({ data: [] });
+      if (url === "/projects") return Promise.resolve({ data: [] });
+      return Promise.resolve({ data: {} });
+    });
 
     render(<Dashboard />);
 
@@ -111,5 +109,22 @@ describe("Dashboard", () => {
     expect(screen.getByTestId("budget-control-empty")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("tab", { name: "Proyección Financiera" }));
     expect(screen.getByTestId("projection-empty")).toBeInTheDocument();
+  });
+
+  test("inicializa en TODO y no envía month/quarter para period=all", async () => {
+    render(<Dashboard />);
+
+    await waitFor(() => expect(screen.getByTestId("kpi-grid")).toBeInTheDocument());
+    expect(mockGet).toHaveBeenCalledWith("/reports/dashboard", {
+      params: expect.objectContaining({
+        empresa_id: "all",
+        project_id: "all",
+        period: "all",
+      }),
+    });
+
+    const dashboardCall = mockGet.mock.calls.find((call) => call[0] === "/reports/dashboard");
+    expect(dashboardCall[1].params.month).toBeUndefined();
+    expect(dashboardCall[1].params.quarter).toBeUndefined();
   });
 });

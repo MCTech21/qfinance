@@ -17,10 +17,10 @@ const Dashboard = () => {
   const [filteredProjects, setFilteredProjects] = useState([]);
   const [selectedEmpresa, setSelectedEmpresa] = useState("all");
   const [selectedProject, setSelectedProject] = useState("all");
-  const [selectedYear, setSelectedYear] = useState(2025);
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [selectedMonth, setSelectedMonth] = useState(1);
   const [selectedQuarter, setSelectedQuarter] = useState(1);
-  const [selectedPeriod, setSelectedPeriod] = useState("month");
+  const [selectedPeriod, setSelectedPeriod] = useState("all");
   const [activeTab, setActiveTab] = useState("pnl");
   const [isLoading, setIsLoading] = useState(true);
   const [isError, setIsError] = useState(false);
@@ -35,37 +35,46 @@ const Dashboard = () => {
     { value: 10, label: "Octubre" }, { value: 11, label: "Noviembre" }, { value: 12, label: "Diciembre" },
   ];
 
-  const fetchData = useCallback(async () => {
+  const fetchDashboard = useCallback(async () => {
     setIsLoading(true);
     setIsError(false);
     try {
       const params = { empresa_id: selectedEmpresa, project_id: selectedProject, period: selectedPeriod, year: selectedYear };
       if (selectedPeriod === "month") params.month = selectedMonth;
       if (selectedPeriod === "quarter") params.quarter = selectedQuarter;
-      const [reportsRes, empresasRes, projectsRes] = await Promise.all([
-        api().get("/reports/dashboard", { params }),
-        api().get("/empresas"),
-        api().get("/projects"),
-      ]);
+      const reportsRes = await api().get("/reports/dashboard", { params });
       setDashboardData(reportsRes.data);
-      const permitted = isAdmin ? (empresasRes.data || []) : (empresasRes.data || []).filter((e) => (allowedCompanies || []).some((ac) => ac.id === e.id));
-      setEmpresas(permitted);
-      setProjects(projectsRes.data || []);
     } catch (error) {
       setIsError(true);
       toast.error(error?.response?.data?.detail?.message || "Error al cargar dashboard");
     } finally {
       setIsLoading(false);
     }
-  }, [api, selectedEmpresa, selectedProject, selectedYear, selectedMonth, selectedQuarter, selectedPeriod, allowedCompanies, isAdmin]);
+  }, [api, selectedEmpresa, selectedProject, selectedYear, selectedMonth, selectedQuarter, selectedPeriod]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  const fetchScopeOptions = useCallback(async () => {
+    try {
+      const [empresasRes, projectsRes] = await Promise.all([api().get("/empresas"), api().get("/projects")]);
+      const permitted = isAdmin ? (empresasRes.data || []) : (empresasRes.data || []).filter((e) => (allowedCompanies || []).some((ac) => ac.id === e.id));
+      setEmpresas(permitted);
+      setProjects(projectsRes.data || []);
+    } catch (error) {
+      toast.error(error?.response?.data?.detail?.message || "Error al cargar catálogo de filtros");
+    }
+  }, [api, allowedCompanies, isAdmin]);
+
+  useEffect(() => { fetchScopeOptions(); }, [fetchScopeOptions]);
+  useEffect(() => { fetchDashboard(); }, [fetchDashboard]);
 
   useEffect(() => {
     const scopedProjects = selectedEmpresa === "all" ? projects : projects.filter((p) => p.empresa_id === selectedEmpresa);
-    setFilteredProjects(isAdmin ? scopedProjects : scopedProjects.filter((p) => (allowedCompanies || []).some((c) => c.id === p.empresa_id)));
-    setSelectedProject("all");
-  }, [selectedEmpresa, projects, allowedCompanies, isAdmin]);
+    const scoped = isAdmin ? scopedProjects : scopedProjects.filter((p) => (allowedCompanies || []).some((c) => c.id === p.empresa_id));
+    setFilteredProjects(scoped);
+    const currentSelectionIsValid = selectedProject === "all" || scoped.some((p) => p.id === selectedProject);
+    if (!currentSelectionIsValid) {
+      setSelectedProject("all");
+    }
+  }, [selectedEmpresa, projects, allowedCompanies, isAdmin, selectedProject]);
 
   const formatCurrency = (num) => new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(num || 0);
   const formatPct = (num) => (num === null || num === undefined ? "N/A" : `${Number(num).toFixed(2)}%`);
