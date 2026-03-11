@@ -5669,7 +5669,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "include_pending": include_pending,
             "meta": {
                 "pending_budget_policy": "excluded_from_official_budget",
-                "budget_control_committed_policy": "purchase_orders.approved_for_payment pending_amount distributed by line ratio; excludes posted movements already in real",
+                "budget_control_committed_policy": "purchase_orders pending_approval|approved_for_payment pending_amount (or total-approved) distributed by line ratio and filtered by dashboard period; excludes posted movements already in real",
                 "budget_control_available_policy": "budget - real - committed",
             },
         }
@@ -5811,13 +5811,26 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     pending_total = sum((_to_period_decimal(m.get("amount_mxn", 0)) for m in pending_in_period), Decimal("0.00"))
 
     budget_control_codes = set(BUDGET_CONTROL_CODES)
-    committed_by_partida: Dict[str, Decimal] = {code: Decimal("0.00") for code in BUDGET_CONTROL_CODES}
+    committed_by_partida: Dict[str, Decimal] = {}
+
+    for code, values in by_partida.items():
+        budget = money_dec(values.get("presupuesto") or 0)
+        real = money_dec(values.get("ejecutado") or 0)
+        if _is_ingresos_code(code):
+            continue
+        if budget != 0 or real != 0:
+            budget_control_codes.add(code)
+            committed_by_partida.setdefault(code, Decimal("0.00"))
+
     po_query = {
         "project_id": {"$in": project_ids},
-        "status": PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value,
+        "status": {"$in": [PurchaseOrderStatus.PENDING_APPROVAL.value, PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value]},
     }
     purchase_orders = await db.purchase_orders.find(po_query, {"_id": 0}).to_list(10000)
     for po in purchase_orders:
+        po_date = _parse_any_date(po.get("planned_date") or po.get("due_date") or po.get("order_date") or po.get("created_at"))
+        if po_date and not _match_dashboard_period(to_tijuana(po_date), normalized_period, selected_year, month, quarter):
+            continue
         po_total = money_dec(po.get("total_mxn") or po.get("total") or 0)
         approved_amount_total = money_dec(po.get("approved_amount_total") or 0)
         pending_amount = money_dec(po.get("pending_amount") or (po_total - approved_amount_total))
@@ -5836,8 +5849,10 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             continue
         ratio = (pending_amount / line_total_sum)
         for partida, line_amount in line_amounts:
-            if partida not in budget_control_codes:
+            if _is_ingresos_code(partida):
                 continue
+            budget_control_codes.add(partida)
+            committed_by_partida.setdefault(partida, Decimal("0.00"))
             committed_by_partida[partida] = (committed_by_partida.get(partida, Decimal("0.00")) + (line_amount * ratio)).quantize(TWO_DECIMALS)
 
     budget_control_rows = []
@@ -5850,7 +5865,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     red_count = 0
     yellow_count = 0
     overrun_count = 0
-    for code in BUDGET_CONTROL_CODES:
+    for code in sorted(budget_control_codes):
         values = by_partida.get(code, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
         budget = money_dec(values.get("presupuesto") or 0)
         real = money_dec(values.get("ejecutado") or 0)
@@ -5990,7 +6005,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "pending_budget_policy": "excluded_from_official_budget",
             "income_source": "inventory_items.precio_total",
             "income_partida_code": PL_INCOME_CODE,
-            "budget_control_committed_policy": "purchase_orders.approved_for_payment pending_amount distributed by line ratio; excludes posted movements already in real",
+            "budget_control_committed_policy": "purchase_orders pending_approval|approved_for_payment pending_amount (or total-approved) distributed by line ratio and filtered by dashboard period; excludes posted movements already in real",
             "budget_control_available_policy": "budget - real - committed",
         }
     }
