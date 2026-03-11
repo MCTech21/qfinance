@@ -74,6 +74,10 @@ const Dashboard = () => {
   const pnlRows = dashboardData?.pnl?.rows || dashboardData?.rows || [];
   const budgetRows = dashboardData?.budget_control?.rows || [];
   const budgetSummary = dashboardData?.budget_control?.summary || {};
+  const projection = dashboardData?.financial_projection || {};
+  const projectionRows = projection?.rows || [];
+  const projectionKpis = projection?.kpis || {};
+  const projectionAssumptions = projection?.assumptions || [];
 
   if (isLoading) return <div className="space-y-6 animate-pulse"><div className="h-8 w-48 bg-muted rounded" /></div>;
 
@@ -186,10 +190,74 @@ const Dashboard = () => {
         </TabsContent>
 
         <TabsContent value="projection">
-          <Card data-testid="projection-placeholder">
-            <CardHeader><CardTitle>Proyección Financiera</CardTitle></CardHeader>
-            <CardContent className="text-muted-foreground">Próximamente · Vista en construcción.</CardContent>
-          </Card>
+          <div className="space-y-4" data-testid="projection-view">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <KPICard title="Ingreso proyectado remanente" value={projectionKpis.projected_income_remaining || 0} icon={TrendingUp} />
+              <KPICard title="Egreso pendiente remanente" value={projectionKpis.pending_expense_remaining || 0} icon={Wallet} />
+              <KPICard title="Flujo neto proyectado" value={projectionKpis.projected_net_flow || 0} icon={Landmark} />
+              <KPICard title="Saldo final proyectado" value={projectionKpis.projected_final_balance || 0} icon={CheckCircle} />
+              <KPICard title="Necesidad máxima de fondeo" value={projectionKpis.max_funding_need || 0} icon={AlertTriangle} />
+              <Card>
+                <CardHeader className="pb-2"><CardTitle className="text-sm">Periodo crítico de caja</CardTitle></CardHeader>
+                <CardContent className="text-lg font-semibold" data-testid="critical-period">{projectionKpis.critical_cash_period || "Sin presión"}</CardContent>
+              </Card>
+            </div>
+
+            {projectionAssumptions.length ? (
+              <Card>
+                <CardHeader><CardTitle className="font-heading text-base">Escenario base del sistema</CardTitle></CardHeader>
+                <CardContent>
+                  <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-1" data-testid="projection-assumptions">
+                    {projectionAssumptions.map((item, idx) => <li key={`assumption-${idx}`}>{item}</li>)}
+                  </ul>
+                </CardContent>
+              </Card>
+            ) : null}
+
+            <Card>
+              <CardHeader><CardTitle>Proyección Financiera</CardTitle></CardHeader>
+              <CardContent>
+                {!projectionRows.length ? <p className="text-muted-foreground" data-testid="projection-empty">Sin datos de proyección para los filtros seleccionados.</p> : (
+                  <div className="overflow-x-auto">
+                    <table className="data-table" data-testid="projection-table">
+                      <thead>
+                        <tr>
+                          <th>Periodo</th>
+                          <th className="text-right">Saldo inicial</th>
+                          <th className="text-right">Ingresos reales</th>
+                          <th className="text-right">Ingresos proyectados</th>
+                          <th className="text-right">Egresos reales</th>
+                          <th className="text-right">Comprometido</th>
+                          <th className="text-right">Pendiente por ejercer</th>
+                          <th className="text-right">Flujo neto</th>
+                          <th className="text-right">Saldo final</th>
+                          <th className="text-right">Fondeo requerido</th>
+                          <th>Semáforo</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {projectionRows.map((row) => (
+                          <tr key={row.period_label}>
+                            <td>{row.period_label}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.opening_balance)}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.realized_income)}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.projected_income)}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.realized_expense)}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.committed_expense)}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.pending_budget_expense)}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.net_flow)}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.closing_balance)}</td>
+                            <td className="mono-number text-right">{formatCurrency(row.funding_required)}</td>
+                            <td><TrafficLight status={row.traffic_light} showLabel={false} size="sm" /></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
         </TabsContent>
       </Tabs>
     </div>

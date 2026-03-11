@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from decimal import Decimal, InvalidOperation
 import uuid
 from datetime import datetime, timezone, date
@@ -857,6 +857,25 @@ def to_tijuana(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         dt = pytz.UTC.localize(dt)
     return dt.astimezone(TIMEZONE)
+
+
+def normalize_utc_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, date):
+        dt = datetime.combine(value, datetime.min.time())
+    elif isinstance(value, str) and value.strip():
+        try:
+            dt = date_parser.parse(value)
+        except (ValueError, TypeError):
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 def get_year_range() -> tuple[int, int]:
     current_year = to_tijuana(datetime.now(timezone.utc)).year
@@ -5030,6 +5049,289 @@ def _fmt_period_label(period: str, year: int, month: Optional[int], quarter: Opt
     return f"{year:04d}-{(month or 1):02d}"
 
 
+def _parse_any_date(value: Any) -> Optional[datetime]:
+    return normalize_utc_datetime(value)
+
+
+def _projection_bucket_key(dt: datetime, period: str) -> str:
+    if period == "month":
+        return f"{dt.year:04d}-{dt.month:02d}"
+    if period == "quarter":
+        q = ((dt.month - 1) // 3) + 1
+        return f"{dt.year:04d}-Q{q}"
+    return f"{dt.year:04d}"
+
+
+def _projection_bucket_label(key: str, period: str) -> str:
+    if period == "month":
+        return key
+    if period == "quarter":
+        year, q = key.split("-Q")
+        return f"Q{q} {year}"
+    return f"Año {key}"
+
+
+def _projection_bucket_range(key: str, period: str) -> Tuple[datetime, datetime]:
+    if period == "month":
+        year = int(key[:4])
+        month = int(key[-2:])
+        start = datetime(year, month, 1, tzinfo=timezone.utc)
+        if month == 12:
+            end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+        return start, end
+    if period == "quarter":
+        year = int(key[:4])
+        q = int(key[-1])
+        start_month = ((q - 1) * 3) + 1
+        start = datetime(year, start_month, 1, tzinfo=timezone.utc)
+        if start_month == 10:
+            end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            end = datetime(year, start_month + 3, 1, tzinfo=timezone.utc)
+        return start, end
+    start = datetime(int(key), 1, 1, tzinfo=timezone.utc)
+    end = datetime(int(key) + 1, 1, 1, tzinfo=timezone.utc)
+    return start, end
+
+
+def _build_projection_bucket_keys(period: str, year: int, month: Optional[int], quarter: Optional[int]) -> List[str]:
+    if period == "month":
+        start_month = month or 1
+        return [f"{year:04d}-{m:02d}" for m in range(start_month, 13)]
+    if period == "quarter":
+        start_q = quarter or 1
+        return [f"{year:04d}-Q{q}" for q in range(start_q, 5)]
+    if period == "year":
+        return [f"{year + i:04d}" for i in range(0, 3)]
+    return [f"{year:04d}"]
+
+
+def _is_income_partida_code(partida: str) -> bool:
+    return str(partida or "") in {"402", "403", "404"}
+
+
+def _build_financial_projection(
+    period: str,
+    selected_year: int,
+    selected_month: Optional[int],
+    selected_quarter: Optional[int],
+    ingreso_405_total: Decimal,
+    movement_rows: List[dict],
+    budget_control_rows: List[dict],
+    purchase_orders: List[dict],
+    inventory_items: List[dict],
+    budget_plan_rows: List[dict],
+) -> dict:
+    bucket_keys = _build_projection_bucket_keys(period, selected_year, selected_month, selected_quarter)
+    if not bucket_keys:
+        return {
+            "metadata": {"periodicity": period, "row_count": 0},
+            "kpis": {
+                "projected_income_remaining": 0.0,
+                "pending_expense_remaining": 0.0,
+                "projected_net_flow": 0.0,
+                "projected_final_balance": 0.0,
+                "max_funding_need": 0.0,
+                "critical_cash_period": None,
+                "opening_balance_source": "calculated_from_posted_movements",
+            },
+            "rows": [],
+            "assumptions": [],
+            "source_details": {},
+        }
+
+    ranges = [_projection_bucket_range(k, period) for k in bucket_keys]
+    horizon_start = normalize_utc_datetime(ranges[0][0])
+    horizon_end = normalize_utc_datetime(ranges[-1][1])
+
+    realized_income_by_bucket = {k: Decimal("0.00") for k in bucket_keys}
+    realized_expense_by_bucket = {k: Decimal("0.00") for k in bucket_keys}
+    opening_balance = Decimal("0.00")
+    realized_income_to_date = Decimal("0.00")
+    movements_with_dates = 0
+    for mv in movement_rows:
+        mv_date = _parse_any_date(mv.get("date"))
+        if not mv_date:
+            continue
+        movements_with_dates += 1
+        mv_date = normalize_utc_datetime(mv_date)
+        amt = _to_period_decimal(abs(float(mv.get("amount_mxn", 0))))
+        partida = str(mv.get("partida_codigo") or mv.get("partida_id") or "")
+        if mv_date < horizon_start:
+            if _is_income_partida_code(partida):
+                opening_balance += amt
+                realized_income_to_date += amt
+            else:
+                opening_balance -= amt
+            continue
+        if mv_date >= horizon_end:
+            continue
+        bkey = _projection_bucket_key(mv_date, period)
+        if bkey not in realized_income_by_bucket:
+            continue
+        if _is_income_partida_code(partida):
+            realized_income_by_bucket[bkey] += amt
+            realized_income_to_date += amt
+        else:
+            realized_expense_by_bucket[bkey] += amt
+
+    committed_by_bucket = {k: Decimal("0.00") for k in bucket_keys}
+    po_with_date = 0
+    for po in purchase_orders:
+        pending_amount = money_dec(po.get("pending_amount") or ((po.get("total_mxn") or po.get("total") or 0) - (po.get("approved_amount_total") or 0)))
+        if pending_amount <= 0:
+            continue
+        po_date = _parse_any_date(po.get("planned_date") or po.get("due_date") or po.get("order_date"))
+        if po_date is not None:
+            po_with_date += 1
+        po_dt = normalize_utc_datetime(po_date) if po_date is not None else horizon_start
+        if po_dt < horizon_start:
+            po_dt = horizon_start
+        if po_dt >= horizon_end:
+            po_dt = horizon_start
+        bkey = _projection_bucket_key(po_dt, period)
+        if bkey in committed_by_bucket:
+            committed_by_bucket[bkey] += pending_amount.quantize(TWO_DECIMALS)
+
+    pending_total = Decimal("0.00")
+    for row in budget_control_rows:
+        available = money_dec(row.get("available") or 0)
+        if available > 0:
+            pending_total += available
+
+    pending_by_bucket = {k: Decimal("0.00") for k in bucket_keys}
+    assumptions: List[str] = []
+    monthly_values = []
+    for plan in budget_plan_rows:
+        monthly_map = plan.get("monthly_breakdown") or {}
+        for k, v in monthly_map.items():
+            dt = normalize_utc_datetime(f"{k}-01")
+            if not dt:
+                continue
+            if dt < horizon_start or dt >= horizon_end:
+                continue
+            monthly_values.append(_to_period_decimal(v))
+            bkey = _projection_bucket_key(dt, period)
+            if bkey in pending_by_bucket:
+                pending_by_bucket[bkey] += _to_period_decimal(v)
+
+    if pending_total > 0:
+        if sum(monthly_values, Decimal("0.00")) > 0:
+            allocated = sum(pending_by_bucket.values(), Decimal("0.00"))
+            scale = (pending_total / allocated) if allocated > 0 else Decimal("0.00")
+            for key in pending_by_bucket:
+                pending_by_bucket[key] = (pending_by_bucket[key] * scale).quantize(TWO_DECIMALS)
+            assumptions.append("Pendiente por ejercer distribuido usando monthly_breakdown de budget_plans y normalizado al remanente real.")
+        else:
+            even = (pending_total / Decimal(len(bucket_keys))).quantize(TWO_DECIMALS)
+            for key in pending_by_bucket:
+                pending_by_bucket[key] = even
+            pending_by_bucket[bucket_keys[-1]] += (pending_total - sum(pending_by_bucket.values(), Decimal("0.00"))).quantize(TWO_DECIMALS)
+            assumptions.append("Pendiente por ejercer distribuido uniformemente por falta de calendario presupuestal suficiente.")
+
+    projected_remaining_total = (ingreso_405_total - realized_income_to_date).quantize(TWO_DECIMALS)
+    if projected_remaining_total < 0:
+        projected_remaining_total = Decimal("0.00")
+    projected_by_bucket = {k: Decimal("0.00") for k in bucket_keys}
+    inventory_dated = 0
+    for item in inventory_items:
+        dt = normalize_utc_datetime(item.get("estimated_sale_date") or item.get("sale_date") or item.get("created_at"))
+        if not dt:
+            continue
+        if dt < horizon_start or dt >= horizon_end:
+            continue
+        inventory_dated += 1
+        key = _projection_bucket_key(dt, period)
+        if key in projected_by_bucket:
+            projected_by_bucket[key] += _to_period_decimal(item.get("precio_total", 0))
+
+    sum_projected = sum(projected_by_bucket.values(), Decimal("0.00"))
+    if projected_remaining_total > 0:
+        if sum_projected > 0:
+            factor = projected_remaining_total / sum_projected
+            for key in projected_by_bucket:
+                projected_by_bucket[key] = (projected_by_bucket[key] * factor).quantize(TWO_DECIMALS)
+            assumptions.append("Ingresos proyectados calendarizados con fechas reales de inventario cuando estuvieron disponibles.")
+        else:
+            even = (projected_remaining_total / Decimal(len(bucket_keys))).quantize(TWO_DECIMALS)
+            for key in projected_by_bucket:
+                projected_by_bucket[key] = even
+            projected_by_bucket[bucket_keys[-1]] += (projected_remaining_total - sum(projected_by_bucket.values(), Decimal("0.00"))).quantize(TWO_DECIMALS)
+            assumptions.append("Ingresos proyectados (405 remanente) distribuidos uniformemente por falta de fechas comerciales suficientes.")
+
+    rows = []
+    current_opening = opening_balance.quantize(TWO_DECIMALS)
+    max_funding = Decimal("0.00")
+    critical_period = None
+    projected_net_flow = Decimal("0.00")
+    for key in bucket_keys:
+        realized_income = realized_income_by_bucket[key].quantize(TWO_DECIMALS)
+        projected_income = projected_by_bucket[key].quantize(TWO_DECIMALS)
+        realized_expense = realized_expense_by_bucket[key].quantize(TWO_DECIMALS)
+        committed_expense = committed_by_bucket[key].quantize(TWO_DECIMALS)
+        pending_budget_expense = pending_by_bucket[key].quantize(TWO_DECIMALS)
+        net_flow = (realized_income + projected_income - realized_expense - committed_expense - pending_budget_expense).quantize(TWO_DECIMALS)
+        closing_balance = (current_opening + net_flow).quantize(TWO_DECIMALS)
+        funding = abs(closing_balance) if closing_balance < 0 else Decimal("0.00")
+        if funding > max_funding:
+            max_funding = funding
+            critical_period = _projection_bucket_label(key, period)
+        if closing_balance >= 0:
+            traffic = "green"
+        elif funding <= Decimal("50000"):
+            traffic = "yellow"
+        else:
+            traffic = "red"
+        rows.append({
+            "period_label": _projection_bucket_label(key, period),
+            "opening_balance": _dashboard_decimal_to_float(current_opening),
+            "realized_income": _dashboard_decimal_to_float(realized_income),
+            "projected_income": _dashboard_decimal_to_float(projected_income),
+            "realized_expense": _dashboard_decimal_to_float(realized_expense),
+            "committed_expense": _dashboard_decimal_to_float(committed_expense),
+            "pending_budget_expense": _dashboard_decimal_to_float(pending_budget_expense),
+            "net_flow": _dashboard_decimal_to_float(net_flow),
+            "closing_balance": _dashboard_decimal_to_float(closing_balance),
+            "funding_required": _dashboard_decimal_to_float(funding),
+            "traffic_light": traffic,
+        })
+        current_opening = closing_balance
+        projected_net_flow += net_flow
+
+    assumptions = assumptions or ["Proyección construida con el calendario disponible del sistema sin fechas inventadas."]
+    return {
+        "metadata": {
+            "periodicity": period,
+            "horizon_start": _projection_bucket_label(bucket_keys[0], period),
+            "horizon_end": _projection_bucket_label(bucket_keys[-1], period),
+            "row_count": len(rows),
+        },
+        "kpis": {
+            "projected_income_remaining": _dashboard_decimal_to_float(projected_remaining_total),
+            "pending_expense_remaining": _dashboard_decimal_to_float(pending_total.quantize(TWO_DECIMALS)),
+            "projected_net_flow": _dashboard_decimal_to_float(projected_net_flow.quantize(TWO_DECIMALS)),
+            "projected_final_balance": _dashboard_decimal_to_float(current_opening),
+            "max_funding_need": _dashboard_decimal_to_float(max_funding.quantize(TWO_DECIMALS)),
+            "critical_cash_period": critical_period,
+            "opening_balance_source": "calculated_from_posted_movements",
+        },
+        "rows": rows,
+        "assumptions": assumptions,
+        "source_details": {
+            "income_405_policy": "sum(inventory_items.precio_total)",
+            "projected_income_policy": "405_total - realized_income_402_403_404_to_horizon",
+            "committed_policy": "purchase_orders approved_for_payment using pending_amount; date priority planned_date/due_date/order_date",
+            "pending_budget_policy": "sum(max(available,0)) from budget control rows, distributed by monthly_breakdown when available, otherwise uniform",
+            "calendar_policy": "real dates first; fallback to even distribution in horizon",
+            "movements_with_date": movements_with_dates,
+            "purchase_orders_with_date": po_with_date,
+            "inventory_items_with_date": inventory_dated,
+        },
+    }
+
+
 def _derive_partida_group(code: str, partida_catalog: dict) -> str:
     part = partida_catalog.get(str(code), {}) or {}
     if part.get("grupo"):
@@ -5322,6 +5624,21 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
                     "available": 0.0,
                 },
             },
+            "financial_projection": {
+                "metadata": {"periodicity": normalized_period, "row_count": 0},
+                "kpis": {
+                    "projected_income_remaining": 0.0,
+                    "pending_expense_remaining": 0.0,
+                    "projected_net_flow": 0.0,
+                    "projected_final_balance": 0.0,
+                    "max_funding_need": 0.0,
+                    "critical_cash_period": None,
+                    "opening_balance_source": "not_available",
+                },
+                "rows": [],
+                "assumptions": ["Sin proyectos en alcance para calcular proyección."],
+                "source_details": {},
+            },
             "pending": {"count": 0, "total_mxn": 0.0},
             "pending_authorizations": await db.authorizations.count_documents({"status": "pending"}),
             "movements_count": 0,
@@ -5552,6 +5869,18 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     income_total = ingreso_405
     corrida = _build_corrida_rows(detail, income_total)
     pl_rows = _build_pl_rows(by_partida, partida_map, ingreso_405)
+    financial_projection = _build_financial_projection(
+        period=normalized_period,
+        selected_year=selected_year,
+        selected_month=month,
+        selected_quarter=quarter,
+        ingreso_405_total=ingreso_405,
+        movement_rows=movement_rows,
+        budget_control_rows=budget_control_rows,
+        purchase_orders=purchase_orders,
+        inventory_items=inventory_items,
+        budget_plan_rows=plan_rows,
+    )
     subtotals = {row.get("name"): row for row in pl_rows if row.get("row_type") == "subtotal"}
 
     por_ejercer_total = (total_budget - total_exec).quantize(TWO_DECIMALS)
@@ -5627,6 +5956,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
         },
         "by_project": [],
         "corrida": corrida,
+        "financial_projection": financial_projection,
         "pending_authorizations": await db.authorizations.count_documents({"status": "pending"}),
         "movements_count": len(movements_in_period),
         "include_pending": include_pending,
