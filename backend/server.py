@@ -6339,7 +6339,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
                     "income_pct": op_subtotal.get("income_pct") if op_subtotal else None,
                 },
                 "pre_tax": {
-                    "amount": pbt_subtotal.get("budget") if pbt_subtotal else None,
+                    "amount": _dashboard_decimal_to_float(por_ejercer_total),
                     "income_pct": pbt_subtotal.get("income_pct") if pbt_subtotal else None,
                 },
             },
