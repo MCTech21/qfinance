@@ -161,6 +161,36 @@ describe("Dashboard", () => {
     expect(screen.getByText(/Sin ingresos proyectados capturados/i)).toBeInTheDocument();
   });
 
+  test("renderiza shared_kpis aunque financial_projection venga vacío con empty_reason", async () => {
+    mockGet.mockImplementation((url) => {
+      if (url === "/reports/dashboard") {
+        return Promise.resolve({
+          data: {
+            ...baseDashboardPayload,
+            financial_projection: { rows: [], kpis: {}, assumptions: [], empty_reason: "Error al calcular proyección financiera. Ver logs." },
+          },
+        });
+      }
+      if (url === "/empresas") return Promise.resolve({ data: [{ id: "c1", nombre: "Empresa" }] });
+      if (url === "/projects") return Promise.resolve({ data: [{ id: "p1", empresa_id: "c1", name: "Proyecto" }] });
+      return Promise.resolve({ data: {} });
+    });
+
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByTestId("kpi-grid")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("tab", { name: "Proyección Financiera" }));
+    expect(screen.getByTestId("projection-empty")).toHaveTextContent("Error al calcular proyección financiera. Ver logs.");
+    expect(screen.getByText(/Ingreso Proyectado 405/i)).toBeInTheDocument();
+  });
+
+  test("selectors envían project_id por ID canónico", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByTestId("kpi-grid")).toBeInTheDocument());
+    const calls = mockGet.mock.calls.filter((call) => call[0] === "/reports/dashboard");
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0][1].params.project_id).toBe("all");
+  });
+
   test("renderiza S/I en KPI y tabla cuando llegan nulls", async () => {
     mockGet.mockImplementation((url) => {
       if (url === "/reports/dashboard") {

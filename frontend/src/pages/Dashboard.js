@@ -126,6 +126,9 @@ const Dashboard = () => {
   const projectionRows = projection?.rows || [];
   const projectionKpis = projection?.kpis || {};
   const projectionAssumptions = projection?.assumptions || [];
+  const projectionEmptyReason = projection?.empty_reason;
+  const budgetControlEmptyReason = dashboardData?.budget_control?.empty_reason;
+  const pnlEmptyReason = dashboardData?.pnl?.empty_reason;
   const ingreso405 = shared.ingreso_proyectado_405 ?? dashboardData?.totals?.ingreso_proyectado_405;
   const hasProjectedIncomeSource = (dashboardData?.meta?.income_source || "none") !== "none";
   const hasProjectedIncome = hasProjectedIncomeSource && safeNumber(ingreso405) !== null;
@@ -179,7 +182,7 @@ const Dashboard = () => {
           <Card>
             <CardHeader><CardTitle className="font-heading text-lg flex items-center gap-2"><Building className="h-5 w-5" />Estado de resultados (P&amp;L)</CardTitle></CardHeader>
             <CardContent>
-              {!pnlRows.length ? <p className="text-muted-foreground" data-testid="empty-state">Sin datos para los filtros seleccionados.</p> : (
+              {!pnlRows.length ? <p className="text-muted-foreground" data-testid="empty-state">{pnlEmptyReason || "Sin datos para los filtros seleccionados."}</p> : (
                 <div className="overflow-x-auto"><table className="data-table" data-testid="pl-table"><thead><tr><th>Concepto</th><th className="text-right">% s/ ingreso</th><th className="text-right">Presupuesto</th><th className="text-right">Real</th><th className="text-right">Por ejercer</th><th>Semáforo</th></tr></thead><tbody>
                   {pnlRows.map((row, idx) => (
                     <tr key={`${row.code}-${idx}`} className={row.row_type === "subtotal" ? "font-semibold bg-muted/20" : ""}>
@@ -212,7 +215,7 @@ const Dashboard = () => {
             <Card>
               <CardHeader><CardTitle className="font-heading text-lg">Control Presupuestal por partida</CardTitle></CardHeader>
               <CardContent>
-                {!budgetRows.length ? <p className="text-muted-foreground" data-testid="budget-control-empty">Sin partidas presupuestales para los filtros seleccionados.</p> : (
+                {!budgetRows.length ? <p className="text-muted-foreground" data-testid="budget-control-empty">{budgetControlEmptyReason || "Sin partidas presupuestales para los filtros seleccionados."}</p> : (
                   <div className="overflow-x-auto">
                     <table className="data-table" data-testid="budget-control-table">
                       <thead>
@@ -278,7 +281,7 @@ const Dashboard = () => {
             <Card>
               <CardHeader><CardTitle>Proyección Financiera</CardTitle></CardHeader>
               <CardContent>
-                {!projectionRows.length ? <p className="text-muted-foreground" data-testid="projection-empty">Sin datos de proyección para los filtros seleccionados.</p> : (
+                {!projectionRows.length ? <p className="text-muted-foreground" data-testid="projection-empty">{projectionEmptyReason || "Sin datos de proyección para los filtros seleccionados."}</p> : (
                   <div className="overflow-x-auto">
                     <table className="data-table" data-testid="projection-table">
                       <thead>
