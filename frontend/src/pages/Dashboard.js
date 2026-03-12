@@ -133,6 +133,19 @@ const Dashboard = () => {
   const hasProjectedIncomeSource = (dashboardData?.meta?.income_source || "none") !== "none";
   const hasProjectedIncome = hasProjectedIncomeSource && safeNumber(ingreso405) !== null;
   const porEjercerValue = safeNumber(shared.por_ejercer ?? dashboardData?.totals?.por_ejercer_total);
+  const realVentas = shared?.real_ventas_402_403 ?? null;
+  const metaVentas = shared?.meta_ventas_405 ?? null;
+  const avanceVentasPct = shared?.avance_ventas_pct ?? null;
+  const ventasTrafficLight =
+    avanceVentasPct === null ? "neutral" :
+    avanceVentasPct >= 100 ? "green" :
+    avanceVentasPct >= 90 ? "yellow" : "red";
+  const ventasColor = {
+    green: "bg-green-500",
+    yellow: "bg-yellow-400",
+    red: "bg-red-500",
+    neutral: "bg-gray-400",
+  }[ventasTrafficLight];
 
   if (isLoading) return <div className="space-y-6 animate-pulse"><div className="h-8 w-48 bg-muted rounded" /></div>;
 
@@ -166,6 +179,37 @@ const Dashboard = () => {
         <KPICard title="Real ejecutado" value={shared.real_ejecutado ?? dashboardData?.totals?.ejecutado_total ?? null} icon={TrendingUp} variant="inverse" />
         <KPICard title="Por ejercer" value={shared.por_ejercer ?? dashboardData?.totals?.por_ejercer_total ?? null} icon={porEjercerValue === null || porEjercerValue >= 0 ? CheckCircle : AlertTriangle} />
         <Card><CardContent className="pt-6"><TrafficLight status={dashboardData?.totals?.traffic_light} percentage={shared.ejecucion_vs_ingreso_pct ?? dashboardData?.totals?.ejecucion_vs_ingreso_pct} size="lg" /></CardContent></Card>
+        {metaVentas !== null && (
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground uppercase tracking-wide">
+                Avance de Ventas (402+403 vs 405)
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                <div className="flex justify-between items-baseline">
+                  <span className="text-2xl font-bold mono-number">
+                    {avanceVentasPct !== null ? `${avanceVentasPct.toFixed(1)}%` : "S/I"}
+                  </span>
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full text-white ${ventasColor}`}>
+                    {ventasTrafficLight === "green" ? "Meta alcanzada" : ventasTrafficLight === "yellow" ? "Próximo" : "En curso"}
+                  </span>
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-2.5 dark:bg-gray-700">
+                  <div
+                    className={`h-2.5 rounded-full transition-all ${ventasColor}`}
+                    style={{ width: `${Math.min(avanceVentasPct ?? 0, 100)}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>Cobrado: {formatCurrency(realVentas)}</span>
+                  <span>Meta: {formatCurrency(metaVentas)}</span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       {isError ? <Card><CardContent className="pt-6 text-muted-foreground" data-testid="error-state">No se pudo cargar el dashboard.</CardContent></Card> : null}

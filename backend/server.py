@@ -5427,7 +5427,7 @@ def _build_projection_bucket_keys(period: str, year: int, month: Optional[int], 
 
 
 def _is_income_partida_code(partida: str) -> bool:
-    return str(partida or "") in {"402", "403", "404"}
+    return str(partida or "") in {"402", "403"}
 
 
 def _build_financial_projection(
@@ -5553,17 +5553,21 @@ def _build_financial_projection(
     if projected_remaining_total < 0:
         projected_remaining_total = Decimal("0.00")
     projected_by_bucket = {k: Decimal("0.00") for k in bucket_keys}
-    inventory_dated = 0
-    for item in inventory_items:
-        dt = normalize_utc_datetime(item.get("estimated_sale_date") or item.get("sale_date") or item.get("created_at"))
-        if not dt:
+    monthly_income_values = []
+    for plan in budget_plan_rows:
+        if str(plan.get("partida_codigo") or "") != PL_INCOME_CODE:
             continue
-        if dt < horizon_start or dt >= horizon_end:
-            continue
-        inventory_dated += 1
-        key = _projection_bucket_key(dt, period)
-        if key in projected_by_bucket:
-            projected_by_bucket[key] += _to_period_decimal(item.get("precio_total", 0))
+        monthly_map = plan.get("monthly_breakdown") or {}
+        for key, value in monthly_map.items():
+            dt = normalize_utc_datetime(f"{key}-01")
+            if not dt:
+                continue
+            if dt < horizon_start or dt >= horizon_end:
+                continue
+            monthly_income_values.append(_to_period_decimal(value))
+            bucket_key = _projection_bucket_key(dt, period)
+            if bucket_key in projected_by_bucket:
+                projected_by_bucket[bucket_key] += _to_period_decimal(value)
 
     sum_projected = sum(projected_by_bucket.values(), Decimal("0.00"))
     if projected_remaining_total > 0:
@@ -5571,7 +5575,7 @@ def _build_financial_projection(
             factor = projected_remaining_total / sum_projected
             for key in projected_by_bucket:
                 projected_by_bucket[key] = (projected_by_bucket[key] * factor).quantize(TWO_DECIMALS)
-            assumptions.append("Ingresos proyectados calendarizados con fechas reales de inventario cuando estuvieron disponibles.")
+            assumptions.append("Ingresos proyectados (405 remanente) calendarizados con monthly_breakdown de budget_plans.")
         else:
             even = (projected_remaining_total / Decimal(len(bucket_keys))).quantize(TWO_DECIMALS)
             for key in projected_by_bucket:
@@ -5638,14 +5642,14 @@ def _build_financial_projection(
         "rows": rows,
         "assumptions": assumptions,
         "source_details": {
-            "income_405_policy": "sum(inventory_items.precio_total)",
-            "projected_income_policy": "405_total - realized_income_402_403_404_to_horizon",
+            "income_405_policy": "budget_plan partida 405",
+            "projected_income_policy": "405_presupuesto - realizados_402_403",
             "committed_policy": "purchase_orders approved_for_payment using pending_amount; date priority planned_date/due_date/order_date",
             "pending_budget_policy": "sum(max(available,0)) from budget control rows, distributed by monthly_breakdown when available, otherwise uniform",
             "calendar_policy": "real dates first; fallback to even distribution in horizon",
             "movements_with_date": movements_with_dates,
             "purchase_orders_with_date": po_with_date,
-            "inventory_items_with_date": inventory_dated,
+            "income_budget_months_in_horizon": len(monthly_income_values),
         },
     }
 
@@ -6142,6 +6146,8 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "status_label": signal["status_label"],
             "variation_color": signal["variation_color"],
         })
+        if _is_ingresos_code(code):
+            continue
         total_budget += presupuesto
         total_exec += ejecutado
 
@@ -6286,6 +6292,12 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
 
     por_ejercer_total = (total_budget - total_exec).quantize(TWO_DECIMALS)
     ejecucion_vs_ingreso_pct = _dashboard_safe_pct(total_exec, ingreso_405)
+    real_ventas_402_403 = (
+        money_dec(by_partida.get("402", {}).get("ejecutado", 0))
+        + money_dec(by_partida.get("403", {}).get("ejecutado", 0))
+    ).quantize(TWO_DECIMALS)
+    meta_ventas_405 = ingreso_405
+    avance_ventas_pct = _dashboard_safe_pct(real_ventas_402_403, meta_ventas_405)
 
     shared_kpis_empty_reason = None
     try:
@@ -6295,6 +6307,9 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "real_ejecutado": _dashboard_decimal_to_float(total_exec),
             "por_ejercer": _dashboard_decimal_to_float(por_ejercer_total),
             "ejecucion_vs_ingreso_pct": _dashboard_decimal_to_float(ejecucion_vs_ingreso_pct) if ejecucion_vs_ingreso_pct is not None else None,
+            "real_ventas_402_403": _dashboard_decimal_to_float(real_ventas_402_403),
+            "meta_ventas_405": _dashboard_decimal_to_float(meta_ventas_405) if has_income_base else None,
+            "avance_ventas_pct": _dashboard_decimal_to_float(avance_ventas_pct) if avance_ventas_pct is not None else None,
             "empty_reason": None,
         }
     except Exception:
@@ -6306,6 +6321,9 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "real_ejecutado": None,
             "por_ejercer": None,
             "ejecucion_vs_ingreso_pct": None,
+            "real_ventas_402_403": None,
+            "meta_ventas_405": None,
+            "avance_ventas_pct": None,
             "empty_reason": shared_kpis_empty_reason,
         }
 
