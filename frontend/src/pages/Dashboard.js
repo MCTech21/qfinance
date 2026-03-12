@@ -146,7 +146,7 @@ const Dashboard = () => {
     red: "bg-red-500",
     neutral: "bg-gray-400",
   }[ventasTrafficLight];
-  const utilityExpected = shared?.utility_expected?.gross || {};
+  const utilityExpected = shared?.utility_expected?.pre_tax || {};
   const utilityExpectedSubtitle = utilityExpected?.income_pct === null || utilityExpected?.income_pct === undefined
     ? "S/I"
     : `${Number(utilityExpected.income_pct).toFixed(2)}% s/ ingreso`;
@@ -182,7 +182,7 @@ const Dashboard = () => {
         <KPICard title="Presupuesto total" value={shared.presupuesto_total ?? dashboardData?.totals?.presupuesto_total ?? null} icon={Wallet} subtitle="Budgets" />
         <KPICard title="Real ejecutado" value={shared.real_ejecutado ?? dashboardData?.totals?.ejecutado_total ?? null} icon={TrendingUp} variant="inverse" />
         <KPICard title="Por ejercer" value={shared.por_ejercer ?? dashboardData?.totals?.por_ejercer_total ?? null} icon={porEjercerValue === null || porEjercerValue >= 0 ? CheckCircle : AlertTriangle} />
-        <KPICard title="Utilidad Bruta Esperada" value={utilityExpected?.amount ?? null} icon={Landmark} subtitle={utilityExpectedSubtitle} />
+        <KPICard title="Utilidad Antes de Impuestos" value={utilityExpected?.amount ?? null} icon={Landmark} subtitle={utilityExpectedSubtitle} />
         <Card><CardContent className="pt-6"><TrafficLight status={dashboardData?.totals?.traffic_light} percentage={shared.ejecucion_vs_ingreso_pct ?? dashboardData?.totals?.ejecucion_vs_ingreso_pct} size="lg" /></CardContent></Card>
         {metaVentas !== null && (
           <Card>
@@ -235,7 +235,7 @@ const Dashboard = () => {
                 <div className="overflow-x-auto"><table className="data-table" data-testid="pl-table"><thead><tr><th>Concepto</th><th className="text-right">% s/ ingreso</th><th className="text-right">Presupuesto</th><th className="text-right">Real</th><th className="text-right">Pendiente</th><th>Semáforo</th></tr></thead><tbody>
                   {pnlRows.map((row, idx) => (
                     <tr key={`${row.code}-${idx}`} className={row.row_type === "subtotal" ? "font-semibold bg-muted/20" : ""}>
-                      <td>{row.code} {row.name}</td>
+                      <td>{row.row_type === "subtotal" ? row.name : `${row.code} ${row.name}`}</td>
                       <td className="mono-number text-right">{formatPct(row.income_pct)}</td>
                       <td className="mono-number text-right">{formatCurrency(row.budget)}</td>
                       <td className="mono-number text-right">{formatCurrency(row.real)}</td>

@@ -33,7 +33,7 @@ const baseDashboardPayload = {
   pnl: {
     rows: [
       { code: "101", name: "TERRENO", budget: 100, real: 50, remaining: 50, income_pct: 5, traffic_light: "green", row_type: "partida" },
-      { code: "SUBTOTAL_GROSS", name: "UTILIDAD BRUTA", budget: 900, real: 950, remaining: -50, income_pct: 95, traffic_light: "green", row_type: "subtotal" },
+      { code: "SUBTOTAL_GROSS", name: "UTILIDAD BRUTA", budget: 900, real: 950, remaining: -50, income_pct: 95, traffic_light: "green", row_type: "subtotal", row_key: "gross_profit" },
     ],
   },
   budget_control: {
@@ -88,8 +88,9 @@ describe("Dashboard", () => {
     expect(screen.getByRole("tab", { name: "P&L" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Control Presupuestal" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Proyección Financiera" })).toBeInTheDocument();
-    expect(screen.getByText(/Utilidad Bruta Esperada/i)).toBeInTheDocument();
-    expect(screen.getByText(/90.00% s\/ ingreso/i)).toBeInTheDocument();
+    expect(screen.getByText(/Utilidad Antes de Impuestos/i)).toBeInTheDocument();
+    expect(screen.getByText(/75.00% s\/ ingreso/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/\$\s*750\.00/).length).toBeGreaterThan(0);
     expect(screen.getByTestId("pl-table")).toBeInTheDocument();
     expect(screen.getByText("Pendiente")).toBeInTheDocument();
 
@@ -97,6 +98,15 @@ describe("Dashboard", () => {
     expect(screen.getByTestId("budget-control-table")).toBeInTheDocument();
     expect(screen.getByText(/Comprometido total/i)).toBeInTheDocument();
     expect(screen.getByTestId("kpi-grid")).toBeInTheDocument();
+  });
+
+
+  test("muestra labels limpios para subtotales sin concatenar code", async () => {
+    render(<Dashboard />);
+
+    await waitFor(() => expect(screen.getByTestId("pl-table")).toBeInTheDocument());
+    expect(screen.getByText("UTILIDAD BRUTA")).toBeInTheDocument();
+    expect(screen.queryByText(/SUBTOTAL_GROSS\s*UTILIDAD BRUTA/i)).not.toBeInTheDocument();
   });
 
   test("renderiza Proyección Financiera con KPIs y tabla", async () => {
