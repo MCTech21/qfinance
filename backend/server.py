@@ -1034,6 +1034,49 @@ def has_company_access(current_user: dict, company_id: Optional[str]) -> bool:
         return False
 
 
+def normalize_scope_selector(value: Optional[str]) -> str:
+    if value is None:
+        return "all"
+    raw = str(value).strip()
+    if raw.lower() in {"", "all", "todo"}:
+        return "all"
+    return raw
+
+
+async def resolve_project_scope(
+    current_user: dict,
+    empresa_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> List[dict]:
+    company_selector = normalize_scope_selector(empresa_id)
+    project_selector = normalize_scope_selector(project_id)
+
+    role = current_user.get("role")
+    project_query: Dict[str, Any] = {}
+
+    if role not in {UserRole.ADMIN.value, UserRole.FINANZAS.value}:
+        allowed_company_ids = list(current_user.get("empresa_ids") or [])
+        active_company = get_user_company_id(current_user)
+        if active_company and active_company not in allowed_company_ids:
+            allowed_company_ids.append(active_company)
+        allowed_company_ids = [str(cid) for cid in allowed_company_ids if cid]
+        if not allowed_company_ids:
+            raise HTTPException(status_code=403, detail={"code": "forbidden_company", "message": "Usuario sin empresas permitidas"})
+        project_query["empresa_id"] = {"$in": allowed_company_ids}
+
+    if company_selector != "all":
+        enforce_company_access(current_user, company_selector)
+        project_query["empresa_id"] = company_selector
+
+    if project_selector != "all":
+        project_query["id"] = project_selector
+
+    projects = await db.projects.find(project_query, {"_id": 0}).to_list(5000)
+    if project_selector != "all" and not projects:
+        raise HTTPException(status_code=403, detail={"code": "forbidden_project", "message": "Proyecto fuera de alcance"})
+    return projects
+
+
 def get_budget_approval_mode() -> str:
     return os.getenv("BUDGET_APPROVAL_MODE", "soft").strip().lower() or "soft"
 
@@ -2763,6 +2806,7 @@ async def import_providers(file: UploadFile = File(...), current_user: dict = De
 # ========================= BUDGET ROUTES =========================
 @api_router.get("/budgets")
 async def get_budgets(
+    empresa_id: Optional[str] = None,
     project_id: Optional[str] = None,
     partida_codigo: Optional[str] = None,
     year: Optional[str] = None,
@@ -2777,21 +2821,26 @@ async def get_budgets(
     if normalized_month and not normalized_year:
         raise HTTPException(status_code=422, detail={"code": "month_requires_year", "message": "month requiere year"})
 
+    scoped_projects = await resolve_project_scope(current_user, empresa_id=empresa_id, project_id=project_id)
+    project_ids = [str(p.get("id")) for p in scoped_projects if p.get("id")]
+
     query = {}
-    if project_id:
-        query["project_id"] = project_id
+    if project_ids:
+        query["project_id"] = {"$in": project_ids}
+    else:
+        return []
     if partida_codigo:
         query["partida_codigo"] = partida_codigo
 
-    projects = await db.projects.find({}, {"_id": 0}).to_list(5000)
-    project_company_map = {p.get("id"): p.get("empresa_id") for p in projects}
+    project_company_map = {p.get("id"): p.get("empresa_id") for p in scoped_projects}
 
     plans = await db.budget_plans.find(query, {"_id": 0}).to_list(1000)
     plan_items = []
     planned_pairs = set()
     for plan in plans:
         company_id = plan.get("company_id") or project_company_map.get(plan.get("project_id"))
-        enforce_company_access(current_user, company_id)
+        if not company_id or not has_company_access(current_user, company_id):
+            continue
 
         total_dec = decimal_from_value(plan.get("total_amount", "0"), "total_amount")
         annual_map = plan.get("annual_breakdown") or {}
@@ -2851,7 +2900,8 @@ async def get_budgets(
         if pair in planned_pairs:
             continue
         company_id = project_company_map.get(row.get("project_id"))
-        enforce_company_access(current_user, company_id)
+        if not company_id or not has_company_access(current_user, company_id):
+            continue
         key = pair if (not normalized_year or not normalized_month) else (pair[0], pair[1], normalized_year, normalized_month)
         entry = grouped.setdefault(key, {
             "id": row.get("id"),
@@ -5673,28 +5723,12 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
 
     company_selector = _normalize_dashboard_selector(empresa_id)
     project_selector = _normalize_dashboard_selector(project_id)
-    if company_selector != "all":
-        enforce_company_access(current_user, company_selector)
 
-    role = current_user.get("role")
-    project_query = {}
-    if role not in {UserRole.ADMIN.value, UserRole.FINANZAS.value}:
-        allowed_company_ids = list(current_user.get("empresa_ids") or [])
-        active_company = get_user_company_id(current_user)
-        if active_company and active_company not in allowed_company_ids:
-            allowed_company_ids.append(active_company)
-        if not allowed_company_ids:
-            raise HTTPException(status_code=403, detail={"code": "forbidden_company", "message": "Usuario sin empresas permitidas"})
-        project_query["empresa_id"] = {"$in": allowed_company_ids}
-
-    if company_selector != "all":
-        project_query["empresa_id"] = company_selector
-    if project_selector != "all":
-        project_query["id"] = project_selector
-
-    projects = await db.projects.find(project_query, {"_id": 0}).to_list(5000)
-    if project_selector != "all" and not projects:
-        raise HTTPException(status_code=403, detail={"code": "forbidden_project", "message": "Proyecto fuera de alcance"})
+    projects = await resolve_project_scope(
+        current_user,
+        empresa_id=company_selector,
+        project_id=project_selector,
+    )
 
     project_ids = [str(p.get("id")) for p in projects if p.get("id")]
     if not project_ids:
@@ -7455,16 +7489,7 @@ def _period_match(dt: datetime, year: Optional[int], month: Optional[int], perio
 
 
 async def _dashboard_period_data(current_user: dict, empresa_id: Optional[str], project_id: Optional[str], year: Optional[int], month: Optional[int], period: str):
-    if empresa_id:
-        enforce_company_access(current_user, empresa_id)
-    project_query = {}
-    if empresa_id:
-        project_query["empresa_id"] = empresa_id
-    if project_id:
-        project_query["id"] = project_id
-    projects = await db.projects.find(project_query, {"_id": 0}).to_list(2000)
-    if project_id and not projects:
-        raise HTTPException(status_code=403, detail="Proyecto fuera de alcance")
+    projects = await resolve_project_scope(current_user, empresa_id=empresa_id, project_id=project_id)
     project_ids = [p["id"] for p in projects]
 
     budget_query = {"project_id": {"$in": project_ids}}

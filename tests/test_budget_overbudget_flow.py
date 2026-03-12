@@ -365,3 +365,51 @@ def test_budget_availability_endpoint_returns_remaining():
     body = res.json()
     assert body["has_budget"] is True
     assert body["remaining_total"] is not None
+
+def test_budgets_company_filter_excludes_other_companies_and_orphans():
+    client, db = client_for("admin")
+    db.budget_plans.rows.extend([
+        {"id": "bp-e1", "company_id": "e1", "project_id": "pr1", "partida_codigo": "205", "total_amount": "100", "annual_breakdown": {}, "monthly_breakdown": {}, "approval_status": "approved"},
+        {"id": "bp-e2", "company_id": "e2", "project_id": "pr2", "partida_codigo": "205", "total_amount": "200", "annual_breakdown": {}, "monthly_breakdown": {}, "approval_status": "approved"},
+        {"id": "bp-orphan", "company_id": None, "project_id": None, "partida_codigo": "205", "total_amount": "999", "annual_breakdown": {}, "monthly_breakdown": {}, "approval_status": "approved"},
+    ])
+
+    res = client.get("/api/budgets", params={"empresa_id": "e1"})
+    assert res.status_code == 200
+    ids = {row["id"] for row in res.json()}
+    assert "bp-e1" in ids
+    assert "bp-e2" not in ids
+    assert "bp-orphan" not in ids
+
+
+def test_budgets_project_filter_is_pure_project_without_na_rows():
+    client, db = client_for("admin")
+    db.budget_plans.rows.extend([
+        {"id": "bp-pr1", "company_id": "e1", "project_id": "pr1", "partida_codigo": "205", "total_amount": "100", "annual_breakdown": {}, "monthly_breakdown": {}, "approval_status": "approved"},
+        {"id": "bp-pr2", "company_id": "e2", "project_id": "pr2", "partida_codigo": "205", "total_amount": "200", "annual_breakdown": {}, "monthly_breakdown": {}, "approval_status": "approved"},
+        {"id": "bp-global-e1", "company_id": "e1", "project_id": None, "partida_codigo": "205", "total_amount": "300", "annual_breakdown": {}, "monthly_breakdown": {}, "approval_status": "approved"},
+    ])
+
+    res = client.get("/api/budgets", params={"empresa_id": "e1", "project_id": "pr1"})
+    assert res.status_code == 200
+    rows = res.json()
+    assert {row["id"] for row in rows} == {"bp-pr1"}
+    assert all(row.get("project_id") == "pr1" for row in rows)
+
+
+def test_dashboard_reports_budget_scope_matches_company_and_project_filters():
+    client, db = client_for("admin")
+    db.config = db.__class__.__dict__.get('config', None) or type(db.budgets)([])
+    db.budget_plans.rows.extend([
+        {"id": "bp-pr1", "company_id": "e1", "project_id": "pr1", "partida_codigo": "205", "total_amount": "100", "annual_breakdown": {"2026": "100"}, "monthly_breakdown": {"2026-01": "100"}, "approval_status": "approved"},
+        {"id": "bp-pr2", "company_id": "e2", "project_id": "pr2", "partida_codigo": "205", "total_amount": "200", "annual_breakdown": {"2026": "200"}, "monthly_breakdown": {"2026-01": "200"}, "approval_status": "approved"},
+        {"id": "bp-global-e1", "company_id": "e1", "project_id": None, "partida_codigo": "205", "total_amount": "999", "annual_breakdown": {"2026": "999"}, "monthly_breakdown": {"2026-01": "999"}, "approval_status": "approved"},
+    ])
+
+    company_view = client.get("/api/reports/dashboard", params={"empresa_id": "e1", "project_id": "all", "period": "month", "year": 2026, "month": 1})
+    assert company_view.status_code == 200
+    assert company_view.json()["totals"]["presupuesto_total"] == 100.0
+
+    project_view = client.get("/api/reports/dashboard", params={"empresa_id": "e1", "project_id": "pr1", "period": "month", "year": 2026, "month": 1})
+    assert project_view.status_code == 200
+    assert project_view.json()["totals"]["presupuesto_total"] == 100.0
