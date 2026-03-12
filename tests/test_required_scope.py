@@ -566,6 +566,15 @@ def test_reports_dashboard_pl_uses_inventory_405_and_subtotals():
         {"id": "b201", "project_id": "p1", "partida_codigo": "201", "year": 2026, "month": 1, "amount_mxn": 200},
         {"id": "b301", "project_id": "p1", "partida_codigo": "301", "year": 2026, "month": 1, "amount_mxn": 100},
     ])
+    db.budget_plans.rows.append({
+        "id": "bp405",
+        "project_id": "p1",
+        "partida_codigo": "405",
+        "total_amount": 101500,
+        "monthly_breakdown": {"2026-01": 101500},
+        "annual_breakdown": {},
+        "approval_status": "approved",
+    })
     db.movements.rows.extend([
         {"id": "m101", "project_id": "p1", "partida_codigo": "101", "status": "posted", "is_deleted": False, "date": "2026-01-10T00:00:00+00:00", "amount_mxn": -800},
         {"id": "m201", "project_id": "p1", "partida_codigo": "201", "status": "posted", "is_deleted": False, "date": "2026-01-11T00:00:00+00:00", "amount_mxn": -100},
