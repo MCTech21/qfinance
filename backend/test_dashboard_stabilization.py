@@ -5,7 +5,7 @@ os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
 os.environ.setdefault("DB_NAME", "qfinance_test")
 
 from fastapi import HTTPException
-from server import _normalize_dashboard_period_filters, _resolve_dashboard_income_base
+from server import _dashboard_abs_amount, _normalize_dashboard_period_filters, _resolve_dashboard_income_base
 
 
 def test_period_all_accepts_no_month_or_quarter():
@@ -68,3 +68,10 @@ def test_income_source_none_when_no_valid_sources():
     )
     assert resolved["value"] is None
     assert resolved["income_source"] == "none"
+
+
+def test_dashboard_abs_amount_tolerates_invalid_and_null_values():
+    assert _dashboard_abs_amount(None) == Decimal("0.00")
+    assert _dashboard_abs_amount("") == Decimal("0.00")
+    assert _dashboard_abs_amount("abc") == Decimal("0.00")
+    assert _dashboard_abs_amount(-12.345) == Decimal("12.34")

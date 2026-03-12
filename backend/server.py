@@ -5011,6 +5011,14 @@ def _dashboard_decimal_to_float(value: Decimal) -> float:
     return float(value.quantize(TWO_DECIMALS))
 
 
+def _dashboard_abs_amount(value: Any) -> Decimal:
+    """Safely parse dashboard amounts without crashing on null/invalid values."""
+    try:
+        return _to_period_decimal(abs(decimal_from_value(value or 0, "amount_mxn")))
+    except HTTPException:
+        return Decimal("0.00")
+
+
 def _month_keys_for_period(period: str, year: int, month: Optional[int], quarter: Optional[int]) -> List[str]:
     if period == "month":
         if month is None:
@@ -5285,7 +5293,7 @@ def _build_financial_projection(
             continue
         movements_with_dates += 1
         mv_date = normalize_utc_datetime(mv_date)
-        amt = _to_period_decimal(abs(float(mv.get("amount_mxn", 0))))
+        amt = _dashboard_abs_amount(mv.get("amount_mxn", 0))
         partida = str(mv.get("partida_codigo") or mv.get("partida_id") or "")
         if mv_date < horizon_start:
             if _is_income_partida_code(partida):
@@ -5864,7 +5872,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             movements_in_period.append(mv)
             partida = str(mv.get("partida_codigo") or mv.get("partida_id") or "N/A")
             row = by_partida.setdefault(partida, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
-            row["ejecutado"] += _to_period_decimal(abs(float(mv.get("amount_mxn", 0))))
+            row["ejecutado"] += _dashboard_abs_amount(mv.get("amount_mxn", 0))
 
     pending_in_period = []
     for mv in pending_rows:
@@ -5906,7 +5914,8 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     inventory_items = await db.inventory_items.find({"project_id": {"$in": project_ids}}, {"_id": 0}).to_list(10000)
     income_resolution = _resolve_dashboard_income_base(projects, inventory_items)
     ingreso_base_value = income_resolution.get("value")
-    ingreso_405 = (ingreso_base_value or Decimal("0.00")).quantize(TWO_DECIMALS)
+    has_income_base = ingreso_base_value is not None
+    ingreso_405 = ingreso_base_value.quantize(TWO_DECIMALS) if has_income_base else Decimal("0.00")
 
     if ingreso_base_value is not None:
         by_partida[PL_INCOME_CODE] = {
@@ -6052,7 +6061,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "ejecutado_total": _dashboard_decimal_to_float(total_exec),
             "variacion_total": _dashboard_decimal_to_float(total_signal["variacion"]),
             "porcentaje_avance": _dashboard_decimal_to_float(total_signal["porcentaje"]) if total_signal["porcentaje"] is not None else None,
-            "ingreso_proyectado_405": _dashboard_decimal_to_float(ingreso_405),
+            "ingreso_proyectado_405": _dashboard_decimal_to_float(ingreso_405) if has_income_base else None,
             "por_ejercer_total": _dashboard_decimal_to_float(por_ejercer_total),
             "ejecucion_vs_ingreso_pct": _dashboard_decimal_to_float(ejecucion_vs_ingreso_pct) if ejecucion_vs_ingreso_pct is not None else None,
             "porcentaje_label": total_signal["porcentaje_label"],
@@ -6066,7 +6075,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "percentage": _dashboard_decimal_to_float(total_signal["porcentaje"]) if total_signal["porcentaje"] is not None else None,
         },
         "shared_kpis": {
-            "ingreso_proyectado_405": _dashboard_decimal_to_float(ingreso_405),
+            "ingreso_proyectado_405": _dashboard_decimal_to_float(ingreso_405) if has_income_base else None,
             "presupuesto_total": _dashboard_decimal_to_float(total_budget),
             "real_ejecutado": _dashboard_decimal_to_float(total_exec),
             "por_ejercer": _dashboard_decimal_to_float(por_ejercer_total),
@@ -6112,6 +6121,9 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "income_source": income_resolution.get("income_source"),
             "income_source_label": income_resolution.get("income_source_label"),
             "income_source_available_flags": income_resolution.get("income_source_available_flags", {}),
+            "is_informative_missing": not has_income_base,
+            "can_compute_income_pct": has_income_base and ingreso_405 > 0,
+            "empty_reason": "missing_income_source" if not has_income_base else None,
             "income_partida_code": PL_INCOME_CODE,
             "budget_control_committed_policy": "purchase_orders pending_approval|approved_for_payment pending_amount (or total-approved) distributed by line ratio and filtered by dashboard period; excludes posted movements already in real",
             "budget_control_available_policy": "budget - real - committed",

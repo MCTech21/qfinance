@@ -160,4 +160,30 @@ describe("Dashboard", () => {
     expect(screen.getByText("S/I")).toBeInTheDocument();
     expect(screen.getByText(/Sin ingresos proyectados capturados/i)).toBeInTheDocument();
   });
+
+  test("renderiza S/I en KPI y tabla cuando llegan nulls", async () => {
+    mockGet.mockImplementation((url) => {
+      if (url === "/reports/dashboard") {
+        return Promise.resolve({
+          data: {
+            ...baseDashboardPayload,
+            totals: { ...baseDashboardPayload.totals, ingreso_proyectado_405: null, ejecucion_vs_ingreso_pct: null },
+            shared_kpis: { ...baseDashboardPayload.shared_kpis, ingreso_proyectado_405: null, ejecucion_vs_ingreso_pct: null, por_ejercer: null },
+            meta: { ...baseDashboardPayload.meta, income_source: "none", is_informative_missing: true },
+            pnl: { rows: [{ code: "101", name: "TERRENO", budget: null, real: 0, remaining: null, income_pct: null, traffic_light: "yellow", row_type: "partida" }] },
+            budget_control: { summary: { red_count: null, yellow_count: null, overrun_count: null, committed_total: null, available_total: null }, rows: [{ code: "101", name: "TERRENO", group: "COSTOS", budget: null, real: null, committed: 0, available: null, advance_pct: null, traffic_light: "yellow" }] },
+          },
+        });
+      }
+      if (url === "/empresas") return Promise.resolve({ data: [{ id: "c1", nombre: "Empresa" }] });
+      if (url === "/projects") return Promise.resolve({ data: [{ id: "p1", empresa_id: "c1", name: "Proyecto" }] });
+      return Promise.resolve({ data: {} });
+    });
+
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByTestId("kpi-grid")).toBeInTheDocument());
+    expect(screen.getAllByText("S/I").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("informative-missing-note")).toBeInTheDocument();
+  });
+
 });

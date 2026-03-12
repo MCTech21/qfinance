@@ -1,5 +1,6 @@
 import { cn } from "../lib/utils";
 import { TrendingUp, TrendingDown, Minus } from "lucide-react";
+import { safeCurrency, safeNumber, safePercent } from "../lib/numberFormatters";
 
 const KPICard = ({ 
   title, 
@@ -11,16 +12,6 @@ const KPICard = ({
   variant = "default",
   className 
 }) => {
-  const formatCurrency = (num) => {
-    if (num === undefined || num === null) return "—";
-    return new Intl.NumberFormat("es-MX", {
-      style: "currency",
-      currency: "MXN",
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    }).format(num);
-  };
-
   const getTrendIcon = () => {
     if (trend === "up") return <TrendingUp className="h-4 w-4" />;
     if (trend === "down") return <TrendingDown className="h-4 w-4" />;
@@ -56,7 +47,7 @@ const KPICard = ({
       
       <div className="space-y-1">
         <p className="text-2xl font-bold font-mono tabular-nums tracking-tight">
-          {typeof value === "number" ? formatCurrency(value) : value}
+          {safeNumber(value) !== null ? safeCurrency(value, { fallback: "S/I" }) : (value ?? "S/I")}
         </p>
         
         {(subtitle || trendValue !== undefined) && (
@@ -64,7 +55,7 @@ const KPICard = ({
             {trendValue !== undefined && (
               <span className={cn("flex items-center gap-1 text-xs font-medium", getTrendColor())}>
                 {getTrendIcon()}
-                {typeof trendValue === "number" ? `${trendValue.toFixed(1)}%` : trendValue}
+                {safeNumber(trendValue) !== null ? safePercent(trendValue, { fallback: "S/I", fractionDigits: 1 }) : (trendValue ?? "S/I")}
               </span>
             )}
             {subtitle && (

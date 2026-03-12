@@ -1,3 +1,4 @@
+import { safeNumber } from "../lib/numberFormatters";
 import { cn } from "../lib/utils";
 
 const TrafficLight = ({ status, percentage, showLabel = true, size = "default" }) => {
@@ -39,7 +40,8 @@ const TrafficLight = ({ status, percentage, showLabel = true, size = "default" }
   };
 
   const config = getStatusConfig();
-  
+  const safePercentage = safeNumber(percentage);
+
   const sizeClasses = {
     sm: "px-2 py-0.5 text-xs",
     default: "px-2.5 py-1 text-sm",
@@ -66,7 +68,7 @@ const TrafficLight = ({ status, percentage, showLabel = true, size = "default" }
       <span className={cn("rounded-full", config.dot, dotSizes[size])} />
       {showLabel && (
         <span>
-          {percentage !== undefined ? `${percentage.toFixed(1)}%` : config.label}
+          {safePercentage !== null ? `${safePercentage.toFixed(1)}%` : config.label}
         </span>
       )}
     </span>

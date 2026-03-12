@@ -1,9 +1,11 @@
 import { buildYearOptions } from "../lib/yearRange";
+import { safeCurrency, safeNumber, safePercent } from "../lib/numberFormatters";
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useAuth } from "../context/AuthContext";
 import { toast } from "sonner";
 import KPICard from "../components/KPICard";
 import TrafficLight from "../components/TrafficLight";
+import DashboardSectionErrorBoundary from "../components/DashboardSectionErrorBoundary";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
@@ -29,6 +31,7 @@ const Dashboard = () => {
   const isAdmin = user?.role === "admin";
   const abortRef = useRef(null);
   const requestKeyRef = useRef(null);
+  const apiClient = useMemo(() => api(), [api]);
 
   const months = [
     { value: 1, label: "Enero" }, { value: 2, label: "Febrero" }, { value: 3, label: "Marzo" },
@@ -62,7 +65,7 @@ const Dashboard = () => {
   useEffect(() => {
     const fetchScopeOptions = async () => {
       try {
-        const [empresasRes, projectsRes] = await Promise.all([api().get("/empresas"), api().get("/projects")]);
+        const [empresasRes, projectsRes] = await Promise.all([apiClient.get("/empresas"), apiClient.get("/projects")]);
         const permitted = isAdmin ? (empresasRes.data || []) : (empresasRes.data || []).filter((e) => (allowedCompanies || []).some((ac) => ac.id === e.id));
         setEmpresas(permitted);
         setProjects(projectsRes.data || []);
@@ -72,7 +75,7 @@ const Dashboard = () => {
     };
 
     fetchScopeOptions();
-  }, [api, allowedCompanies, isAdmin]);
+  }, [apiClient, allowedCompanies, isAdmin]);
 
   useEffect(() => {
     const key = JSON.stringify(requestParams);
@@ -90,7 +93,7 @@ const Dashboard = () => {
       setIsLoading(true);
       setIsError(false);
       try {
-        const reportsRes = await api().get("/reports/dashboard", { params: requestParams, signal: controller.signal });
+        const reportsRes = await apiClient.get("/reports/dashboard", { params: requestParams, signal: controller.signal });
         if (!controller.signal.aborted) {
           setDashboardData(reportsRes.data);
         }
@@ -110,10 +113,10 @@ const Dashboard = () => {
     fetchDashboard();
 
     return () => controller.abort();
-  }, [api, requestParams]);
+  }, [apiClient, requestParams]);
 
-  const formatCurrency = (num) => new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(num || 0);
-  const formatPct = (num) => (num === null || num === undefined ? "S/I" : `${Number(num).toFixed(2)}%`);
+  const formatCurrency = (num) => safeCurrency(num, { fallback: "S/I" });
+  const formatPct = (num) => safePercent(num, { fallback: "S/I", fractionDigits: 2 });
 
   const shared = dashboardData?.shared_kpis || {};
   const pnlRows = dashboardData?.pnl?.rows || dashboardData?.rows || [];
@@ -123,9 +126,10 @@ const Dashboard = () => {
   const projectionRows = projection?.rows || [];
   const projectionKpis = projection?.kpis || {};
   const projectionAssumptions = projection?.assumptions || [];
-  const ingreso405 = shared.ingreso_proyectado_405 ?? dashboardData?.totals?.ingreso_proyectado_405 ?? 0;
+  const ingreso405 = shared.ingreso_proyectado_405 ?? dashboardData?.totals?.ingreso_proyectado_405;
   const hasProjectedIncomeSource = (dashboardData?.meta?.income_source || "none") !== "none";
-  const hasProjectedIncome = hasProjectedIncomeSource && Number(ingreso405) >= 0;
+  const hasProjectedIncome = hasProjectedIncomeSource && safeNumber(ingreso405) !== null;
+  const porEjercerValue = safeNumber(shared.por_ejercer ?? dashboardData?.totals?.por_ejercer_total);
 
   if (isLoading) return <div className="space-y-6 animate-pulse"><div className="h-8 w-48 bg-muted rounded" /></div>;
 
@@ -155,9 +159,9 @@ const Dashboard = () => {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4" data-testid="kpi-grid">
         <KPICard title="Ingreso proyectado (base dashboard)" value={hasProjectedIncome ? ingreso405 : "S/I"} icon={Landmark} subtitle={hasProjectedIncome ? (dashboardData?.meta?.income_source_label || "Fuente disponible") : "Sin ingresos proyectados capturados"} />
-        <KPICard title="Presupuesto total" value={shared.presupuesto_total || dashboardData?.totals?.presupuesto_total || 0} icon={Wallet} subtitle="Budgets" />
-        <KPICard title="Real ejecutado" value={shared.real_ejecutado || dashboardData?.totals?.ejecutado_total || 0} icon={TrendingUp} variant="inverse" />
-        <KPICard title="Por ejercer" value={shared.por_ejercer || dashboardData?.totals?.por_ejercer_total || 0} icon={(shared.por_ejercer || dashboardData?.totals?.por_ejercer_total || 0) >= 0 ? CheckCircle : AlertTriangle} />
+        <KPICard title="Presupuesto total" value={shared.presupuesto_total ?? dashboardData?.totals?.presupuesto_total ?? null} icon={Wallet} subtitle="Budgets" />
+        <KPICard title="Real ejecutado" value={shared.real_ejecutado ?? dashboardData?.totals?.ejecutado_total ?? null} icon={TrendingUp} variant="inverse" />
+        <KPICard title="Por ejercer" value={shared.por_ejercer ?? dashboardData?.totals?.por_ejercer_total ?? null} icon={porEjercerValue === null || porEjercerValue >= 0 ? CheckCircle : AlertTriangle} />
         <Card><CardContent className="pt-6"><TrafficLight status={dashboardData?.totals?.traffic_light} percentage={shared.ejecucion_vs_ingreso_pct ?? dashboardData?.totals?.ejecucion_vs_ingreso_pct} size="lg" /></CardContent></Card>
       </div>
 
@@ -171,6 +175,7 @@ const Dashboard = () => {
         </TabsList>
 
         <TabsContent value="pnl">
+          <DashboardSectionErrorBoundary>
           <Card>
             <CardHeader><CardTitle className="font-heading text-lg flex items-center gap-2"><Building className="h-5 w-5" />Estado de resultados (P&amp;L)</CardTitle></CardHeader>
             <CardContent>
@@ -190,16 +195,18 @@ const Dashboard = () => {
               )}
             </CardContent>
           </Card>
+          </DashboardSectionErrorBoundary>
         </TabsContent>
 
         <TabsContent value="control">
+          <DashboardSectionErrorBoundary>
           <div className="space-y-4" data-testid="budget-control-view">
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-              <KPICard title="Partidas en rojo" value={budgetSummary.red_count || 0} icon={ShieldAlert} />
-              <KPICard title="Partidas en amarillo" value={budgetSummary.yellow_count || 0} icon={CircleAlert} />
-              <KPICard title="Partidas con sobreejercicio" value={budgetSummary.overrun_count || 0} icon={AlertTriangle} />
-              <KPICard title="Comprometido total" value={budgetSummary.committed_total || 0} icon={BriefcaseBusiness} />
-              <KPICard title="Disponible total operativo" value={budgetSummary.available_total || 0} icon={Wallet} />
+              <KPICard title="Partidas en rojo" value={budgetSummary.red_count ?? null} icon={ShieldAlert} />
+              <KPICard title="Partidas en amarillo" value={budgetSummary.yellow_count ?? null} icon={CircleAlert} />
+              <KPICard title="Partidas con sobreejercicio" value={budgetSummary.overrun_count ?? null} icon={AlertTriangle} />
+              <KPICard title="Comprometido total" value={budgetSummary.committed_total ?? null} icon={BriefcaseBusiness} />
+              <KPICard title="Disponible total operativo" value={budgetSummary.available_total ?? null} icon={Wallet} />
             </div>
 
             <Card>
@@ -235,16 +242,22 @@ const Dashboard = () => {
               </CardContent>
             </Card>
           </div>
+          </DashboardSectionErrorBoundary>
         </TabsContent>
 
         <TabsContent value="projection">
+          <DashboardSectionErrorBoundary>
           <div className="space-y-4" data-testid="projection-view">
+            {dashboardData?.meta?.is_informative_missing ? (
+              <Card><CardContent className="pt-6 text-sm text-muted-foreground" data-testid="informative-missing-note">Sin datos suficientes para calcular este indicador</CardContent></Card>
+            ) : null}
+
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              <KPICard title="Ingreso proyectado remanente" value={projectionKpis.projected_income_remaining || 0} icon={TrendingUp} />
-              <KPICard title="Egreso pendiente remanente" value={projectionKpis.pending_expense_remaining || 0} icon={Wallet} />
-              <KPICard title="Flujo neto proyectado" value={projectionKpis.projected_net_flow || 0} icon={Landmark} />
-              <KPICard title="Saldo final proyectado" value={projectionKpis.projected_final_balance || 0} icon={CheckCircle} />
-              <KPICard title="Necesidad máxima de fondeo" value={projectionKpis.max_funding_need || 0} icon={AlertTriangle} />
+              <KPICard title="Ingreso proyectado remanente" value={projectionKpis.projected_income_remaining ?? null} icon={TrendingUp} />
+              <KPICard title="Egreso pendiente remanente" value={projectionKpis.pending_expense_remaining ?? null} icon={Wallet} />
+              <KPICard title="Flujo neto proyectado" value={projectionKpis.projected_net_flow ?? null} icon={Landmark} />
+              <KPICard title="Saldo final proyectado" value={projectionKpis.projected_final_balance ?? null} icon={CheckCircle} />
+              <KPICard title="Necesidad máxima de fondeo" value={projectionKpis.max_funding_need ?? null} icon={AlertTriangle} />
               <Card>
                 <CardHeader className="pb-2"><CardTitle className="text-sm">Periodo crítico de caja</CardTitle></CardHeader>
                 <CardContent className="text-lg font-semibold" data-testid="critical-period">{projectionKpis.critical_cash_period || "Sin presión"}</CardContent>
@@ -306,6 +319,7 @@ const Dashboard = () => {
               </CardContent>
             </Card>
           </div>
+          </DashboardSectionErrorBoundary>
         </TabsContent>
       </Tabs>
     </div>
