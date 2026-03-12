@@ -757,6 +757,29 @@ def test_reports_dashboard_project_out_of_scope_returns_403_not_500():
     assert r.status_code == 403
 
 
+
+def test_reports_dashboard_tolerates_null_amounts_and_missing_income_source():
+    c, db = make_client(role="admin")
+
+    db.projects.rows = [{"id": "p_null", "empresa_id": "c1", "name": "Proyecto Null"}]
+    db.movements.rows = [{
+        "id": "m-null",
+        "project_id": "p_null",
+        "partida_codigo": "101",
+        "amount_mxn": None,
+        "date": "2026-01-10T00:00:00+00:00",
+        "status": "posted",
+    }]
+    db.inventory_items.rows = []
+
+    r = c.get('/api/reports/dashboard', params={"empresa_id": "c1", "project_id": "p_null", "period": "month", "year": 2026, "month": 1})
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["totals"]["ingreso_proyectado_405"] is None
+    assert payload["meta"]["is_informative_missing"] is True
+    assert payload["meta"]["can_compute_income_pct"] is False
+
+
 def test_reports_export_data_accepts_all_aliases_and_validates_month():
     c, _ = make_client(role="admin")
 
