@@ -5733,7 +5733,7 @@ def _build_pl_rows(by_partida: Dict[str, Dict[str, Decimal]], partida_map: Dict[
         real = source["ejecutado"].quantize(TWO_DECIMALS)
         remaining = (budget - real).quantize(TWO_DECIMALS)
         part = partida_map.get(code, {})
-        pct = _dashboard_safe_pct(real, ingreso_405)
+        pct = _dashboard_safe_pct(budget, ingreso_405)
         return {
             "code": code,
             "name": part.get("nombre", code),
@@ -5745,18 +5745,33 @@ def _build_pl_rows(by_partida: Dict[str, Dict[str, Decimal]], partida_map: Dict[
             "row_type": "partida",
         }
 
+    income_values = by_partida.get(PL_INCOME_CODE, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
+    income_budget = money_dec(income_values.get("presupuesto", ingreso_405)).quantize(TWO_DECIMALS)
+    income_real = money_dec(income_values.get("ejecutado", Decimal("0.00"))).quantize(TWO_DECIMALS)
+    income_remaining = (income_budget - income_real).quantize(TWO_DECIMALS)
+    rows.append({
+        "code": PL_INCOME_CODE,
+        "name": "Ingresos",
+        "budget": _dashboard_decimal_to_float(income_budget),
+        "real": _dashboard_decimal_to_float(income_real),
+        "remaining": _dashboard_decimal_to_float(income_remaining),
+        "income_pct": _dashboard_decimal_to_float(Decimal("100.00")) if income_budget > 0 else None,
+        "traffic_light": _utility_traffic_light(income_budget, income_real),
+        "row_type": "income",
+    })
+
     for code in PL_DIRECT_COST_CODES:
         rows.append(_build_partida_row(code))
 
     direct_budget = sum((by_partida.get(c, {}).get("presupuesto", Decimal("0.00")) for c in PL_DIRECT_COST_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
     direct_real = sum((by_partida.get(c, {}).get("ejecutado", Decimal("0.00")) for c in PL_DIRECT_COST_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
-    gross_budget = (ingreso_405 - direct_budget).quantize(TWO_DECIMALS)
-    gross_real = (ingreso_405 - direct_real).quantize(TWO_DECIMALS)
+    gross_budget = (income_budget - direct_budget).quantize(TWO_DECIMALS)
+    gross_real = direct_real
     gross_remaining = (gross_budget - gross_real).quantize(TWO_DECIMALS)
-    gross_pct = _dashboard_safe_pct(gross_real, ingreso_405)
+    gross_pct = _dashboard_safe_pct(gross_budget, income_budget)
     rows.append({
         "code": "SUBTOTAL_GROSS",
-        "name": "UTILIDAD BRUTA",
+        "name": "Utilidad Bruta",
         "budget": _dashboard_decimal_to_float(gross_budget),
         "real": _dashboard_decimal_to_float(gross_real),
         "remaining": _dashboard_decimal_to_float(gross_remaining),
@@ -5770,12 +5785,12 @@ def _build_pl_rows(by_partida: Dict[str, Dict[str, Decimal]], partida_map: Dict[
     sell_admin_budget = sum((by_partida.get(c, {}).get("presupuesto", Decimal("0.00")) for c in PL_SELLING_ADMIN_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
     sell_admin_real = sum((by_partida.get(c, {}).get("ejecutado", Decimal("0.00")) for c in PL_SELLING_ADMIN_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
     op_budget = (gross_budget - sell_admin_budget).quantize(TWO_DECIMALS)
-    op_real = (gross_real - sell_admin_real).quantize(TWO_DECIMALS)
+    op_real = (direct_real + sell_admin_real).quantize(TWO_DECIMALS)
     op_remaining = (op_budget - op_real).quantize(TWO_DECIMALS)
-    op_pct = _dashboard_safe_pct(op_real, ingreso_405)
+    op_pct = _dashboard_safe_pct(op_budget, income_budget)
     rows.append({
         "code": "SUBTOTAL_OPERATING",
-        "name": "UTILIDAD OPERATIVA",
+        "name": "Utilidad Operativa",
         "budget": _dashboard_decimal_to_float(op_budget),
         "real": _dashboard_decimal_to_float(op_real),
         "remaining": _dashboard_decimal_to_float(op_remaining),
@@ -5789,12 +5804,12 @@ def _build_pl_rows(by_partida: Dict[str, Dict[str, Decimal]], partida_map: Dict[
     financial_budget = sum((by_partida.get(c, {}).get("presupuesto", Decimal("0.00")) for c in PL_FINANCIAL_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
     financial_real = sum((by_partida.get(c, {}).get("ejecutado", Decimal("0.00")) for c in PL_FINANCIAL_CODES), Decimal("0.00")).quantize(TWO_DECIMALS)
     pbt_budget = (op_budget - financial_budget).quantize(TWO_DECIMALS)
-    pbt_real = (op_real - financial_real).quantize(TWO_DECIMALS)
+    pbt_real = (op_real + financial_real).quantize(TWO_DECIMALS)
     pbt_remaining = (pbt_budget - pbt_real).quantize(TWO_DECIMALS)
-    pbt_pct = _dashboard_safe_pct(pbt_real, ingreso_405)
+    pbt_pct = _dashboard_safe_pct(pbt_budget, income_budget)
     rows.append({
         "code": "SUBTOTAL_PRE_TAX",
-        "name": "UTILIDAD ANTES DE IMPUESTOS",
+        "name": "Utilidad Antes de Impuestos",
         "budget": _dashboard_decimal_to_float(pbt_budget),
         "real": _dashboard_decimal_to_float(pbt_real),
         "remaining": _dashboard_decimal_to_float(pbt_remaining),
@@ -6301,11 +6316,28 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
 
     shared_kpis_empty_reason = None
     try:
+        gross_subtotal = next((row for row in pl_rows if row.get("code") == "SUBTOTAL_GROSS"), None)
+        op_subtotal = next((row for row in pl_rows if row.get("code") == "SUBTOTAL_OPERATING"), None)
+        pbt_subtotal = next((row for row in pl_rows if row.get("code") == "SUBTOTAL_PRE_TAX"), None)
         shared_kpis_payload = {
             "ingreso_proyectado_405": _dashboard_decimal_to_float(ingreso_405) if has_income_base else None,
             "presupuesto_total": _dashboard_decimal_to_float(total_budget),
             "real_ejecutado": _dashboard_decimal_to_float(total_exec),
             "por_ejercer": _dashboard_decimal_to_float(por_ejercer_total),
+            "utility_expected": {
+                "gross": {
+                    "amount": gross_subtotal.get("budget") if gross_subtotal else None,
+                    "income_pct": gross_subtotal.get("income_pct") if gross_subtotal else None,
+                },
+                "operating": {
+                    "amount": op_subtotal.get("budget") if op_subtotal else None,
+                    "income_pct": op_subtotal.get("income_pct") if op_subtotal else None,
+                },
+                "pre_tax": {
+                    "amount": pbt_subtotal.get("budget") if pbt_subtotal else None,
+                    "income_pct": pbt_subtotal.get("income_pct") if pbt_subtotal else None,
+                },
+            },
             "ejecucion_vs_ingreso_pct": _dashboard_decimal_to_float(ejecucion_vs_ingreso_pct) if ejecucion_vs_ingreso_pct is not None else None,
             "real_ventas_402_403": _dashboard_decimal_to_float(real_ventas_402_403),
             "meta_ventas_405": _dashboard_decimal_to_float(meta_ventas_405) if has_income_base else None,
@@ -6320,6 +6352,11 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "presupuesto_total": None,
             "real_ejecutado": None,
             "por_ejercer": None,
+            "utility_expected": {
+                "gross": {"amount": None, "income_pct": None},
+                "operating": {"amount": None, "income_pct": None},
+                "pre_tax": {"amount": None, "income_pct": None},
+            },
             "ejecucion_vs_ingreso_pct": None,
             "real_ventas_402_403": None,
             "meta_ventas_405": None,
