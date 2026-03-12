@@ -10,6 +10,8 @@ const isDevServer = process.env.NODE_ENV !== "production";
 const config = {
   enableHealthCheck: process.env.ENABLE_HEALTH_CHECK === "true",
   enableVisualEdits: isDevServer, // Only enable during dev server
+  enableVisualEditsMetadata:
+    process.env.ENABLE_VISUAL_EDITS_METADATA === "true",
 };
 
 // Conditionally load visual edits modules only in dev mode
@@ -18,6 +20,9 @@ let babelMetadataPlugin;
 
 if (config.enableVisualEdits) {
   setupDevServer = require("./plugins/visual-edits/dev-server-setup");
+}
+
+if (config.enableVisualEditsMetadata) {
   babelMetadataPlugin = require("./plugins/visual-edits/babel-metadata-plugin");
 }
 
@@ -70,8 +75,8 @@ const webpackConfig = {
   },
 };
 
-// Only add babel metadata plugin during dev server
-if (config.enableVisualEdits && babelMetadataPlugin) {
+// Only add babel metadata plugin when explicitly enabled
+if (config.enableVisualEditsMetadata && babelMetadataPlugin) {
   webpackConfig.babel = {
     plugins: [babelMetadataPlugin],
   };
