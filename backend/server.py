@@ -5919,7 +5919,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
 
     plan_rows, legacy_rows = await _fetch_budget_rows_for_scope(
         project_ids=project_ids,
-        include_global=project_selector == "all",
+        include_global=False,
     )
 
     plan_pairs = set()
