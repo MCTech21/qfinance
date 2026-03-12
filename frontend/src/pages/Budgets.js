@@ -93,6 +93,7 @@ const Budgets = () => {
       const [budgetsRes, projectsRes, partidasRes, empresasRes, budgetRequestsRes] = await Promise.all([
         api().get("/budgets", {
           params: {
+            empresa_id: filters.empresa_id !== "all" ? filters.empresa_id : undefined,
             project_id: filters.project_id !== "all" ? filters.project_id : undefined,
             year: filters.year !== "all" ? Number(filters.year) : undefined,
             month: (filters.year !== "all" && filters.month !== "all") ? Number(filters.month) : undefined,
