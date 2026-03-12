@@ -5311,6 +5311,62 @@ def _resolve_dashboard_income_base(project_docs: List[dict], inventory_items: Li
     }
 
 
+def _resolve_income_405_from_budget_plans(
+    plan_rows: List[dict],
+    normalized_period: str,
+    selected_year: int,
+    month: Optional[int],
+    quarter: Optional[int],
+    month_keys: List[str],
+) -> Optional[Decimal]:
+    amount_405 = Decimal("0.00")
+    has_405_plan = False
+
+    for plan in plan_rows:
+        partida = _normalize_partida_codigo(plan.get("partida_codigo"))
+        if partida != PL_INCOME_CODE:
+            continue
+
+        has_405_plan = True
+        total_amount = _to_period_decimal(plan.get("total_amount", 0))
+        annual_map = plan.get("annual_breakdown") or {}
+        monthly_map = plan.get("monthly_breakdown") or {}
+
+        amount = Decimal("0.00")
+        if normalized_period == "month":
+            if month is None:
+                continue
+            mk = f"{selected_year:04d}-{month:02d}"
+            if mk in monthly_map:
+                amount = _to_period_decimal(monthly_map.get(mk))
+        elif normalized_period == "quarter":
+            if quarter is None:
+                continue
+            for mk in month_keys:
+                if mk in monthly_map:
+                    amount += _to_period_decimal(monthly_map.get(mk))
+        else:
+            year_key = str(selected_year)
+            monthly_sum = Decimal("0.00")
+            has_monthly = False
+            for mk in month_keys:
+                if mk in monthly_map:
+                    has_monthly = True
+                    monthly_sum += _to_period_decimal(monthly_map.get(mk))
+            if has_monthly:
+                amount = monthly_sum
+            elif year_key in annual_map:
+                amount = _to_period_decimal(annual_map.get(year_key))
+            else:
+                amount = total_amount
+
+        amount_405 += amount
+
+    if not has_405_plan:
+        return None
+    return amount_405.quantize(TWO_DECIMALS)
+
+
 def _parse_any_date(value: Any) -> Optional[datetime]:
     return normalize_utc_datetime(value)
 
@@ -6025,6 +6081,41 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
         if mv_date and _match_dashboard_period(to_tijuana(mv_date), normalized_period, selected_year, month, quarter):
             pending_in_period.append(mv)
 
+    inventory_items = await db.inventory_items.find({"project_id": {"$in": project_ids}}, {"_id": 0}).to_list(10000)
+    ingreso_405_budget = _resolve_income_405_from_budget_plans(
+        plan_rows=plan_rows,
+        normalized_period=normalized_period,
+        selected_year=selected_year,
+        month=month,
+        quarter=quarter,
+        month_keys=month_keys,
+    )
+    has_income_base = ingreso_405_budget is not None
+    ingreso_405 = ingreso_405_budget if ingreso_405_budget is not None else Decimal("0.00")
+    income_real_402_403 = (
+        _to_period_decimal((by_partida.get("402") or {}).get("ejecutado", 0))
+        + _to_period_decimal((by_partida.get("403") or {}).get("ejecutado", 0))
+    ).quantize(TWO_DECIMALS)
+
+    income_resolution = {
+        "value": ingreso_405_budget,
+        "income_source": "budget_plan_405" if has_income_base else "none",
+        "income_source_label": "Presupuesto 405" if has_income_base else "Sin fuente",
+        "income_source_available_flags": {
+            "project_total": False,
+            "inventory_total": False,
+            "manual_405": False,
+            "manual_405_inventory_coexistence": False,
+            "budget_plan_405": has_income_base,
+        },
+    }
+
+    if ingreso_405_budget is not None:
+        by_partida[PL_INCOME_CODE] = {
+            "presupuesto": ingreso_405_budget,
+            "ejecutado": income_real_402_403,
+        }
+
     partida_docs = await db.catalogo_partidas.find({}, {"_id": 0}).to_list(1000)
     partida_map = {str(p.get("codigo")): p for p in partida_docs}
     yellow, red = await get_dashboard_thresholds()
@@ -6055,18 +6146,6 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
         total_exec += ejecutado
 
     total_signal = build_budget_signal(total_budget, total_exec, yellow, red)
-
-    inventory_items = await db.inventory_items.find({"project_id": {"$in": project_ids}}, {"_id": 0}).to_list(10000)
-    income_resolution = _resolve_dashboard_income_base(projects, inventory_items)
-    ingreso_base_value = income_resolution.get("value")
-    has_income_base = ingreso_base_value is not None
-    ingreso_405 = ingreso_base_value.quantize(TWO_DECIMALS) if has_income_base else Decimal("0.00")
-
-    if ingreso_base_value is not None:
-        by_partida[PL_INCOME_CODE] = {
-            "presupuesto": ingreso_405,
-            "ejecutado": ingreso_405,
-        }
 
     pending_total = sum((_to_period_decimal(m.get("amount_mxn", 0)) for m in pending_in_period), Decimal("0.00"))
 
