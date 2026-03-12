@@ -2821,25 +2821,37 @@ async def get_budgets(
     if normalized_month and not normalized_year:
         raise HTTPException(status_code=422, detail={"code": "month_requires_year", "message": "month requiere year"})
 
-    scoped_projects = await resolve_project_scope(current_user, empresa_id=empresa_id, project_id=project_id)
+    company_selector = normalize_scope_selector(empresa_id)
+    project_selector = normalize_scope_selector(project_id)
+
+    scoped_projects = await resolve_project_scope(current_user, empresa_id=company_selector, project_id=project_selector)
     project_ids = [str(p.get("id")) for p in scoped_projects if p.get("id")]
-
-    query = {}
-    if project_ids:
-        query["project_id"] = {"$in": project_ids}
-    else:
+    if not project_ids:
         return []
-    if partida_codigo:
-        query["partida_codigo"] = partida_codigo
 
-    project_company_map = {p.get("id"): p.get("empresa_id") for p in scoped_projects}
+    project_map = {str(p.get("id")): p for p in scoped_projects if p.get("id")}
+    scoped_company_ids = {str(p.get("empresa_id")) for p in scoped_projects if p.get("empresa_id")}
 
-    plans = await db.budget_plans.find(query, {"_id": 0}).to_list(1000)
+    plan_rows, legacy_rows = await _fetch_budget_rows_for_scope(
+        project_ids=project_ids,
+        include_global=project_selector == "all",
+    )
+
     plan_items = []
     planned_pairs = set()
-    for plan in plans:
-        company_id = plan.get("company_id") or project_company_map.get(plan.get("project_id"))
-        if not company_id or not has_company_access(current_user, company_id):
+    for plan in plan_rows:
+        if not _budget_row_in_scope(
+            plan,
+            project_selector=project_selector,
+            project_ids=set(project_ids),
+            project_map=project_map,
+            scoped_company_ids=scoped_company_ids,
+            require_partida_for_project=project_selector != "all",
+        ):
+            continue
+
+        plan_partida = _normalize_partida_codigo(plan.get("partida_codigo"))
+        if partida_codigo and plan_partida != partida_codigo:
             continue
 
         total_dec = decimal_from_value(plan.get("total_amount", "0"), "total_amount")
@@ -2866,6 +2878,7 @@ async def get_budgets(
             period_amount = decimal_from_value(monthly_map.get(ym_key, "0"), f"monthly_breakdown.{ym_key}")
 
         normalized = normalize_plan_response(plan)
+        normalized["partida_codigo"] = plan_partida
         normalized["total_amount"] = str(period_amount)
         normalized["source"] = "plan"
         normalized["period_mode"] = period_label
@@ -2885,28 +2898,37 @@ async def get_budgets(
             "usage_pct_monthly": availability.get("usage_pct_monthly"),
         })
         plan_items.append(normalized)
-        planned_pairs.add((plan.get("project_id"), plan.get("partida_codigo")))
+        planned_pairs.add((normalized.get("project_id"), normalized.get("partida_codigo")))
 
-    legacy_query = query.copy()
-    if normalized_year:
-        legacy_query["year"] = normalized_year
-    if normalized_month:
-        legacy_query["month"] = normalized_month
-
-    legacy_rows = await db.budgets.find(legacy_query, {"_id": 0}).to_list(5000)
     grouped = {}
     for row in legacy_rows:
-        pair = (row.get("project_id"), row.get("partida_codigo"))
-        if pair in planned_pairs:
+        if normalized_year and row.get("year") != normalized_year:
             continue
-        company_id = project_company_map.get(row.get("project_id"))
-        if not company_id or not has_company_access(current_user, company_id):
+        if normalized_month and row.get("month") != normalized_month:
+            continue
+
+        if not _budget_row_in_scope(
+            row,
+            project_selector=project_selector,
+            project_ids=set(project_ids),
+            project_map=project_map,
+            scoped_company_ids=scoped_company_ids,
+            require_partida_for_project=project_selector != "all",
+        ):
+            continue
+
+        row_partida = _normalize_partida_codigo(row.get("partida_codigo"))
+        if partida_codigo and row_partida != partida_codigo:
+            continue
+
+        pair = (row.get("project_id"), row_partida)
+        if pair in planned_pairs:
             continue
         key = pair if (not normalized_year or not normalized_month) else (pair[0], pair[1], normalized_year, normalized_month)
         entry = grouped.setdefault(key, {
             "id": row.get("id"),
             "project_id": row.get("project_id"),
-            "partida_codigo": row.get("partida_codigo"),
+            "partida_codigo": row_partida,
             "notes": row.get("notes"),
             "approval_status": "legacy",
             "source": "legacy",
@@ -5117,6 +5139,60 @@ def _normalize_dashboard_selector(value: Optional[str]) -> str:
     return normalized
 
 
+def _normalize_partida_codigo(value: Any) -> Optional[str]:
+    raw = str(value or "").strip()
+    return raw or None
+
+
+def _budget_row_in_scope(
+    row: dict,
+    *,
+    project_selector: str,
+    project_ids: set[str],
+    project_map: Dict[str, dict],
+    scoped_company_ids: set[str],
+    require_partida_for_project: bool,
+) -> bool:
+    project_id_raw = row.get("project_id")
+    project_id = str(project_id_raw).strip() if project_id_raw not in (None, "") else None
+    partida_codigo = _normalize_partida_codigo(row.get("partida_codigo"))
+
+    if project_id:
+        if project_id not in project_ids or project_id not in project_map:
+            return False
+        if project_selector != "all" and project_id != project_selector:
+            return False
+        if require_partida_for_project and not partida_codigo:
+            return False
+        return True
+
+    if project_selector != "all":
+        return False
+
+    company_id_raw = row.get("company_id") or row.get("empresa_id")
+    company_id = str(company_id_raw).strip() if company_id_raw not in (None, "") else None
+    if not company_id:
+        return False
+    return company_id in scoped_company_ids
+
+
+async def _fetch_budget_rows_for_scope(
+    *,
+    project_ids: List[str],
+    include_global: bool,
+) -> Tuple[List[dict], List[dict]]:
+    plan_rows = await db.budget_plans.find({"project_id": {"$in": project_ids}}, {"_id": 0}).to_list(10000)
+    legacy_rows = await db.budgets.find({"project_id": {"$in": project_ids}}, {"_id": 0}).to_list(15000)
+
+    if include_global:
+        global_plan_rows = await db.budget_plans.find({"project_id": None}, {"_id": 0}).to_list(3000)
+        global_legacy_rows = await db.budgets.find({"project_id": None}, {"_id": 0}).to_list(5000)
+        plan_rows.extend(global_plan_rows)
+        legacy_rows.extend(global_legacy_rows)
+
+    return plan_rows, legacy_rows
+
+
 def _normalize_dashboard_period_filters(period: Optional[str], month: Optional[int], quarter: Optional[int]) -> Tuple[str, Optional[int], Optional[int]]:
     normalized_period = str(period or "all").strip().lower()
     if normalized_period in {"todo", "todos", "todas"}:
@@ -5731,6 +5807,7 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     )
 
     project_ids = [str(p.get("id")) for p in projects if p.get("id")]
+    project_id_set = set(project_ids)
     if not project_ids:
         y, r = await get_dashboard_thresholds()
         return {
@@ -5825,7 +5902,8 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     company_ids = sorted({str(p.get("empresa_id")) for p in projects if p.get("empresa_id")})
     empresa_docs = await db.empresas.find({"id": {"$in": company_ids}}, {"_id": 0}).to_list(500)
     empresa_map = {e.get("id"): e.get("nombre") for e in empresa_docs}
-    project_map = {p.get("id"): p for p in projects}
+    project_map = {str(p.get("id")): p for p in projects if p.get("id")}
+    scoped_company_ids = {str(p.get("empresa_id")) for p in projects if p.get("empresa_id")}
 
     posted_statuses = [MovementStatus.POSTED.value]
     if include_pending:
@@ -5839,16 +5917,30 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
 
     by_partida: Dict[str, Dict[str, Decimal]] = {}
 
-    plan_rows = await db.budget_plans.find({"project_id": {"$in": project_ids}}, {"_id": 0}).to_list(8000)
+    plan_rows, legacy_rows = await _fetch_budget_rows_for_scope(
+        project_ids=project_ids,
+        include_global=False,
+    )
+
     plan_pairs = set()
     for plan in plan_rows:
         if plan.get("approval_status") in {BudgetApprovalStatus.PENDING.value, BudgetApprovalStatus.REJECTED.value}:
-            # Convención por seguridad: no contar presupuestos pendientes/rechazados en dashboard oficial.
             continue
-        proj_id = str(plan.get("project_id"))
-        partida = str(plan.get("partida_codigo") or "N/A")
-        if not proj_id or proj_id not in project_map:
+        if not _budget_row_in_scope(
+            plan,
+            project_selector=project_selector,
+            project_ids=project_id_set,
+            project_map=project_map,
+            scoped_company_ids=scoped_company_ids,
+            require_partida_for_project=project_selector != "all",
+        ):
             continue
+        partida = _normalize_partida_codigo(plan.get("partida_codigo"))
+        if not partida:
+            continue
+
+        proj_id_raw = plan.get("project_id")
+        proj_id = str(proj_id_raw).strip() if proj_id_raw not in (None, "") else None
         plan_pairs.add((proj_id, partida))
         total_amount = _to_period_decimal(plan.get("total_amount", 0))
         annual_map = plan.get("annual_breakdown") or {}
@@ -5881,21 +5973,38 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
         row = by_partida.setdefault(partida, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
         row["presupuesto"] += amount
 
-    legacy_query = {"project_id": {"$in": project_ids}, "year": selected_year}
-    if normalized_period == "month":
-        legacy_query["month"] = month
-    elif normalized_period == "quarter":
-        legacy_query["month"] = {"$in": [int(k[-2:]) for k in month_keys]}
-    else:
-        legacy_query["month"] = {"$in": list(range(1, 13))}
-    legacy_rows = await db.budgets.find(legacy_query, {"_id": 0}).to_list(12000)
     for row_doc in legacy_rows:
-        proj_id = str(row_doc.get("project_id") or "")
-        partida = str(row_doc.get("partida_codigo") or "N/A")
+        if row_doc.get("year") != selected_year:
+            continue
+        if normalized_period == "month" and row_doc.get("month") != month:
+            continue
+        if normalized_period == "quarter" and row_doc.get("month") not in quarter_months:
+            continue
+        if normalized_period in {"all", "year"} and row_doc.get("month") not in list(range(1, 13)):
+            continue
+
+        if not _budget_row_in_scope(
+            row_doc,
+            project_selector=project_selector,
+            project_ids=project_id_set,
+            project_map=project_map,
+            scoped_company_ids=scoped_company_ids,
+            require_partida_for_project=project_selector != "all",
+        ):
+            continue
+
+        partida = _normalize_partida_codigo(row_doc.get("partida_codigo"))
+        if not partida:
+            continue
+
+        proj_id_raw = row_doc.get("project_id")
+        proj_id = str(proj_id_raw).strip() if proj_id_raw not in (None, "") else None
         if (proj_id, partida) in plan_pairs:
             continue
         row = by_partida.setdefault(partida, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
         row["presupuesto"] += _to_period_decimal(row_doc.get("amount_mxn", 0))
+
+    quarter_months = [int(k[-2:]) for k in month_keys] if normalized_period == "quarter" else []
 
     movements_in_period = []
     for mv in movement_rows:
@@ -5904,7 +6013,9 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             continue
         if _match_dashboard_period(to_tijuana(mv_date), normalized_period, selected_year, month, quarter):
             movements_in_period.append(mv)
-            partida = str(mv.get("partida_codigo") or mv.get("partida_id") or "N/A")
+            partida = _normalize_partida_codigo(mv.get("partida_codigo") or mv.get("partida_id"))
+            if not partida:
+                continue
             row = by_partida.setdefault(partida, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
             row["ejecutado"] += _dashboard_abs_amount(mv.get("amount_mxn", 0))
 
@@ -5959,51 +6070,6 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
 
     pending_total = sum((_to_period_decimal(m.get("amount_mxn", 0)) for m in pending_in_period), Decimal("0.00"))
 
-    budget_control_codes = set(BUDGET_CONTROL_CODES)
-    committed_by_partida: Dict[str, Decimal] = {}
-
-    for code, values in by_partida.items():
-        budget = money_dec(values.get("presupuesto") or 0)
-        real = money_dec(values.get("ejecutado") or 0)
-        if _is_ingresos_code(code):
-            continue
-        if budget != 0 or real != 0:
-            budget_control_codes.add(code)
-            committed_by_partida.setdefault(code, Decimal("0.00"))
-
-    po_query = {
-        "project_id": {"$in": project_ids},
-        "status": {"$in": [PurchaseOrderStatus.PENDING_APPROVAL.value, PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value]},
-    }
-    purchase_orders = await db.purchase_orders.find(po_query, {"_id": 0}).to_list(10000)
-    for po in purchase_orders:
-        po_date = _parse_any_date(po.get("planned_date") or po.get("due_date") or po.get("order_date") or po.get("created_at"))
-        if po_date and not _match_dashboard_period(to_tijuana(po_date), normalized_period, selected_year, month, quarter):
-            continue
-        po_total = money_dec(po.get("total_mxn") or po.get("total") or 0)
-        approved_amount_total = money_dec(po.get("approved_amount_total") or 0)
-        pending_amount = money_dec(po.get("pending_amount") or (po_total - approved_amount_total))
-        if pending_amount <= 0:
-            continue
-        lines = po.get("lines") or []
-        line_total_sum = Decimal("0.00")
-        line_amounts = []
-        for line in lines:
-            partida = str(line.get("partida_codigo") or "")
-            line_total = money_dec(line.get("line_total") or 0)
-            line_amount_mxn = line_total if po.get("currency") == Currency.MXN.value else (line_total * money_dec(po.get("exchange_rate") or 1)).quantize(TWO_DECIMALS)
-            line_amounts.append((partida, line_amount_mxn))
-            line_total_sum += line_amount_mxn
-        if line_total_sum <= 0:
-            continue
-        ratio = (pending_amount / line_total_sum)
-        for partida, line_amount in line_amounts:
-            if _is_ingresos_code(partida):
-                continue
-            budget_control_codes.add(partida)
-            committed_by_partida.setdefault(partida, Decimal("0.00"))
-            committed_by_partida[partida] = (committed_by_partida.get(partida, Decimal("0.00")) + (line_amount * ratio)).quantize(TWO_DECIMALS)
-
     budget_control_rows = []
     bc_totals = {
         "budget": Decimal("0.00"),
@@ -6014,39 +6080,91 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
     red_count = 0
     yellow_count = 0
     overrun_count = 0
-    for code in sorted(budget_control_codes):
-        values = by_partida.get(code, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
-        budget = money_dec(values.get("presupuesto") or 0)
-        real = money_dec(values.get("ejecutado") or 0)
-        committed = money_dec(committed_by_partida.get(code) or 0)
-        available = (budget - real - committed).quantize(TWO_DECIMALS)
-        signal = _budget_control_signal(budget, real, committed)
-        traffic_light = signal["traffic_light"]
-        advance_pct = signal["advance_pct"]
-        if traffic_light == "red":
-            red_count += 1
-        elif traffic_light == "yellow":
-            yellow_count += 1
-        if budget > 0 and real > budget:
-            overrun_count += 1
-        if budget == 0 and (real > 0 or committed > 0):
-            overrun_count += 1
-        part = partida_map.get(code, {})
-        budget_control_rows.append({
-            "code": code,
-            "name": part.get("nombre", code),
-            "group": _derive_partida_group(code, partida_map),
-            "budget": _dashboard_decimal_to_float(budget),
-            "real": _dashboard_decimal_to_float(real),
-            "committed": _dashboard_decimal_to_float(committed),
-            "available": _dashboard_decimal_to_float(available),
-            "advance_pct": _dashboard_decimal_to_float(advance_pct) if advance_pct is not None else None,
-            "traffic_light": traffic_light,
-        })
-        bc_totals["budget"] += budget
-        bc_totals["real"] += real
-        bc_totals["committed"] += committed
-        bc_totals["available"] += available
+    budget_control_empty_reason = None
+    purchase_orders = []
+
+    try:
+        budget_control_codes = set(BUDGET_CONTROL_CODES)
+        committed_by_partida: Dict[str, Decimal] = {}
+
+        for code, values in by_partida.items():
+            budget = money_dec(values.get("presupuesto") or 0)
+            real = money_dec(values.get("ejecutado") or 0)
+            if _is_ingresos_code(code):
+                continue
+            if budget != 0 or real != 0:
+                budget_control_codes.add(code)
+                committed_by_partida.setdefault(code, Decimal("0.00"))
+
+        po_query = {
+            "project_id": {"$in": project_ids},
+            "status": {"$in": [PurchaseOrderStatus.PENDING_APPROVAL.value, PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value]},
+        }
+        purchase_orders = await db.purchase_orders.find(po_query, {"_id": 0}).to_list(10000)
+        for po in purchase_orders:
+            po_date = _parse_any_date(po.get("planned_date") or po.get("due_date") or po.get("order_date") or po.get("created_at"))
+            if po_date and not _match_dashboard_period(to_tijuana(po_date), normalized_period, selected_year, month, quarter):
+                continue
+            po_total = money_dec(po.get("total_mxn") or po.get("total") or 0)
+            approved_amount_total = money_dec(po.get("approved_amount_total") or 0)
+            pending_amount = money_dec(po.get("pending_amount") or (po_total - approved_amount_total))
+            if pending_amount <= 0:
+                continue
+            lines = po.get("lines") or []
+            line_total_sum = Decimal("0.00")
+            line_amounts = []
+            for line in lines:
+                partida = str(line.get("partida_codigo") or "")
+                line_total = money_dec(line.get("line_total") or 0)
+                line_amount_mxn = line_total if po.get("currency") == Currency.MXN.value else (line_total * money_dec(po.get("exchange_rate") or 1)).quantize(TWO_DECIMALS)
+                line_amounts.append((partida, line_amount_mxn))
+                line_total_sum += line_amount_mxn
+            if line_total_sum <= 0:
+                continue
+            ratio = (pending_amount / line_total_sum)
+            for partida, line_amount in line_amounts:
+                if _is_ingresos_code(partida):
+                    continue
+                budget_control_codes.add(partida)
+                committed_by_partida.setdefault(partida, Decimal("0.00"))
+                committed_by_partida[partida] = (committed_by_partida.get(partida, Decimal("0.00")) + (line_amount * ratio)).quantize(TWO_DECIMALS)
+
+        for code in sorted(budget_control_codes):
+            values = by_partida.get(code, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
+            budget = money_dec(values.get("presupuesto") or 0)
+            real = money_dec(values.get("ejecutado") or 0)
+            committed = money_dec(committed_by_partida.get(code) or 0)
+            available = (budget - real - committed).quantize(TWO_DECIMALS)
+            signal = _budget_control_signal(budget, real, committed)
+            traffic_light = signal["traffic_light"]
+            advance_pct = signal["advance_pct"]
+            if traffic_light == "red":
+                red_count += 1
+            elif traffic_light == "yellow":
+                yellow_count += 1
+            if budget > 0 and real > budget:
+                overrun_count += 1
+            if budget == 0 and (real > 0 or committed > 0):
+                overrun_count += 1
+            part = partida_map.get(code, {})
+            budget_control_rows.append({
+                "code": code,
+                "name": part.get("nombre", code),
+                "group": _derive_partida_group(code, partida_map),
+                "budget": _dashboard_decimal_to_float(budget),
+                "real": _dashboard_decimal_to_float(real),
+                "committed": _dashboard_decimal_to_float(committed),
+                "available": _dashboard_decimal_to_float(available),
+                "advance_pct": _dashboard_decimal_to_float(advance_pct) if advance_pct is not None else None,
+                "traffic_light": traffic_light,
+            })
+            bc_totals["budget"] += budget
+            bc_totals["real"] += real
+            bc_totals["committed"] += committed
+            bc_totals["available"] += available
+    except Exception:
+        logger.error("dashboard_budget_control_error", exc_info=True)
+        budget_control_empty_reason = "Error al calcular control presupuestal. Ver logs."
 
     company_name = "Todas" if company_selector == "all" else empresa_map.get(company_selector, company_selector)
     if project_selector == "all":
@@ -6056,23 +6174,61 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
 
     income_total = ingreso_405
     corrida = _build_corrida_rows(detail, income_total)
-    pl_rows = _build_pl_rows(by_partida, partida_map, ingreso_405)
-    financial_projection = _build_financial_projection(
-        period=normalized_period,
-        selected_year=selected_year,
-        selected_month=month,
-        selected_quarter=quarter,
-        ingreso_405_total=ingreso_405,
-        movement_rows=movement_rows,
-        budget_control_rows=budget_control_rows,
-        purchase_orders=purchase_orders,
-        inventory_items=inventory_items,
-        budget_plan_rows=plan_rows,
-    )
-    subtotals = {row.get("name"): row for row in pl_rows if row.get("row_type") == "subtotal"}
+
+    pnl_empty_reason = None
+    try:
+        pl_rows = _build_pl_rows(by_partida, partida_map, ingreso_405)
+        subtotals = {row.get("name"): row for row in pl_rows if row.get("row_type") == "subtotal"}
+    except Exception:
+        logger.error("dashboard_pnl_error", exc_info=True)
+        pnl_empty_reason = "Error al calcular P&L. Ver logs."
+        pl_rows = []
+        subtotals = {}
+
+    projection_empty_reason = None
+    try:
+        financial_projection = _build_financial_projection(
+            period=normalized_period,
+            selected_year=selected_year,
+            selected_month=month,
+            selected_quarter=quarter,
+            ingreso_405_total=ingreso_405,
+            movement_rows=movement_rows,
+            budget_control_rows=budget_control_rows,
+            purchase_orders=purchase_orders,
+            inventory_items=inventory_items,
+            budget_plan_rows=plan_rows,
+        )
+    except Exception:
+        logger.error("dashboard_financial_projection_error", exc_info=True)
+        projection_empty_reason = "Error al calcular proyección financiera. Ver logs."
+        financial_projection = {"empty_reason": projection_empty_reason, "rows": [], "kpis": {}, "metadata": {"periodicity": normalized_period, "row_count": 0}, "assumptions": [], "source_details": {}}
+
 
     por_ejercer_total = (total_budget - total_exec).quantize(TWO_DECIMALS)
     ejecucion_vs_ingreso_pct = _dashboard_safe_pct(total_exec, ingreso_405)
+
+    shared_kpis_empty_reason = None
+    try:
+        shared_kpis_payload = {
+            "ingreso_proyectado_405": _dashboard_decimal_to_float(ingreso_405) if has_income_base else None,
+            "presupuesto_total": _dashboard_decimal_to_float(total_budget),
+            "real_ejecutado": _dashboard_decimal_to_float(total_exec),
+            "por_ejercer": _dashboard_decimal_to_float(por_ejercer_total),
+            "ejecucion_vs_ingreso_pct": _dashboard_decimal_to_float(ejecucion_vs_ingreso_pct) if ejecucion_vs_ingreso_pct is not None else None,
+            "empty_reason": None,
+        }
+    except Exception:
+        logger.error("dashboard_shared_kpis_error", exc_info=True)
+        shared_kpis_empty_reason = "Error al calcular KPIs compartidos. Ver logs."
+        shared_kpis_payload = {
+            "ingreso_proyectado_405": None,
+            "presupuesto_total": None,
+            "real_ejecutado": None,
+            "por_ejercer": None,
+            "ejecucion_vs_ingreso_pct": None,
+            "empty_reason": shared_kpis_empty_reason,
+        }
 
     return {
         "filtros": {
@@ -6108,23 +6264,18 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
             "variation": _dashboard_decimal_to_float(total_signal["variacion"]),
             "percentage": _dashboard_decimal_to_float(total_signal["porcentaje"]) if total_signal["porcentaje"] is not None else None,
         },
-        "shared_kpis": {
-            "ingreso_proyectado_405": _dashboard_decimal_to_float(ingreso_405) if has_income_base else None,
-            "presupuesto_total": _dashboard_decimal_to_float(total_budget),
-            "real_ejecutado": _dashboard_decimal_to_float(total_exec),
-            "por_ejercer": _dashboard_decimal_to_float(por_ejercer_total),
-            "ejecucion_vs_ingreso_pct": _dashboard_decimal_to_float(ejecucion_vs_ingreso_pct) if ejecucion_vs_ingreso_pct is not None else None,
-        },
+        "shared_kpis": shared_kpis_payload,
         "pending": {
             "count": len(pending_in_period),
             "total_mxn": _dashboard_decimal_to_float(pending_total.quantize(TWO_DECIMALS)),
         },
-        "by_partida": sorted(detail, key=lambda x: x.get("porcentaje", 0), reverse=True),
+        "by_partida": sorted(detail, key=lambda x: (x.get("porcentaje") if x.get("porcentaje") is not None else 0), reverse=True),
         "rows": pl_rows,
         "subtotals": subtotals,
         "pnl": {
             "rows": pl_rows,
             "subtotals": subtotals,
+            "empty_reason": pnl_empty_reason,
         },
         "budget_control": {
             "summary": {
@@ -6141,10 +6292,16 @@ async def _dashboard_summary_data(current_user: dict, empresa_id: Optional[str],
                 "committed": _dashboard_decimal_to_float(bc_totals["committed"]),
                 "available": _dashboard_decimal_to_float(bc_totals["available"]),
             },
+            "empty_reason": budget_control_empty_reason,
         },
         "by_project": [],
         "corrida": corrida,
-        "financial_projection": financial_projection,
+        "financial_projection": {
+            **(financial_projection or {}),
+            "empty_reason": projection_empty_reason or (financial_projection or {}).get("empty_reason"),
+            "rows": (financial_projection or {}).get("rows", []),
+            "kpis": (financial_projection or {}).get("kpis", {}),
+        },
         "pending_authorizations": await db.authorizations.count_documents({"status": "pending"}),
         "movements_count": len(movements_in_period),
         "include_pending": include_pending,
