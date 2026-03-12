@@ -89,3 +89,11 @@ def test_subtotal_labels_are_executive_friendly():
     assert rows["SUBTOTAL_GROSS"]["name"] == "Utilidad Bruta"
     assert rows["SUBTOTAL_OPERATING"]["name"] == "Utilidad Operativa"
     assert rows["SUBTOTAL_PRE_TAX"]["name"] == "Utilidad Antes de Impuestos"
+
+
+def test_pl_rows_expose_stable_row_keys_for_income_and_subtotals():
+    rows = _rows_by_code(_build_pl_rows({"405": {"presupuesto": Decimal("1000"), "ejecutado": Decimal("100")}}, {}, Decimal("1000")))
+    assert rows["405"]["row_key"] == "income"
+    assert rows["SUBTOTAL_GROSS"]["row_key"] == "gross_profit"
+    assert rows["SUBTOTAL_OPERATING"]["row_key"] == "operating_profit"
+    assert rows["SUBTOTAL_PRE_TAX"]["row_key"] == "pre_tax_profit"

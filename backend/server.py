@@ -5743,6 +5743,7 @@ def _build_pl_rows(by_partida: Dict[str, Dict[str, Decimal]], partida_map: Dict[
             "income_pct": _dashboard_decimal_to_float(pct) if pct is not None else None,
             "traffic_light": _expense_traffic_light(budget, real),
             "row_type": "partida",
+            "row_key": f"partida_{code}",
         }
 
     income_values = by_partida.get(PL_INCOME_CODE, {"presupuesto": Decimal("0.00"), "ejecutado": Decimal("0.00")})
@@ -5758,6 +5759,7 @@ def _build_pl_rows(by_partida: Dict[str, Dict[str, Decimal]], partida_map: Dict[
         "income_pct": _dashboard_decimal_to_float(Decimal("100.00")) if income_budget > 0 else None,
         "traffic_light": _utility_traffic_light(income_budget, income_real),
         "row_type": "income",
+        "row_key": "income",
     })
 
     for code in PL_DIRECT_COST_CODES:
@@ -5778,6 +5780,7 @@ def _build_pl_rows(by_partida: Dict[str, Dict[str, Decimal]], partida_map: Dict[
         "income_pct": _dashboard_decimal_to_float(gross_pct) if gross_pct is not None else None,
         "traffic_light": _utility_traffic_light(gross_budget, gross_real),
         "row_type": "subtotal",
+        "row_key": "gross_profit",
     })
 
     for code in PL_SELLING_ADMIN_CODES:
@@ -5797,6 +5800,7 @@ def _build_pl_rows(by_partida: Dict[str, Dict[str, Decimal]], partida_map: Dict[
         "income_pct": _dashboard_decimal_to_float(op_pct) if op_pct is not None else None,
         "traffic_light": _utility_traffic_light(op_budget, op_real),
         "row_type": "subtotal",
+        "row_key": "operating_profit",
     })
 
     for code in PL_FINANCIAL_CODES:
@@ -5816,6 +5820,7 @@ def _build_pl_rows(by_partida: Dict[str, Dict[str, Decimal]], partida_map: Dict[
         "income_pct": _dashboard_decimal_to_float(pbt_pct) if pbt_pct is not None else None,
         "traffic_light": _utility_traffic_light(pbt_budget, pbt_real),
         "row_type": "subtotal",
+        "row_key": "pre_tax_profit",
     })
     return rows
 
