@@ -33,7 +33,7 @@ def test_build_financial_projection_generates_rows_and_funding():
     assert projection["kpis"]["projected_income_remaining"] == 700.0
     assert projection["kpis"]["pending_expense_remaining"] == 600.0
     assert projection["kpis"]["max_funding_need"] >= 0
-    assert projection["source_details"]["income_405_policy"] == "sum(inventory_items.precio_total)"
+    assert projection["source_details"]["income_405_policy"] == "budget_plan partida 405"
 
 
 def test_build_financial_projection_uses_base_scenario_without_dates():
