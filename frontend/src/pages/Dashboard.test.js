@@ -18,7 +18,18 @@ const baseDashboardPayload = {
   filtros: { period_label: "2026-01", empresa_nombre: "Empresa", project_nombre: "Proyecto" },
   totals: { ingreso_proyectado_405: 1000, presupuesto_total: 500, ejecutado_total: 200, por_ejercer_total: 300, traffic_light: "green", ejecucion_vs_ingreso_pct: 20 },
   meta: { income_source: "inventory_total", income_source_label: "Inventario total", income_source_available_flags: { inventory_total: true } },
-  shared_kpis: { ingreso_proyectado_405: 1000, presupuesto_total: 500, real_ejecutado: 200, por_ejercer: 300, ejecucion_vs_ingreso_pct: 20 },
+  shared_kpis: {
+    ingreso_proyectado_405: 1000,
+    presupuesto_total: 500,
+    real_ejecutado: 200,
+    por_ejercer: 300,
+    ejecucion_vs_ingreso_pct: 20,
+    utility_expected: {
+      gross: { amount: 900, income_pct: 90 },
+      operating: { amount: 800, income_pct: 80 },
+      pre_tax: { amount: 750, income_pct: 75 },
+    },
+  },
   pnl: {
     rows: [
       { code: "101", name: "TERRENO", budget: 100, real: 50, remaining: 50, income_pct: 5, traffic_light: "green", row_type: "partida" },
@@ -77,7 +88,10 @@ describe("Dashboard", () => {
     expect(screen.getByRole("tab", { name: "P&L" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Control Presupuestal" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Proyección Financiera" })).toBeInTheDocument();
+    expect(screen.getByText(/Utilidad Bruta Esperada/i)).toBeInTheDocument();
+    expect(screen.getByText(/90.00% s\/ ingreso/i)).toBeInTheDocument();
     expect(screen.getByTestId("pl-table")).toBeInTheDocument();
+    expect(screen.getByText("Pendiente")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("tab", { name: "Control Presupuestal" }));
     expect(screen.getByTestId("budget-control-table")).toBeInTheDocument();

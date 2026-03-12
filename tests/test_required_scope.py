@@ -597,10 +597,25 @@ def test_reports_dashboard_pl_uses_inventory_405_and_subtotals():
     assert row101["remaining"] == 200.0
     assert row101["traffic_light"] == "green"
 
-    gross = next(x for x in rows if x["name"] == "UTILIDAD BRUTA")
-    assert gross["real"] == 100700.0
-    pbt = next(x for x in rows if x["name"] == "UTILIDAD ANTES DE IMPUESTOS")
-    assert pbt["real"] == 100550.0
+    income = next(x for x in rows if x["code"] == "405")
+    assert income["row_key"] == "income"
+    assert income["budget"] == 101500.0
+
+    gross = next(x for x in rows if x["code"] == "SUBTOTAL_GROSS")
+    assert gross["row_key"] == "gross_profit"
+    assert gross["budget"] == 100500.0
+    assert gross["real"] == 800.0
+    assert gross["remaining"] == 99700.0
+
+    operating = next(x for x in rows if x["code"] == "SUBTOTAL_OPERATING")
+    assert operating["row_key"] == "operating_profit"
+    assert operating["budget"] == 100300.0
+    assert operating["real"] == 900.0
+
+    pbt = next(x for x in rows if x["code"] == "SUBTOTAL_PRE_TAX")
+    assert pbt["row_key"] == "pre_tax_profit"
+    assert pbt["budget"] == 100200.0
+    assert pbt["real"] == 950.0
 
 
 def test_reports_dashboard_pl_zero_income_pct_and_zero_budget_traffic_light():
