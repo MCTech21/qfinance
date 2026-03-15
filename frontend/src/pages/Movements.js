@@ -8,12 +8,18 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../components/ui/dialog";
 import { Badge } from "../components/ui/badge";
-import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle, Pencil, Trash2, Printer } from "lucide-react";
+import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle, Pencil, Trash2, Printer, ChevronDown } from "lucide-react";
 import { buildYearOptions } from "../lib/yearRange";
 import { useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { saveAs } from "file-saver";
 import ProviderSelect from "../components/ProviderSelect";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
 
 const Movements = () => {
   const { api, user } = useAuth();
@@ -335,7 +341,12 @@ const Movements = () => {
     }
   };
 
-  const exportToExcel = async () => {
+  const getMonthName = (monthNumber) => {
+    const month = months.find((m) => String(m.value) === String(monthNumber));
+    return month?.label || String(monthNumber);
+  };
+
+  const exportToExcel = async (scope = "filtered") => {
     try {
       toast.info("Preparando exportación...");
 
@@ -344,8 +355,28 @@ const Movements = () => {
       if (filters.project_id !== "all") params.project_id = filters.project_id;
       if (filters.partida_codigo !== "all") params.partida_codigo = filters.partida_codigo;
 
+      let scopeLabel = "filtrado";
+      if (scope === "month") {
+        params.month = filters.month;
+        params.year = filters.year;
+        scopeLabel = `${getMonthName(filters.month)}_${filters.year}`;
+      } else if (scope === "year") {
+        params.year = filters.year;
+        scopeLabel = String(filters.year);
+      } else if (scope === "all") {
+        scopeLabel = "historico_completo";
+      } else {
+        params.month = filters.month;
+        params.year = filters.year;
+      }
+
       const res = await api().get("/movements", { params });
       const allMovements = res.data || [];
+
+      if (allMovements.length === 0) {
+        toast.warning("No hay movimientos para exportar con los filtros seleccionados");
+        return;
+      }
 
       toast.info(`Exportando ${allMovements.length} movimientos...`);
 
@@ -377,9 +408,10 @@ const Movements = () => {
       XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
 
       const today = new Date().toISOString().split("T")[0];
-      const fileName = filters.project_id !== "all"
-        ? `movimientos_${getProjectName(filters.project_id)}_${today}.xlsx`
-        : `movimientos_todos_${today}.xlsx`;
+      const projectName = filters.project_id !== "all"
+        ? getProjectName(filters.project_id).replace(/[^a-zA-Z0-9]/g, "_")
+        : "todos";
+      const fileName = `movimientos_${projectName}_${scopeLabel}_${today}.xlsx`;
 
       const buffer = XLSX.write(wb, { type: "array", bookType: "xlsx" });
       saveAs(
@@ -613,10 +645,26 @@ const Movements = () => {
             </DialogContent>
           </Dialog>
           
-          <Button variant="outline" onClick={exportToExcel}>
-            <FileSpreadsheet className="h-4 w-4 mr-2" />
-            Exportar Excel
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline">
+                <FileSpreadsheet className="h-4 w-4 mr-2" />
+                Exportar Excel
+                <ChevronDown className="h-4 w-4 ml-2" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => exportToExcel("month")}>
+                📅 Solo mes seleccionado ({getMonthName(filters.month)} {filters.year})
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => exportToExcel("year")}>
+                📆 Todo el año {filters.year}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => exportToExcel("all")}>
+                📊 Histórico completo
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
 
           <Button data-testid="add-movement-btn" onClick={() => setDialogOpen(true)}>
             <Plus className="h-4 w-4 mr-2" />
