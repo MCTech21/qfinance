@@ -335,30 +335,63 @@ const Movements = () => {
     }
   };
 
-  const exportToExcel = () => {
-    const rows = movements.map((mov) => {
-      const project = projects.find((p) => p.id === mov.project_id);
-      const empresa = empresas.find((e) => e.id === project?.empresa_id);
-      return {
-        fecha: mov.date,
-        empresa: empresa?.nombre || project?.empresa_id || "",
-        proyecto: project ? `${project.code} - ${project.name}` : mov.project_id,
-        partida: mov.partida_codigo,
-        proveedor_cliente: mov.provider_id ? getProviderName(mov.provider_id) : (mov.customer_name || mov.client_id || ""),
-        moneda: mov.currency,
-        monto_original: mov.amount_original,
-        tipo_cambio: mov.exchange_rate,
-        monto_mxn: mov.amount_mxn,
-        referencia: mov.reference,
-        descripcion: mov.description || "",
-        estado: mov.status,
-      };
-    });
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
-    const buffer = XLSX.write(wb, { type: "array", bookType: "xlsx" });
-    saveAs(new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), `movimientos_${filters.year}_${filters.month}.xlsx`);
+  const exportToExcel = async () => {
+    try {
+      toast.info("Preparando exportación...");
+
+      const params = {};
+      if (filters.empresa_id !== "all") params.empresa_id = filters.empresa_id;
+      if (filters.project_id !== "all") params.project_id = filters.project_id;
+      if (filters.partida_codigo !== "all") params.partida_codigo = filters.partida_codigo;
+
+      const res = await api().get("/movements", { params });
+      const allMovements = res.data || [];
+
+      toast.info(`Exportando ${allMovements.length} movimientos...`);
+
+      const rows = allMovements.map((mov) => {
+        const project = projects.find((p) => p.id === mov.project_id);
+        const empresa = empresas.find((e) => e.id === project?.empresa_id);
+        return {
+          fecha: formatDate(mov.date),
+          empresa: empresa?.nombre || project?.empresa_id || "",
+          proyecto: project ? `${project.code} - ${project.name}` : mov.project_id,
+          partida: mov.partida_codigo,
+          proveedor_cliente: mov.provider_id
+            ? getProviderName(mov.provider_id)
+            : mov.provider_name_snapshot
+              ? `${mov.provider_name_snapshot} (sin catálogo)`
+              : (mov.customer_name || mov.client_id || ""),
+          moneda: mov.currency,
+          monto_original: mov.amount_original,
+          tipo_cambio: mov.exchange_rate,
+          monto_mxn: mov.amount_mxn,
+          referencia: mov.reference,
+          descripcion: mov.description || "",
+          estado: mov.status,
+        };
+      });
+
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
+
+      const today = new Date().toISOString().split("T")[0];
+      const fileName = filters.project_id !== "all"
+        ? `movimientos_${getProjectName(filters.project_id)}_${today}.xlsx`
+        : `movimientos_todos_${today}.xlsx`;
+
+      const buffer = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+      saveAs(
+        new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+        fileName,
+      );
+
+      toast.success(`${allMovements.length} movimientos exportados correctamente`);
+    } catch (error) {
+      toast.error("Error al exportar movimientos");
+      console.error(error);
+    }
   };
 
 
