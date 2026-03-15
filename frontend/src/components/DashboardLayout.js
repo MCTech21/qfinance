@@ -18,6 +18,7 @@ import {
   Users,
   Building2,
   ShoppingCart,
+  History,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Avatar, AvatarFallback } from "./ui/avatar";
@@ -57,6 +58,7 @@ const DashboardLayout = ({ children }) => {
     { path: "/budgets", icon: Wallet, label: "Presupuestos", roles: ["admin", "finanzas"] },
     { path: "/movements", icon: ArrowRightLeft, label: "Movimientos", roles: ["admin", "finanzas", "captura_ingresos"] },
     { path: "/purchase-orders", icon: ShoppingCart, label: "Órdenes de Compra", roles: ["admin", "finanzas", "director"] },
+    { path: "/purchase-orders-history", icon: History, label: "Historial OC Aprobadas", roles: ["admin", "finanzas", "director"] },
     { path: "/authorizations", icon: CheckSquare, label: "Autorizaciones", roles: ["admin", "autorizador", "director"] },
     { path: "/reports", icon: BarChart3, label: "Reportes", roles: ["admin", "finanzas", "autorizador", "solo_lectura", "captura_ingresos", "director"] },
     { path: "/clientes", icon: Users, label: "Clientes", roles: ["admin", "finanzas", "captura_ingresos"] },

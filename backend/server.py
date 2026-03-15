@@ -4044,6 +4044,70 @@ async def list_purchase_orders(status: Optional[str] = None, project_id: Optiona
     return out
 
 
+@api_router.get("/purchase-orders/approved-history")
+async def get_approved_purchase_orders_history(
+    company_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS)),
+):
+    query: Dict[str, Any] = {
+        "status": {"$in": [PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value, "partially_approved"]},
+        "approved_at": {"$ne": None},
+    }
+
+    if company_id:
+        query["company_id"] = company_id
+    if project_id:
+        query["project_id"] = project_id
+
+    if status_filter and status_filter != "all":
+        if status_filter == "approved":
+            query["status"] = PurchaseOrderStatus.APPROVED_FOR_PAYMENT.value
+        elif status_filter == "partially_approved":
+            query["status"] = "partially_approved"
+
+    if from_date:
+        query.setdefault("approved_at", {})
+        query["approved_at"]["$gte"] = parse_date_tijuana(from_date).isoformat()
+
+    if to_date:
+        query.setdefault("approved_at", {})
+        query["approved_at"]["$lte"] = parse_date_tijuana(to_date).isoformat()
+
+    pos = await db.purchase_orders.find(query, {"_id": 0}).sort("approved_at", -1).to_list(1000)
+    filtered = [po for po in pos if has_company_access(current_user, po.get("company_id"))]
+
+    user_ids = list({po.get("approved_by_user_id") for po in filtered if po.get("approved_by_user_id")})
+    users = await db.users.find({"id": {"$in": user_ids}}, {"_id": 0, "id": 1, "email": 1, "name": 1}).to_list(1000) if user_ids else []
+    user_map = {u["id"]: u for u in users}
+
+    project_ids = list({po.get("project_id") for po in filtered if po.get("project_id")})
+    projects = await db.projects.find({"id": {"$in": project_ids}}, {"_id": 0, "id": 1, "code": 1, "name": 1, "empresa_id": 1}).to_list(1000) if project_ids else []
+    project_map = {p["id"]: p for p in projects}
+
+    company_ids = list({p.get("empresa_id") for p in projects if p.get("empresa_id")})
+    empresas = await db.empresas.find({"id": {"$in": company_ids}}, {"_id": 0, "id": 1, "nombre": 1}).to_list(1000) if company_ids else []
+    empresa_map = {e["id"]: e for e in empresas}
+
+    result = []
+    for po in filtered:
+        approved_by_user = user_map.get(po.get("approved_by_user_id"), {})
+        project = project_map.get(po.get("project_id"), {})
+        empresa = empresa_map.get(project.get("empresa_id")) or empresa_map.get(po.get("company_id"), {})
+        result.append({
+            **normalize_purchase_order_response(po),
+            "approved_by_email": approved_by_user.get("email"),
+            "approved_by_name": approved_by_user.get("name"),
+            "project_code": project.get("code"),
+            "project_name": project.get("name"),
+            "empresa_nombre": empresa.get("nombre"),
+        })
+    return result
+
+
 @api_router.get("/purchase-orders/{po_id}")
 async def get_purchase_order(po_id: str, current_user: dict = Depends(require_roles(UserRole.ADMIN, UserRole.FINANZAS, UserRole.DIRECTOR))):
     po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
