@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import { toast } from "sonner";
 import { Button } from "../components/ui/button";
@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Plus, FileSpreadsheet, Trash2 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { saveAs } from "file-saver";
+import ImportInventarioCSVModal from "../components/ImportInventarioCSVModal";
 
 const initialForm = {
   company_id: "",
@@ -36,7 +37,6 @@ export default function Inventory() {
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [filters, setFilters] = useState({ company_id: "all", project_id: "all" });
   const isAdmin = user?.role === "admin";
-  const fileInputRef = useRef(null);
   const canManageInventory = isAdmin || user?.role === "finanzas";
 
   const filteredProjects = useMemo(() => {
@@ -137,23 +137,6 @@ export default function Inventory() {
     }
   };
 
-  const importCsv = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const formData = new FormData();
-    formData.append("file", file);
-    try {
-      const res = await api().post("/inventory/import-csv?dry_run=false", formData, { headers: { "Content-Type": "multipart/form-data" } });
-      toast.success(`Importación completada: ${res.data.created_count} creados, ${res.data.updated_count} actualizados, ${res.data.skipped_count} omitidos`);
-      if (res.data.errors?.length) toast.error(`Errores: ${res.data.errors.length}`);
-      fetchInventory();
-    } catch (error) {
-      toast.error(error?.response?.data?.detail?.message || "Error en importación CSV");
-    } finally {
-      e.target.value = "";
-    }
-  };
-
   const exportExcel = () => {
     const rows = items.map((it) => ({
       clave: `${it.lote_edificio || ""}-${it.manzana_departamento || ""}`,
@@ -184,7 +167,11 @@ export default function Inventory() {
           <p className="text-muted-foreground">Administración de inventario por proyecto</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={exportExcel}><FileSpreadsheet className="h-4 w-4 mr-2" />Exportar Excel</Button><input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={importCsv} /><Button variant="outline" onClick={() => fileInputRef.current?.click()}>Importar CSV</Button>
+          <Button variant="outline" onClick={exportExcel}><FileSpreadsheet className="h-4 w-4 mr-2" />Exportar Excel</Button>
+          <ImportInventarioCSVModal
+            onImportSuccess={() => fetchInventory()}
+            trigger={<Button variant="outline">Importar CSV</Button>}
+          />
           {canManageInventory && (
             <Dialog open={open} onOpenChange={setOpen}>
               <DialogTrigger asChild><Button onClick={openCreate}><Plus className="h-4 w-4 mr-2" />Nuevo ítem</Button></DialogTrigger>
