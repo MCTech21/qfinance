@@ -216,7 +216,7 @@ class Partida(PartidaBase):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class ProviderBase(BaseModel):
-    code: str
+    code: Optional[str] = None
     name: str
     rfc: Optional[str] = None
     is_active: bool = True
@@ -281,6 +281,8 @@ class MovementBase(BaseModel):
     project_id: str
     partida_codigo: str  # Código del catálogo (100, 101, etc.)
     provider_id: Optional[str] = None
+    provider_name_snapshot: Optional[str] = None
+    provider_rfc_snapshot: Optional[str] = None
     client_id: Optional[str] = None
     customer_name: Optional[str] = None
     date: datetime
@@ -304,6 +306,8 @@ class MovementCreate(BaseModel):
     project_id: str
     partida_codigo: str  # Código del catálogo
     provider_id: Optional[str] = None
+    provider_name_snapshot: Optional[str] = None
+    provider_rfc_snapshot: Optional[str] = None
     customer_name: Optional[str] = None
     date: str
     currency: Currency
@@ -2701,10 +2705,19 @@ async def get_providers(
 
 @api_router.post("/providers", response_model=Provider)
 async def create_provider(provider_data: ProviderBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
-    existing = await db.providers.find_one({"code": provider_data.code}, {"_id": 0})
+    provider_code = provider_data.code
+    if not provider_code or not provider_code.strip():
+        name_clean = "".join([c for c in provider_data.name.upper() if c.isalpha()])
+        name_prefix = name_clean[:3] if len(name_clean) >= 3 else name_clean.ljust(3, "X")
+        timestamp_suffix = str(int(datetime.now(timezone.utc).timestamp()))[-4:]
+        provider_code = f"{name_prefix}{timestamp_suffix}"
+    else:
+        provider_code = provider_code.strip().upper()
+
+    existing = await db.providers.find_one({"code": provider_code}, {"_id": 0})
     if existing:
-        raise HTTPException(status_code=400, detail="Proveedor con este código ya existe")
-    provider = Provider(**provider_data.model_dump())
+        raise HTTPException(status_code=400, detail=f"Proveedor con código '{provider_code}' ya existe")
+    provider = Provider(**{**provider_data.model_dump(), "code": provider_code})
     doc = provider.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
     await db.providers.insert_one(doc)
@@ -3947,6 +3960,8 @@ async def approve_purchase_order(po_id: str, current_user: dict = Depends(requir
                 "project_id": po.get("project_id"),
                 "partida_codigo": line.get("partida_codigo"),
                 "provider_id": resolved_provider_id,
+                "provider_name_snapshot": vendor_name or None,
+                "provider_rfc_snapshot": vendor_rfc or None,
                 "date": po.get("order_date"),
                 "currency": po.get("currency"),
                 "amount_original": float(money_dec(line.get("line_total", 0))),
@@ -5074,6 +5089,8 @@ async def resolve_authorization(
                 "project_id": po.get("project_id"),
                 "partida_codigo": line.get("partida_codigo"),
                 "provider_id": resolved_provider_id,
+                "provider_name_snapshot": vendor_name or None,
+                "provider_rfc_snapshot": vendor_rfc or None,
                 "date": po.get("order_date"),
                 "currency": po.get("currency"),
                 "amount_original": float(line_partial),
