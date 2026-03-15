@@ -6,6 +6,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "../components/ui/dialog";
+import ImportProveedoresCSVModal from "../components/ImportProveedoresCSVModal";
 import { Plus, Pencil, Truck, Loader2, Upload, Download } from "lucide-react";
 
 const Catalogs = () => {
@@ -66,22 +67,6 @@ const Catalogs = () => {
     window.URL.revokeObjectURL(url);
   };
 
-  const importProviders = async (evt) => {
-    const file = evt.target.files?.[0];
-    if (!file) return;
-    const data = new FormData();
-    data.append("file", file);
-    try {
-      const res = await api().post("/providers/import", data, { headers: { "Content-Type": "multipart/form-data" } });
-      toast.success(`Importación completa: ${res.data.created} creados, ${res.data.updated} actualizados`);
-      fetchProviders();
-    } catch (error) {
-      toast.error(error.response?.data?.detail || "Error al importar");
-    } finally {
-      evt.target.value = "";
-    }
-  };
-
   return (
     <div className="space-y-6" data-testid="catalogs-page">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
@@ -92,10 +77,10 @@ const Catalogs = () => {
         <div className="flex gap-2">
           <Button variant="outline" onClick={() => exportProviders("csv")}><Download className="h-4 w-4 mr-2" />Export CSV</Button>
           <Button variant="outline" onClick={() => exportProviders("xlsx")}><Download className="h-4 w-4 mr-2" />Export XLSX</Button>
-          <label className="inline-flex items-center">
-            <input type="file" className="hidden" accept=".csv,.xlsx" onChange={importProviders} />
-            <Button variant="outline" asChild><span><Upload className="h-4 w-4 mr-2" />Importar</span></Button>
-          </label>
+          <ImportProveedoresCSVModal
+            onImportSuccess={() => fetchProviders()}
+            trigger={<Button variant="outline"><Upload className="h-4 w-4 mr-2" />Importar</Button>}
+          />
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild><Button><Plus className="h-4 w-4 mr-2" />Nuevo Proveedor</Button></DialogTrigger>
             <DialogContent>
