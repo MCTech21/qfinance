@@ -8,12 +8,18 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../components/ui/dialog";
 import { Badge } from "../components/ui/badge";
-import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle, Pencil, Trash2, Printer } from "lucide-react";
+import { Plus, Upload, Loader2, FileSpreadsheet, AlertCircle, CheckCircle, Pencil, Trash2, Printer, ChevronDown } from "lucide-react";
 import { buildYearOptions } from "../lib/yearRange";
 import { useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { saveAs } from "file-saver";
 import ProviderSelect from "../components/ProviderSelect";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
 
 const Movements = () => {
   const { api, user } = useAuth();
@@ -335,30 +341,89 @@ const Movements = () => {
     }
   };
 
-  const exportToExcel = () => {
-    const rows = movements.map((mov) => {
-      const project = projects.find((p) => p.id === mov.project_id);
-      const empresa = empresas.find((e) => e.id === project?.empresa_id);
-      return {
-        fecha: mov.date,
-        empresa: empresa?.nombre || project?.empresa_id || "",
-        proyecto: project ? `${project.code} - ${project.name}` : mov.project_id,
-        partida: mov.partida_codigo,
-        proveedor_cliente: mov.provider_id ? getProviderName(mov.provider_id) : (mov.customer_name || mov.client_id || ""),
-        moneda: mov.currency,
-        monto_original: mov.amount_original,
-        tipo_cambio: mov.exchange_rate,
-        monto_mxn: mov.amount_mxn,
-        referencia: mov.reference,
-        descripcion: mov.description || "",
-        estado: mov.status,
-      };
-    });
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
-    const buffer = XLSX.write(wb, { type: "array", bookType: "xlsx" });
-    saveAs(new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), `movimientos_${filters.year}_${filters.month}.xlsx`);
+  const getMonthName = (monthNumber) => {
+    const month = months.find((m) => String(m.value) === String(monthNumber));
+    return month?.label || String(monthNumber);
+  };
+
+  const exportToExcel = async (scope = "filtered") => {
+    try {
+      toast.info("Preparando exportación...");
+
+      const params = {};
+      if (filters.empresa_id !== "all") params.empresa_id = filters.empresa_id;
+      if (filters.project_id !== "all") params.project_id = filters.project_id;
+      if (filters.partida_codigo !== "all") params.partida_codigo = filters.partida_codigo;
+
+      let scopeLabel = "filtrado";
+      if (scope === "month") {
+        params.month = filters.month;
+        params.year = filters.year;
+        scopeLabel = `${getMonthName(filters.month)}_${filters.year}`;
+      } else if (scope === "year") {
+        params.year = filters.year;
+        scopeLabel = String(filters.year);
+      } else if (scope === "all") {
+        scopeLabel = "historico_completo";
+      } else {
+        params.month = filters.month;
+        params.year = filters.year;
+      }
+
+      const res = await api().get("/movements", { params });
+      const allMovements = res.data || [];
+
+      if (allMovements.length === 0) {
+        toast.warning("No hay movimientos para exportar con los filtros seleccionados");
+        return;
+      }
+
+      toast.info(`Exportando ${allMovements.length} movimientos...`);
+
+      const rows = allMovements.map((mov) => {
+        const project = projects.find((p) => p.id === mov.project_id);
+        const empresa = empresas.find((e) => e.id === project?.empresa_id);
+        return {
+          fecha: formatDate(mov.date),
+          empresa: empresa?.nombre || project?.empresa_id || "",
+          proyecto: project ? `${project.code} - ${project.name}` : mov.project_id,
+          partida: mov.partida_codigo,
+          proveedor_cliente: mov.provider_id
+            ? getProviderName(mov.provider_id)
+            : mov.provider_name_snapshot
+              ? `${mov.provider_name_snapshot} (sin catálogo)`
+              : (mov.customer_name || mov.client_id || ""),
+          moneda: mov.currency,
+          monto_original: mov.amount_original,
+          tipo_cambio: mov.exchange_rate,
+          monto_mxn: mov.amount_mxn,
+          referencia: mov.reference,
+          descripcion: mov.description || "",
+          estado: mov.status,
+        };
+      });
+
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
+
+      const today = new Date().toISOString().split("T")[0];
+      const projectName = filters.project_id !== "all"
+        ? getProjectName(filters.project_id).replace(/[^a-zA-Z0-9]/g, "_")
+        : "todos";
+      const fileName = `movimientos_${projectName}_${scopeLabel}_${today}.xlsx`;
+
+      const buffer = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+      saveAs(
+        new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+        fileName,
+      );
+
+      toast.success(`${allMovements.length} movimientos exportados correctamente`);
+    } catch (error) {
+      toast.error("Error al exportar movimientos");
+      console.error(error);
+    }
   };
 
 
@@ -580,10 +645,26 @@ const Movements = () => {
             </DialogContent>
           </Dialog>
           
-          <Button variant="outline" onClick={exportToExcel}>
-            <FileSpreadsheet className="h-4 w-4 mr-2" />
-            Exportar Excel
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline">
+                <FileSpreadsheet className="h-4 w-4 mr-2" />
+                Exportar Excel
+                <ChevronDown className="h-4 w-4 ml-2" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => exportToExcel("month")}>
+                📅 Solo mes seleccionado ({getMonthName(filters.month)} {filters.year})
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => exportToExcel("year")}>
+                📆 Todo el año {filters.year}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => exportToExcel("all")}>
+                📊 Histórico completo
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
 
           <Button data-testid="add-movement-btn" onClick={() => setDialogOpen(true)}>
             <Plus className="h-4 w-4 mr-2" />
