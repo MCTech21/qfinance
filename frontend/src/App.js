@@ -6,7 +6,6 @@ import Dashboard from "./pages/Dashboard";
 import Budgets from "./pages/Budgets";
 import Movements from "./pages/Movements";
 import Authorizations from "./pages/Authorizations";
-import Reports from "./pages/Reports";
 import Catalogs from "./pages/Catalogs";
 import AuditLog from "./pages/AuditLog";
 import Settings from "./pages/Settings";
@@ -125,14 +124,6 @@ function App() {
             <ProtectedRoute allowedRoles={["admin", "autorizador", "director"]}>
               <DashboardLayout>
                 <Authorizations />
-              </DashboardLayout>
-            </ProtectedRoute>
-          } />
-          
-          <Route path="/reports" element={
-            <ProtectedRoute>
-              <DashboardLayout>
-                <Reports />
               </DashboardLayout>
             </ProtectedRoute>
           } />
