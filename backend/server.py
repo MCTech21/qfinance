@@ -2684,8 +2684,6 @@ async def update_partida(partida_id: str, updates: PartidaBase, current_user: di
 async def get_providers(
     include_inactive: bool = False,
     q: Optional[str] = None,
-    limit: int = 20,
-    offset: int = 0,
     current_user: dict = Depends(require_permission(Permission.VIEW_CATALOGS)),
 ):
     query = {} if include_inactive else {"is_active": {"$ne": False}}
@@ -2697,14 +2695,9 @@ async def get_providers(
             {"rfc": {"$regex": safe_q, "$options": "i"}},
             {"code": {"$regex": safe_q, "$options": "i"}},
         ]
-    max_limit = 100
-    default_limit = 20
-    effective_limit = min(max(int(limit or default_limit), 1), max_limit)
-    safe_offset = max(int(offset or 0), 0)
     providers = await db.providers.find(query, {"_id": 0}).to_list(1000)
     providers.sort(key=lambda item: normalize_for_sort(item.get("name")))
-    sliced = providers[safe_offset:safe_offset + effective_limit]
-    return [Provider(**p) for p in sliced]
+    return [Provider(**p) for p in providers]
 
 @api_router.post("/providers", response_model=Provider)
 async def create_provider(provider_data: ProviderBase, current_user: dict = Depends(require_permission(Permission.MANAGE_CATALOGS))):
