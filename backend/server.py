@@ -4123,7 +4123,7 @@ async def get_movements(
     if status:
         query["status"] = status
     
-    movements = await db.movements.find(movement_active_query(extra=query), {"_id": 0}).to_list(5000)
+    movements = await db.movements.find(movement_active_query(extra=query), {"_id": 0}).sort("date", -1).to_list(5000)
     if year:
         validate_year_in_range(year)
     if year or month:
