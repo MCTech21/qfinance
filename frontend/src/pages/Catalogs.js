@@ -86,7 +86,7 @@ const Catalogs = () => {
             <DialogContent>
               <DialogHeader><DialogTitle>{editingItem ? "Editar" : "Nuevo"} Proveedor</DialogTitle></DialogHeader>
               <form onSubmit={handleSubmit} className="space-y-4">
-                <div className="space-y-2"><Label>Código</Label><Input value={formData.code} onChange={(e) => setFormData((p) => ({ ...p, code: e.target.value.toUpperCase() }))} required /></div>
+                <div className="space-y-2"><Label>Código</Label><Input placeholder="code (opcional - se genera automáticamente)" value={formData.code || ""} onChange={(e) => setFormData((p) => ({ ...p, code: e.target.value.toUpperCase() }))} /></div>
                 <div className="space-y-2"><Label>Nombre</Label><Input value={formData.name} onChange={(e) => setFormData((p) => ({ ...p, name: e.target.value }))} required /></div>
                 <div className="space-y-2"><Label>RFC</Label><Input value={formData.rfc} onChange={(e) => setFormData((p) => ({ ...p, rfc: e.target.value.toUpperCase() }))} /></div>
                 <DialogFooter><Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>Cancelar</Button><Button type="submit" disabled={isSaving}>{isSaving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}Guardar</Button></DialogFooter>

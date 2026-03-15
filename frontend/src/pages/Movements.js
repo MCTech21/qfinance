@@ -1070,7 +1070,20 @@ const Movements = () => {
                       <td className="font-mono text-sm">{formatDate(mov.date)}</td>
                       <td>{getProjectName(mov.project_id)}</td>
                       <td className="text-sm">{mov.partida_codigo}</td>
-                      <td className="max-w-[220px] truncate">{mov.provider_id ? getProviderName(mov.provider_id) : (mov.customer_name ? `Cliente: ${mov.customer_name}` : "N/A")}</td>
+                      <td className="max-w-[220px] truncate">
+                        {mov.provider_id ? (
+                          getProviderName(mov.provider_id)
+                        ) : mov.provider_name_snapshot ? (
+                          <span>
+                            {mov.provider_name_snapshot}
+                            <span className="text-xs text-yellow-600 ml-1">(sin catálogo)</span>
+                          </span>
+                        ) : mov.customer_name ? (
+                          `Cliente: ${mov.customer_name}`
+                        ) : (
+                          "N/A"
+                        )}
+                      </td>
                       <td className="font-mono text-sm">{mov.reference}</td>
                       <td className="mono-number">
                         {formatCurrency(mov.amount_original, mov.currency)}

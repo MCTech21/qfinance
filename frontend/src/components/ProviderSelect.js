@@ -110,14 +110,33 @@ export default function ProviderSelect({ apiClient, value, onChange, disabled = 
   };
 
   const quickCreate = async () => {
-    const name = window.prompt("Nombre del proveedor");
-    if (!name) return;
-    const code = `AUTO-${Date.now()}`;
-    const res = await apiClient().post("/providers", { code, name, rfc: "XAXX010101000", is_active: true });
-    const created = res.data || null;
-    onChange(created?.id || "", created);
-    setQ(created?.name || name);
-    setOpen(false);
+    const name = window.prompt("Nombre del proveedor:");
+    if (!name || !name.trim()) return;
+
+    const rfc = window.prompt("RFC del proveedor (opcional, presiona Enter para omitir):");
+    const rfcValue = (rfc || "").trim().toUpperCase() || null;
+
+    try {
+      const res = await apiClient().post("/providers", {
+        name: name.trim(),
+        rfc: rfcValue,
+        is_active: true,
+      });
+      const created = res.data || null;
+      onChange(created?.id || "", created);
+      setQ(created?.name || name.trim());
+      setOpen(false);
+
+      if (created?.code) {
+        setTimeout(() => {
+          alert(`Proveedor creado con código: ${created.code}
+
+Puedes editarlo después desde el catálogo de proveedores.`);
+        }, 100);
+      }
+    } catch (error) {
+      alert(`Error al crear proveedor: ${error?.response?.data?.detail || error.message}`);
+    }
   };
 
   return (
