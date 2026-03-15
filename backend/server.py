@@ -3918,11 +3918,35 @@ async def approve_purchase_order(po_id: str, current_user: dict = Depends(requir
             if existing_mv:
                 movement_ids.append(existing_mv.get("id"))
                 continue
+
+            # Resolver provider_id desde vendor_name o vendor_rfc de la OC
+            resolved_provider_id = None
+            vendor_name = (po.get("vendor_name") or "").strip()
+            vendor_rfc = (po.get("vendor_rfc") or "").strip().upper()
+
+            if vendor_rfc:
+                # Intentar buscar por RFC primero (más confiable)
+                provider = await db.providers.find_one(
+                    {"rfc": vendor_rfc, "is_active": {"$ne": False}},
+                    {"_id": 0}
+                )
+                if provider:
+                    resolved_provider_id = provider.get("id")
+
+            if not resolved_provider_id and vendor_name:
+                # Si no se encontró por RFC, buscar por nombre exacto (case insensitive)
+                provider = await db.providers.find_one(
+                    {"name": {"$regex": f"^{re.escape(vendor_name)}$", "$options": "i"}, "is_active": {"$ne": False}},
+                    {"_id": 0}
+                )
+                if provider:
+                    resolved_provider_id = provider.get("id")
+
             movement_doc = {
                 "id": str(uuid.uuid4()),
                 "project_id": po.get("project_id"),
                 "partida_codigo": line.get("partida_codigo"),
-                "provider_id": None,
+                "provider_id": resolved_provider_id,
                 "date": po.get("order_date"),
                 "currency": po.get("currency"),
                 "amount_original": float(money_dec(line.get("line_total", 0))),
@@ -4957,11 +4981,35 @@ async def resolve_authorization(
             if existing_mv:
                 created_movements.append(existing_mv.get("id"))
                 continue
+
+            # Resolver provider_id desde vendor_name o vendor_rfc de la OC
+            resolved_provider_id = None
+            vendor_name = (po.get("vendor_name") or "").strip()
+            vendor_rfc = (po.get("vendor_rfc") or "").strip().upper()
+
+            if vendor_rfc:
+                # Intentar buscar por RFC primero (más confiable)
+                provider = await db.providers.find_one(
+                    {"rfc": vendor_rfc, "is_active": {"$ne": False}},
+                    {"_id": 0}
+                )
+                if provider:
+                    resolved_provider_id = provider.get("id")
+
+            if not resolved_provider_id and vendor_name:
+                # Si no se encontró por RFC, buscar por nombre exacto (case insensitive)
+                provider = await db.providers.find_one(
+                    {"name": {"$regex": f"^{re.escape(vendor_name)}$", "$options": "i"}, "is_active": {"$ne": False}},
+                    {"_id": 0}
+                )
+                if provider:
+                    resolved_provider_id = provider.get("id")
+
             movement_doc = {
                 "id": str(uuid.uuid4()),
                 "project_id": po.get("project_id"),
                 "partida_codigo": line.get("partida_codigo"),
-                "provider_id": None,
+                "provider_id": resolved_provider_id,
                 "date": po.get("order_date"),
                 "currency": po.get("currency"),
                 "amount_original": float(line_partial),
